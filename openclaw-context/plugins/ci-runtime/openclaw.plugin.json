@@ -1,7 +1,7 @@
 {
-  "id": "umbrel-runtime",
-  "name": "Umbrel Runtime",
-  "description": "Injects compact Umbrel runtime context and provides Umbrel app guidance.",
+  "id": "ci-runtime",
+  "name": "CI Runtime",
+  "description": "Injects compact CI marketplace runtime context and provides CI app guidance.",
   "version": "1.0.0",
   "activation": {
     "onStartup": true

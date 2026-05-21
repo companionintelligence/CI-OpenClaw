@@ -1,5 +1,5 @@
 {
-  "name": "openclaw-plugin-umbrel-runtime",
+  "name": "ci-openclaw-plugin-ci-runtime",
   "version": "1.0.0",
   "private": true,
   "type": "module",

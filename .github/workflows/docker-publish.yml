@@ -5,7 +5,7 @@ on:
       - "*"
   workflow_run:
     workflows:
-      - "Tag OpenClaw Version On Merge"
+      - "Tag CI-OpenClaw Version On Merge"
     types:
       - completed
 

@@ -16,12 +16,12 @@ const ENV_FILE = path.join(CONFIG_DIR, ".env");
 const PORT = parseInt(process.env.SETUP_PORT || "18789");
 const OPENCLAW_PORT = 18790; // Internal port for OpenClaw gateway
 const SKELETON_DIR = "/home-skeleton";
-const UMBREL_PLUGIN_ID = "umbrel-runtime";
-const UMBREL_PLUGIN_PATH = "/app/openclaw-context/plugins/umbrel-runtime";
+const CI_PLUGIN_ID = "ci-runtime";
+const CI_PLUGIN_PATH = "/app/openclaw-context/plugins/ci-runtime";
 // Anti-CSWSH token for the setup terminal WebSocket. Browsers don't enforce the
 // same-origin policy on WebSocket upgrades, so without this any site could connect
 // to /api/terminal and hijack the onboarding PTY. We embed APP_SEED (per-user
-// secret from umbrelOS) in the served HTML and require it on the WS URL — the
+// secret from CI marketplace) in the served HTML and require it on the WS URL — the
 // same-origin policy prevents cross-origin pages from reading it.
 const SETUP_TOKEN = process.env.APP_SEED || "";
 
@@ -78,7 +78,7 @@ function ensureShellCompletionBypass() {
 
   fs.mkdirSync(completionDir, { recursive: true });
   if (!fs.existsSync(completionPath)) {
-    fs.writeFileSync(completionPath, "# OpenClaw tab-completion disabled in Umbrel.\n");
+    fs.writeFileSync(completionPath, "# OpenClaw tab-completion disabled in CI marketplace.\n");
   }
 
   let bashrc = "";
@@ -88,7 +88,7 @@ function ensureShellCompletionBypass() {
 
   if (!bashrc.includes("# OpenClaw Completion")) {
     // OpenClaw QuickStart auto-generates shell tab-completion when it looks
-    // unconfigured. That is not useful in Umbrel's browser terminal and can
+    // unconfigured. That is not useful in the CI app browser terminal and can
     // take ~30s. The marker plus placeholder cache makes OpenClaw skip that
     // setup step without sourcing or executing anything on shell startup.
     const prefix = bashrc && !bashrc.endsWith("\n") ? "\n" : "";
@@ -263,7 +263,7 @@ function reconcileConfig() {
 
   let changed = false;
 
-  // Ensure allowInsecureAuth is set (needed for Umbrel's auth proxy)
+  // Ensure allowInsecureAuth is set (needed for the CI app proxy)
   if (!config.gateway) config.gateway = {};
   if (!config.gateway.controlUi) config.gateway.controlUi = {};
   if (!config.gateway.controlUi.allowInsecureAuth) {
@@ -272,14 +272,14 @@ function reconcileConfig() {
     console.log("Patched config: enabled allowInsecureAuth");
   }
 
-  // Disable device auth (would break access via umbrel.local)
+  // Disable device auth (would break access in some CI proxy configurations)
   if (!config.gateway.controlUi.dangerouslyDisableDeviceAuth) {
     config.gateway.controlUi.dangerouslyDisableDeviceAuth = true;
     changed = true;
     console.log("Patched config: disabled device auth");
   }
 
-  // Disable update checks (updates are managed by Umbrel via Docker image bumps)
+  // Disable update checks (updates are managed by the CI marketplace via Docker image bumps)
   if (!config.update) config.update = {};
   if (config.update.checkOnStart !== false) {
     config.update.checkOnStart = false;
@@ -287,10 +287,10 @@ function reconcileConfig() {
     console.log("Patched config: disabled update check on start");
   }
 
-  // Enable Umbrel-managed context through OpenClaw's supported plugin surface.
-  // The plugin also ships an `umbrel` skill, so one load path covers both the
+  // Enable CI-managed context through OpenClaw's supported plugin surface.
+  // The plugin also ships a `ci` skill, so one load path covers both the
   // always-on runtime context and deeper on-demand guidance.
-  if (fs.existsSync(UMBREL_PLUGIN_PATH)) {
+  if (fs.existsSync(CI_PLUGIN_PATH)) {
     if (!config.plugins || typeof config.plugins !== "object" || Array.isArray(config.plugins)) {
       config.plugins = {};
     }
@@ -301,36 +301,36 @@ function reconcileConfig() {
     }
 
     const pluginPaths = ensureArrayPath(config, ["plugins", "load", "paths"]);
-    if (!pluginPaths.includes(UMBREL_PLUGIN_PATH)) {
-      pluginPaths.push(UMBREL_PLUGIN_PATH);
+    if (!pluginPaths.includes(CI_PLUGIN_PATH)) {
+      pluginPaths.push(CI_PLUGIN_PATH);
       changed = true;
-      console.log("Patched config: added Umbrel runtime plugin path");
+      console.log("Patched config: added CI runtime plugin path");
     }
 
-    if (Array.isArray(config.plugins.deny) && removeArrayItem(config.plugins.deny, UMBREL_PLUGIN_ID)) {
+    if (Array.isArray(config.plugins.deny) && removeArrayItem(config.plugins.deny, CI_PLUGIN_ID)) {
       changed = true;
-      console.log("Patched config: removed Umbrel runtime plugin from deny list");
+      console.log("Patched config: removed CI runtime plugin from deny list");
     }
 
     const allowedPlugins = config.plugins.allow;
-    if (Array.isArray(allowedPlugins) && allowedPlugins.length > 0 && !allowedPlugins.includes(UMBREL_PLUGIN_ID)) {
-      allowedPlugins.push(UMBREL_PLUGIN_ID);
+    if (Array.isArray(allowedPlugins) && allowedPlugins.length > 0 && !allowedPlugins.includes(CI_PLUGIN_ID)) {
+      allowedPlugins.push(CI_PLUGIN_ID);
       changed = true;
-      console.log("Patched config: added Umbrel runtime plugin to allow list");
+      console.log("Patched config: added CI runtime plugin to allow list");
     }
 
     if (!config.plugins.entries || typeof config.plugins.entries !== "object" || Array.isArray(config.plugins.entries)) {
       config.plugins.entries = {};
     }
-    const entry = config.plugins.entries[UMBREL_PLUGIN_ID] || {};
+    const entry = config.plugins.entries[CI_PLUGIN_ID] || {};
     if (entry.enabled !== true) {
       entry.enabled = true;
-      config.plugins.entries[UMBREL_PLUGIN_ID] = entry;
+      config.plugins.entries[CI_PLUGIN_ID] = entry;
       changed = true;
-      console.log("Patched config: enabled Umbrel runtime plugin");
+      console.log("Patched config: enabled CI runtime plugin");
     }
   } else {
-    console.warn(`Umbrel context: ${UMBREL_PLUGIN_PATH} not found; plugin config will be reconciled on next startup`);
+    console.warn(`CI context: ${CI_PLUGIN_PATH} not found; plugin config will be reconciled on next startup`);
   }
 
   // Ensure a gateway auth token exists — the onboard CLI does not generate one,
@@ -494,9 +494,9 @@ function proxyToOpenclaw(req, res) {
   // Rewrite headers so the gateway sees requests as local.
   // The gateway checks Origin/Host to block cross-origin requests (anti-CSRF),
   // but that's redundant here — our proxy is the only thing that can reach the
-  // gateway (it binds to 127.0.0.1 inside the container), and on Umbrel the
-  // entire app is already behind Umbrel's auth proxy.
-  // We also strip forwarding headers (X-Forwarded-For, etc.) that Umbrel's
+  // gateway (it binds to 127.0.0.1 inside the container), and on the CI marketplace the
+  // entire app is already behind the CI app proxy.
+  // We also strip forwarding headers (X-Forwarded-For, etc.) that the CI app proxy
   // reverse proxy injects — if the gateway sees these from a source not in
   // gateway.trustedProxies it treats the connection as non-local and rejects it.
   const gatewayHost = `127.0.0.1:${OPENCLAW_PORT}`;

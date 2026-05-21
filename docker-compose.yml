@@ -1,12 +1,12 @@
 services:
   openclaw:
     build: .
-    image: openclaw:latest
+    image: ci-openclaw:latest
     container_name: openclaw
     restart: unless-stopped
     init: true
     environment:
-      APP_SEED: ${APP_SEED:-dev} # Provided by umbrelOS; fallback for local dev
+      APP_SEED: ${APP_SEED:-dev} # Provided by CI marketplace; fallback for local dev
     ports:
       - "18789:18789"
     volumes:

@@ -30,9 +30,9 @@ function loadRuntimeContext() {
 }
 
 export default {
-  id: "umbrel-runtime",
-  name: "Umbrel Runtime",
-  description: "Injects compact Umbrel runtime context for OpenClaw on umbrelOS.",
+  id: "ci-runtime",
+  name: "CI Runtime",
+  description: "Injects compact CI marketplace runtime context for CI-OpenClaw.",
   register(api) {
     api.on("before_prompt_build", () => ({
       prependSystemContext: loadRuntimeContext(),

@@ -1,11 +1,11 @@
 ---
-name: umbrel
-description: Use when working with OpenClaw persistence, app updates, container behavior, networking, installing tools, or troubleshooting inside the OpenClaw app on umbrelOS.
+name: ci
+description: Use when working with OpenClaw persistence, app updates, container behavior, networking, installing tools, or troubleshooting inside the CI-OpenClaw app on the CI marketplace.
 ---
 
-# Umbrel OpenClaw Runtime
+# CI OpenClaw Runtime
 
-OpenClaw is running as an umbrelOS app inside a containerized app environment.
+OpenClaw is running as a CI marketplace app inside a containerized app environment.
 
 ## Filesystem
 
@@ -19,7 +19,7 @@ Files outside `/data` are not durable and should be treated as disposable across
 
 Do not run `openclaw update` or install a different OpenClaw version from inside the app.
 
-OpenClaw versions are managed by umbrelOS app updates and pinned Docker images.
+OpenClaw versions are managed by CI marketplace app updates and pinned Docker images.
 
 ## Package Installation
 
@@ -35,4 +35,4 @@ Chromium is installed in the app image for headless browser tasks. Use the packa
 
 `localhost` is container-local.
 
-The OpenClaw browser UI is behind the Umbrel app proxy. Services started inside the container are not automatically reachable from umbrelOS or the public network; that exposure is controlled by the Umbrel app packaging/proxy.
+The OpenClaw browser UI is behind the CI app proxy. Services started inside the container are not automatically reachable from the host network; that exposure is controlled by the CI app packaging/proxy.
