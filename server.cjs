@@ -279,6 +279,24 @@ function reconcileConfig() {
     console.log("Patched config: disabled device auth");
   }
 
+  // The CI setup proxy rewrites Host/Origin to the local gateway origin.
+  // Make sure that rewritten origin is explicitly trusted by the Control UI.
+  if (!Array.isArray(config.gateway.controlUi.allowedOrigins)) {
+    config.gateway.controlUi.allowedOrigins = [];
+    changed = true;
+  }
+  const requiredOrigins = [
+    `http://127.0.0.1:${OPENCLAW_PORT}`,
+    `http://localhost:${OPENCLAW_PORT}`,
+  ];
+  for (const origin of requiredOrigins) {
+    if (!config.gateway.controlUi.allowedOrigins.includes(origin)) {
+      config.gateway.controlUi.allowedOrigins.push(origin);
+      changed = true;
+      console.log(`Patched config: added allowed origin ${origin}`);
+    }
+  }
+
   // Disable update checks (updates are managed by the CI marketplace via Docker image bumps)
   if (!config.update) config.update = {};
   if (config.update.checkOnStart !== false) {
