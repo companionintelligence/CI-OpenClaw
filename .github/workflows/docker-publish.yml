@@ -46,6 +46,16 @@ jobs:
           set -euo pipefail
           echo "TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
 
+      - name: Set image name
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='${{ vars.IMAGE_NAME }}'
+          if [[ -z "${image}" ]]; then
+            image='ghcr.io/${{ github.repository }}'
+          fi
+          echo "IMAGE_NAME=${image,,}" >> "$GITHUB_ENV"
+
       - name: Login to GitHub Container Registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
 
@@ -56,8 +66,10 @@ jobs:
         run: docker buildx create --use
 
       - name: Run Docker buildx
+        shell: bash
         run: |
+          set -euo pipefail
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
-            --tag ghcr.io/${{ github.repository }}:${{ env.TAG }} \
+            --tag "${IMAGE_NAME}:${TAG}" \
             --push .
