@@ -10,6 +10,7 @@ This repository publishes container images with:
 The workflow runs when:
 - a git tag is pushed
 - the `Tag CI-OpenClaw Version On Merge` workflow completes successfully
+- manually via `workflow_dispatch` (requires a `tag` input)
 
 It builds multi-arch images (`linux/amd64`, `linux/arm64`) and pushes:
 - `${IMAGE_NAME}:${TAG}`
@@ -51,6 +52,11 @@ The workflow uses the default `GITHUB_TOKEN` for `docker login ghcr.io`.
 2. Watch the `Docker Build and Push` run in Actions.
 3. Verify package tags in GitHub Packages:
   - expected tags include `test-publish-1`
+
+Or run manually from GitHub Actions:
+1. Open `Actions` -> `Docker Build and Push` -> `Run workflow`
+2. Enter the `tag` input (example: `1.2.3`)
+3. Run the workflow and verify the package tag in GHCR
 
 ## Notes
 
