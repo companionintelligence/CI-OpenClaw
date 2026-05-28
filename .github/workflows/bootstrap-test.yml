@@ -1,0 +1,21 @@
+name: Bootstrap tests
+
+on:
+  workflow_call:
+  pull_request:
+    paths:
+      - bootstrap-from-hub.sh
+      - entrypoint.sh
+      - tests/**
+      - .github/workflows/bootstrap-test.yml
+  push:
+    branches:
+      - master
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run bootstrap script tests
+        run: bash tests/bootstrap-from-hub.test.sh
