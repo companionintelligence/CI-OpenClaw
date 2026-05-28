@@ -143,6 +143,38 @@ else
 fi
 rm -rf "${data_dir}" "${fixture}"
 
+# ─── Test 7: Header-driven managed keys overrides hardcoded fallback ────────
+echo "test: header X-Hub-Managed-Keys drives the managed-key list"
+data_dir="$(setup_data)"
+printf 'OPENAI_API_BASE=user-value\nNEW_HUB_KEY=user-old\n' > "${data_dir}/.env"
+# Hub response has NEW_HUB_KEY which is not in the hardcoded fallback list.
+# Header tells the script that NEW_HUB_KEY (plus OPENAI_API_BASE) are managed.
+fixture="$(write_fixture $'OPENAI_API_BASE=http://hub/v1\nNEW_HUB_KEY=hub-value\n')"
+OPENCLAW_DATA_DIR="${data_dir}" \
+BOOTSTRAP_FIXTURE_FILE="${fixture}" \
+BOOTSTRAP_FIXTURE_MANAGED_KEYS="OPENAI_API_BASE,NEW_HUB_KEY" \
+  "${SCRIPT}" >/dev/null 2>&1
+assert_contains "NEW_HUB_KEY overwritten using header-driven list" "NEW_HUB_KEY=hub-value" "${data_dir}/.env"
+assert_contains "OPENAI_API_BASE overwritten" "OPENAI_API_BASE=http://hub/v1" "${data_dir}/.env"
+assert_not_contains "stale NEW_HUB_KEY removed" "NEW_HUB_KEY=user-old" "${data_dir}/.env"
+rm -rf "${data_dir}" "${fixture}"
+
+# ─── Test 8: Missing header falls back to hardcoded list ────────────────────
+echo "test: missing header falls back to hardcoded list, NEW_HUB_KEY treated as user-set"
+data_dir="$(setup_data)"
+printf 'NEW_HUB_KEY=user-old\n' > "${data_dir}/.env"
+fixture="$(write_fixture $'OPENAI_API_BASE=http://hub/v1\nNEW_HUB_KEY=hub-value\n')"
+# No BOOTSTRAP_FIXTURE_MANAGED_KEYS — script falls back to hardcoded list
+# which doesn't include NEW_HUB_KEY, so user's NEW_HUB_KEY=user-old is preserved
+# and NEW_HUB_KEY=hub-value is dropped because it's not in the managed list.
+OPENCLAW_DATA_DIR="${data_dir}" \
+BOOTSTRAP_FIXTURE_FILE="${fixture}" \
+  "${SCRIPT}" >/dev/null 2>&1
+assert_contains "OPENAI_API_BASE in hardcoded fallback present" "OPENAI_API_BASE=http://hub/v1" "${data_dir}/.env"
+assert_contains "user NEW_HUB_KEY preserved (not in hardcoded list)" "NEW_HUB_KEY=user-old" "${data_dir}/.env"
+assert_not_contains "Hub's NEW_HUB_KEY dropped (not in hardcoded list)" "NEW_HUB_KEY=hub-value" "${data_dir}/.env"
+rm -rf "${data_dir}" "${fixture}"
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 echo
 echo "Results: ${PASS} passed, ${FAIL} failed"
