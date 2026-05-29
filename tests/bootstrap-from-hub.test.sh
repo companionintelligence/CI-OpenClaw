@@ -110,8 +110,8 @@ echo "test: unreachable Hub returns exit 0 and does not touch .env"
 data_dir="$(setup_data)"
 printf 'ANTHROPIC_API_KEY=user-secret\n' > "${data_dir}/.env"
 expected_hash="$(shasum "${data_dir}/.env" | awk '{print $1}')"
-OPENCLAW_DATA_DIR="${data_dir}" CI_HUB_URL="http://127.0.0.1:1" "${SCRIPT}" >/dev/null 2>&1
-rc=$?
+rc=0
+OPENCLAW_DATA_DIR="${data_dir}" CI_HUB_URL="http://127.0.0.1:1" "${SCRIPT}" >/dev/null 2>&1 || rc=$?
 got_hash="$(shasum "${data_dir}/.env" | awk '{print $1}')"
 assert_eq "exit code 0" "0" "${rc}"
 assert_eq ".env unchanged" "${expected_hash}" "${got_hash}"
