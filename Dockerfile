@@ -52,7 +52,9 @@ RUN printf '#!/bin/bash\necho "Error: apt is not available. Please use brew inst
 COPY --chown=node:node server.cjs /app/setup-server.cjs
 COPY --chown=node:node setup.html /app/setup.html
 COPY --chown=node:node logo.webp /app/logo.webp
+COPY --chown=node:node bootstrap-from-hub.sh entrypoint.sh /app/
 COPY openclaw-context /app/openclaw-context
+RUN sudo chmod +x /app/bootstrap-from-hub.sh /app/entrypoint.sh
 
 # Move home to skeleton
 RUN sudo mv /data /home-skeleton
@@ -61,6 +63,6 @@ RUN sudo mv /home/linuxbrew /home-skeleton/linuxbrew
 # Setup PATH
 ENV PATH="/data/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
 
-# Run the setup/proxy server
-CMD ["node", "/app/setup-server.cjs"]
+# Run the setup/proxy server through the bootstrap entrypoint
+ENTRYPOINT ["/app/entrypoint.sh"]
 EXPOSE 18789
