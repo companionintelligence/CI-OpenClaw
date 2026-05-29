@@ -13,7 +13,7 @@
 # POSIX sh — no bashisms. Runs in any /bin/sh including dash.
 #
 # Inputs:
-#   CI_HUB_URL              Hub backend URL    (default: http://ci-os-hub:3000)
+#   CI_HUB_URL              Hub backend URL    (default: http://ci-os-hub:5002)
 #   HUB_APP_SLUG            App slug           (default: openclaw)
 #   OPENCLAW_DATA_DIR       Data dir           (default: /data/.openclaw)
 #   BOOTSTRAP_FIXTURE_FILE          For tests: read body from this file
@@ -23,7 +23,7 @@
 #   $OPENCLAW_DATA_DIR/.env   merged in place
 set -eu
 
-CI_HUB_URL="${CI_HUB_URL:-http://ci-os-hub:3000}"
+CI_HUB_URL="${CI_HUB_URL:-http://ci-os-hub:5002}"
 HUB_APP_SLUG="${HUB_APP_SLUG:-openclaw}"
 DATA_DIR="${OPENCLAW_DATA_DIR:-/data/.openclaw}"
 ENV_FILE="${DATA_DIR}/.env"
