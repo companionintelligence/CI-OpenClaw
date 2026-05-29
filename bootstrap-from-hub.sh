@@ -29,9 +29,9 @@ DATA_DIR="${OPENCLAW_DATA_DIR:-/data/.openclaw}"
 ENV_FILE="${DATA_DIR}/.env"
 
 # Fallback list used when the Hub doesn't send X-Hub-Managed-Keys
-# (older Hub releases). Kept in sync with AppBootstrapService's
+# (older Hub releases). Kept in sync with AppCredentialsService's
 # OPENCLAW env keys as a last resort.
-FALLBACK_MANAGED_KEYS="OPENAI_API_BASE,OPENAI_API_KEY,DEFAULT_MODEL,DEFAULT_MODEL_BACKEND_ID,EMBEDDINGS_MODEL,EMBEDDINGS_MODEL_BACKEND_ID"
+FALLBACK_MANAGED_KEYS="OPENAI_API_BASE,OPENAI_API_KEY,DEFAULT_MODEL,EMBEDDINGS_MODEL,OLLAMA_HOST"
 
 log() {
   echo "[hub-bootstrap] $*"
@@ -46,7 +46,7 @@ fetch_bootstrap() {
     MANAGED_KEYS="${BOOTSTRAP_FIXTURE_MANAGED_KEYS:-}"
     return 0
   fi
-  url="${CI_HUB_URL}/api/inference/apps/${HUB_APP_SLUG}/bootstrap.env"
+  url="${CI_HUB_URL}/api/inference/apps/${HUB_APP_SLUG}/credentials.env"
   headers_tmp="$(mktemp)"
   if ! body="$(curl --silent --show-error --fail --max-time 5 --retry 1 --retry-delay 2 -D "${headers_tmp}" "${url}")"; then
     rm -f "${headers_tmp}"
