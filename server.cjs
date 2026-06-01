@@ -233,7 +233,13 @@ function resolveOllamaBaseUrl(env) {
 }
 
 function resolveInferenceApiKey(env) {
-  return env.OPENAI_API_KEY || process.env.OPENAI_API_KEY || "ollama";
+  return (
+    env.OPENAI_API_KEY ||
+    process.env.OPENAI_API_KEY ||
+    env.OLLAMA_API_KEY ||
+    process.env.OLLAMA_API_KEY ||
+    "ollama"
+  );
 }
 
 function getGatewayToken() {
@@ -440,7 +446,14 @@ function reconcileConfig() {
   const inferenceApiKey = resolveInferenceApiKey(env);
   const defaultModel = env.DEFAULT_MODEL || process.env.DEFAULT_MODEL || "";
 
-  config.models = config.models || {};
+  if (
+    !config.models ||
+    typeof config.models !== "object" ||
+    Array.isArray(config.models)
+  ) {
+    config.models = {};
+    changed = true;
+  }
   if (config.models.mode !== "merge") {
     config.models.mode = "merge";
     changed = true;
@@ -478,16 +491,16 @@ function reconcileConfig() {
     );
   }
 
-  config.agents = config.agents || {};
-  config.agents.defaults = config.agents.defaults || {};
-  config.agents.defaults.model = config.agents.defaults.model || {};
-  const nextPrimaryModel = defaultModel ? `ci-hub/${defaultModel}` : null;
-  if (config.agents.defaults.model.primary !== nextPrimaryModel) {
-    config.agents.defaults.model.primary = nextPrimaryModel;
-    changed = true;
-    console.log(
-      `Patched config: set default agent model to ${nextPrimaryModel ?? "null"}`,
-    );
+  if (defaultModel) {
+    config.agents = config.agents || {};
+    config.agents.defaults = config.agents.defaults || {};
+    config.agents.defaults.model = config.agents.defaults.model || {};
+    const nextPrimaryModel = `ci-hub/${defaultModel}`;
+    if (config.agents.defaults.model.primary !== nextPrimaryModel) {
+      config.agents.defaults.model.primary = nextPrimaryModel;
+      changed = true;
+      console.log(`Patched config: set default agent model to ${nextPrimaryModel}`);
+    }
   }
 
   if (changed) {
