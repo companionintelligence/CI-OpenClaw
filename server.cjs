@@ -58,7 +58,9 @@ function writeEnv(env) {
 }
 
 function writeConfig(config) {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), {
+    mode: 0o600,
+  });
 }
 
 function ensureConfigDir() {
@@ -78,7 +80,10 @@ function ensureShellCompletionBypass() {
 
   fs.mkdirSync(completionDir, { recursive: true });
   if (!fs.existsSync(completionPath)) {
-    fs.writeFileSync(completionPath, "# OpenClaw tab-completion disabled in CI marketplace.\n");
+    fs.writeFileSync(
+      completionPath,
+      "# OpenClaw tab-completion disabled in CI marketplace.\n",
+    );
   }
 
   let bashrc = "";
@@ -122,7 +127,7 @@ async function initializeHome() {
         // Exists - check if it's an empty directory
         if (entry.isDirectory() && (await isDirEmpty(destPath))) {
           console.log(
-            `${entry.name} exists but is empty, copying contents inside...`
+            `${entry.name} exists but is empty, copying contents inside...`,
           );
           await execAsync(`cp -r "${srcPath}/." "${destPath}/"`);
         } else {
@@ -180,7 +185,11 @@ function readConfig() {
 function ensureArrayPath(root, keys) {
   let current = root;
   for (const key of keys.slice(0, -1)) {
-    if (!current[key] || typeof current[key] !== "object" || Array.isArray(current[key])) {
+    if (
+      !current[key] ||
+      typeof current[key] !== "object" ||
+      Array.isArray(current[key])
+    ) {
       current[key] = {};
     }
     current = current[key];
@@ -204,12 +213,41 @@ function removeArrayItem(items, item) {
   return changed;
 }
 
+function resolveOllamaBaseUrl(env) {
+  const directHost = (env.OLLAMA_HOST || process.env.OLLAMA_HOST || "").replace(
+    /\/$/,
+    "",
+  );
+  if (directHost) return directHost;
+
+  const openAiBase = (
+    env.OPENAI_API_BASE ||
+    process.env.OPENAI_API_BASE ||
+    ""
+  ).replace(/\/$/, "");
+  if (openAiBase.endsWith("/v1")) {
+    return openAiBase.slice(0, -3);
+  }
+
+  return "http://host.docker.internal:11434";
+}
+
+function resolveInferenceApiKey(env) {
+  return env.OPENAI_API_KEY || process.env.OPENAI_API_KEY || "ollama";
+}
+
 function getGatewayToken() {
   const env = readEnv();
   if (env.OPENCLAW_GATEWAY_TOKEN) return env.OPENCLAW_GATEWAY_TOKEN;
-  if (process.env.OPENCLAW_GATEWAY_TOKEN) return process.env.OPENCLAW_GATEWAY_TOKEN;
+  if (process.env.OPENCLAW_GATEWAY_TOKEN)
+    return process.env.OPENCLAW_GATEWAY_TOKEN;
   const config = readConfig();
-  if (config && config.gateway && config.gateway.auth && config.gateway.auth.token) {
+  if (
+    config &&
+    config.gateway &&
+    config.gateway.auth &&
+    config.gateway.auth.token
+  ) {
     return config.gateway.auth.token;
   }
   return null;
@@ -260,6 +298,7 @@ function isConfigured() {
 function reconcileConfig() {
   const config = readConfig();
   if (!config) return;
+  const env = readEnv();
 
   let changed = false;
 
@@ -309,7 +348,11 @@ function reconcileConfig() {
   // The plugin also ships a `ci` skill, so one load path covers both the
   // always-on runtime context and deeper on-demand guidance.
   if (fs.existsSync(CI_PLUGIN_PATH)) {
-    if (!config.plugins || typeof config.plugins !== "object" || Array.isArray(config.plugins)) {
+    if (
+      !config.plugins ||
+      typeof config.plugins !== "object" ||
+      Array.isArray(config.plugins)
+    ) {
       config.plugins = {};
     }
     if (config.plugins.enabled !== true) {
@@ -325,19 +368,30 @@ function reconcileConfig() {
       console.log("Patched config: added CI runtime plugin path");
     }
 
-    if (Array.isArray(config.plugins.deny) && removeArrayItem(config.plugins.deny, CI_PLUGIN_ID)) {
+    if (
+      Array.isArray(config.plugins.deny) &&
+      removeArrayItem(config.plugins.deny, CI_PLUGIN_ID)
+    ) {
       changed = true;
       console.log("Patched config: removed CI runtime plugin from deny list");
     }
 
     const allowedPlugins = config.plugins.allow;
-    if (Array.isArray(allowedPlugins) && allowedPlugins.length > 0 && !allowedPlugins.includes(CI_PLUGIN_ID)) {
+    if (
+      Array.isArray(allowedPlugins) &&
+      allowedPlugins.length > 0 &&
+      !allowedPlugins.includes(CI_PLUGIN_ID)
+    ) {
       allowedPlugins.push(CI_PLUGIN_ID);
       changed = true;
       console.log("Patched config: added CI runtime plugin to allow list");
     }
 
-    if (!config.plugins.entries || typeof config.plugins.entries !== "object" || Array.isArray(config.plugins.entries)) {
+    if (
+      !config.plugins.entries ||
+      typeof config.plugins.entries !== "object" ||
+      Array.isArray(config.plugins.entries)
+    ) {
       config.plugins.entries = {};
     }
     const entry = config.plugins.entries[CI_PLUGIN_ID] || {};
@@ -348,7 +402,9 @@ function reconcileConfig() {
       console.log("Patched config: enabled CI runtime plugin");
     }
   } else {
-    console.warn(`CI context: ${CI_PLUGIN_PATH} not found; plugin config will be reconciled on next startup`);
+    console.warn(
+      `CI context: ${CI_PLUGIN_PATH} not found; plugin config will be reconciled on next startup`,
+    );
   }
 
   // Ensure a gateway auth token exists — the onboard CLI does not generate one,
@@ -368,13 +424,78 @@ function reconcileConfig() {
     console.log("Patched config: set gateway auth mode to token");
   }
 
+  // Required since a newer openclaw release: gateway refuses to start if
+  // gateway.mode is absent (exit code 78). Force "local" which is the correct
+  // mode for a CI-marketplace-managed container.
+  if (config.gateway.mode !== "local") {
+    config.gateway.mode = "local";
+    changed = true;
+    console.log("Patched config: set gateway.mode to local");
+  }
+
+  // Mirror the Hub-managed Ollama defaults into OpenClaw's current config shape.
+  // The newer gateway does not switch providers just because OPENAI_API_* is present;
+  // it needs a concrete provider entry plus an agent default model selection.
+  const ollamaBaseUrl = resolveOllamaBaseUrl(env);
+  const inferenceApiKey = resolveInferenceApiKey(env);
+  const defaultModel = env.DEFAULT_MODEL || process.env.DEFAULT_MODEL || "";
+
+  config.models = config.models || {};
+  if (config.models.mode !== "merge") {
+    config.models.mode = "merge";
+    changed = true;
+    console.log("Patched config: set model catalog mode to merge");
+  }
+  if (
+    !config.models.providers ||
+    typeof config.models.providers !== "object" ||
+    Array.isArray(config.models.providers)
+  ) {
+    config.models.providers = {};
+    changed = true;
+  }
+
+  const currentHubProvider = config.models.providers["ci-hub"] || {};
+  const nextHubProvider = {
+    ...currentHubProvider,
+    baseUrl: ollamaBaseUrl,
+    apiKey: inferenceApiKey,
+    api: "ollama",
+    models: Array.isArray(currentHubProvider.models)
+      ? currentHubProvider.models
+      : [],
+  };
+  if (
+    currentHubProvider.baseUrl !== nextHubProvider.baseUrl ||
+    currentHubProvider.apiKey !== nextHubProvider.apiKey ||
+    currentHubProvider.api !== nextHubProvider.api ||
+    !Array.isArray(currentHubProvider.models)
+  ) {
+    config.models.providers["ci-hub"] = nextHubProvider;
+    changed = true;
+    console.log(
+      `Patched config: synced ci-hub Ollama provider (${ollamaBaseUrl})`,
+    );
+  }
+
+  config.agents = config.agents || {};
+  config.agents.defaults = config.agents.defaults || {};
+  config.agents.defaults.model = config.agents.defaults.model || {};
+  const nextPrimaryModel = defaultModel ? `ci-hub/${defaultModel}` : null;
+  if (config.agents.defaults.model.primary !== nextPrimaryModel) {
+    config.agents.defaults.model.primary = nextPrimaryModel;
+    changed = true;
+    console.log(
+      `Patched config: set default agent model to ${nextPrimaryModel ?? "null"}`,
+    );
+  }
+
   if (changed) {
     writeConfig(config);
   }
 
   // Sync gateway token to .env so the proxy always has it
   const token = config.gateway.auth.token;
-  const env = readEnv();
   if (env.OPENCLAW_GATEWAY_TOKEN !== token) {
     env.OPENCLAW_GATEWAY_TOKEN = token;
     writeEnv(env);
@@ -417,7 +538,7 @@ function startOpenclaw({ repair = true } = {}) {
           ...process.env,
           ...readEnv(),
         },
-      }
+      },
     );
 
     openclawProcess.on("exit", (code) => {
@@ -498,13 +619,19 @@ function proxyToOpenclaw(req, res) {
   //   #token=… — delivers the token to the Control UI JS, which reads auth
   //              exclusively from the hash fragment, not query params
   const url = new URL(req.url, `http://${req.headers.host}`);
-  if (token && url.pathname === "/" && url.searchParams.get("token") !== token) {
+  if (
+    token &&
+    url.pathname === "/" &&
+    url.searchParams.get("token") !== token
+  ) {
     // If setup generated or repaired a token while the browser still has an
     // older dashboard URL, force the URL hash back in sync. The Control UI reads
     // auth from the hash, so a stale token there causes WebSocket auth failures
     // even though the proxy injects the current Bearer token.
     const encodedToken = encodeURIComponent(token);
-    res.writeHead(302, { Location: `/?token=${encodedToken}#token=${encodedToken}` });
+    res.writeHead(302, {
+      Location: `/?token=${encodedToken}#token=${encodedToken}`,
+    });
     res.end();
     return;
   }
@@ -546,7 +673,10 @@ function proxyToOpenclaw(req, res) {
 
   proxy.on("error", () => {
     // OpenClaw not ready yet, show loading page
-    res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
+    res.writeHead(200, {
+      "Content-Type": "text/html",
+      "Cache-Control": "no-store",
+    });
     res.end(LOADING_HTML);
   });
 
@@ -619,7 +749,10 @@ function handleUpgrade(req, socket, head) {
 const server = http.createServer((req, res) => {
   // Serve static assets for setup UI
   if (req.url === "/logo.webp") {
-    res.writeHead(200, { "Content-Type": "image/webp", "Cache-Control": "public, max-age=86400" });
+    res.writeHead(200, {
+      "Content-Type": "image/webp",
+      "Cache-Control": "public, max-age=86400",
+    });
     res.end(LOGO);
     return;
   }
@@ -668,7 +801,9 @@ wss.on("connection", (ws) => {
   // Each handler below keeps its own setupPty reference so a delayed close from
   // an old browser session cannot accidentally kill the newly active session.
   if (ptyProcess) {
-    try { ptyProcess.kill(); } catch (e) {}
+    try {
+      ptyProcess.kill();
+    } catch (e) {}
     ptyProcess = null;
   }
 
@@ -677,30 +812,37 @@ wss.on("connection", (ws) => {
   // syncs it to .env when startOpenclaw() runs after setup.
   ensureConfigDir();
   ensureShellCompletionBypass();
-  const setupPty = pty.spawn("openclaw", [
-    "onboard",
-    "--flow", "quickstart",
-    "--accept-risk",
-    "--skip-channels",
-    "--skip-skills",
-    "--skip-search",
-    "--skip-daemon",
-    "--skip-ui",
-    "--skip-health",
-    "--mode", "local",
-    "--gateway-port", OPENCLAW_PORT.toString(),
-  ], {
-    name: "xterm-256color",
-    cols: 80,
-    rows: 24,
-    cwd: CONFIG_DIR,
-    env: {
-      ...process.env,
-      ...readEnv(),
-      SHELL: "/bin/bash",
-      TERM: "xterm-256color",
+  const setupPty = pty.spawn(
+    "openclaw",
+    [
+      "onboard",
+      "--flow",
+      "quickstart",
+      "--accept-risk",
+      "--skip-channels",
+      "--skip-skills",
+      "--skip-search",
+      "--skip-daemon",
+      "--skip-ui",
+      "--skip-health",
+      "--mode",
+      "local",
+      "--gateway-port",
+      OPENCLAW_PORT.toString(),
+    ],
+    {
+      name: "xterm-256color",
+      cols: 80,
+      rows: 24,
+      cwd: CONFIG_DIR,
+      env: {
+        ...process.env,
+        ...readEnv(),
+        SHELL: "/bin/bash",
+        TERM: "xterm-256color",
+      },
     },
-  });
+  );
   ptyProcess = setupPty;
 
   // PTY output -> WebSocket
@@ -729,7 +871,12 @@ wss.on("connection", (ws) => {
       ptyProcess = null;
     }
 
-    if (wasActiveSession && exitCode === 0 && isConfigured() && !openclawProcess) {
+    if (
+      wasActiveSession &&
+      exitCode === 0 &&
+      isConfigured() &&
+      !openclawProcess
+    ) {
       console.log("OpenClaw onboarding completed, starting gateway...");
       startOpenclaw({ repair: false });
     }
@@ -755,7 +902,9 @@ wss.on("connection", (ws) => {
   ws.on("close", () => {
     console.log("Terminal WebSocket closed");
     if (ptyProcess === setupPty) {
-      try { setupPty.kill(); } catch (e) {}
+      try {
+        setupPty.kill();
+      } catch (e) {}
       ptyProcess = null;
     }
   });
@@ -769,8 +918,11 @@ server.on("upgrade", (req, socket, head) => {
   if (url.pathname === "/api/terminal") {
     // Validate anti-CSWSH token (see SETUP_TOKEN comment above)
     const provided = url.searchParams.get("token") || "";
-    if (!SETUP_TOKEN || provided.length !== SETUP_TOKEN.length ||
-        !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(SETUP_TOKEN))) {
+    if (
+      !SETUP_TOKEN ||
+      provided.length !== SETUP_TOKEN.length ||
+      !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(SETUP_TOKEN))
+    ) {
       socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
       socket.destroy();
       return;
@@ -821,7 +973,9 @@ server.listen(PORT, "0.0.0.0", () => {
 process.on("SIGTERM", () => {
   console.log("Received SIGTERM, shutting down...");
   if (ptyProcess) {
-    try { ptyProcess.kill(); } catch (e) {}
+    try {
+      ptyProcess.kill();
+    } catch (e) {}
   }
   if (openclawProcess) {
     openclawProcess.kill("SIGTERM");
