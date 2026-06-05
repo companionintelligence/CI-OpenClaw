@@ -32,6 +32,8 @@ ENV_FILE="${DATA_DIR}/.env"
 # (older Hub releases). Kept in sync with AppCredentialsService's
 # OPENCLAW env keys as a last resort.
 FALLBACK_MANAGED_KEYS="OPENAI_API_BASE,OPENAI_API_KEY,DEFAULT_MODEL,EMBEDDINGS_MODEL,OLLAMA_HOST"
+# Deprecated keys kept for removal-only migration of existing .env files.
+DEPRECATED_MANAGED_KEYS="DEFAULT_MODEL_BACKEND_ID,EMBEDDINGS_MODEL_BACKEND_ID"
 
 log() {
   echo "[hub-bootstrap] $*"
@@ -69,7 +71,15 @@ keys_to_pattern() {
 
 # Strip lines whose key is in MANAGED_KEYS. Reads stdin, writes stdout.
 strip_hub_keys() {
-  pattern="$(keys_to_pattern "${MANAGED_KEYS}")"
+  strip_keys="${MANAGED_KEYS}"
+  if [ -n "${DEPRECATED_MANAGED_KEYS}" ]; then
+    if [ -n "${strip_keys}" ]; then
+      strip_keys="${strip_keys},${DEPRECATED_MANAGED_KEYS}"
+    else
+      strip_keys="${DEPRECATED_MANAGED_KEYS}"
+    fi
+  fi
+  pattern="$(keys_to_pattern "${strip_keys}")"
   if [ -z "${pattern}" ]; then
     cat
   else
