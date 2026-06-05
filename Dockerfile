@@ -26,7 +26,10 @@ RUN echo "node ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 USER node
 
 # Install brew
-RUN /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+RUN set -eu; \
+    curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh -o /tmp/brew-install.sh; \
+    /bin/bash /tmp/brew-install.sh; \
+    rm -f /tmp/brew-install.sh
 
 # Shim systemctl for Docker — there's no systemd in the container, but OpenClaw's
 # agent calls `systemctl --user restart openclaw-gateway` to restart the gateway.

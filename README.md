@@ -10,6 +10,7 @@ This is a containerized version of OpenClaw with seamless onboarding on the CI m
 
 - A simple setup UI to configure your API keys (no interactive onboarding CLI)
 - Headless browser setup and configured out of the box
+- Multi-arch container images (`linux/amd64`, `linux/arm64`) for Intel + ARM (Apple Silicon)
 - Sandboxing so OpenClaw runs in its own environment that can't mess up other CI apps
 - Automatic gateway token management
 - Homebrew pre-installed for OpenClaw to install additional tools configured in a way that will persist between app updates
