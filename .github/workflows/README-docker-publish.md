@@ -15,6 +15,8 @@ The workflow runs when:
 It builds multi-arch images (`linux/amd64`, `linux/arm64`) and pushes:
 - `${IMAGE_NAME}:${TAG}`
 
+For tag-push and manual dispatch runs, it also creates or updates a published GitHub Release for `${TAG}`.
+
 ## Required GitHub Settings
 
 ### 1) Repository Action Permissions
@@ -25,7 +27,7 @@ In GitHub repository settings:
 - Under workflow permissions, allow write access to packages.
 
 The workflow itself already requests:
-- `contents: read`
+- `contents: write`
 - `packages: write`
 
 ### 2) Repository Variables
@@ -52,11 +54,13 @@ The workflow uses the default `GITHUB_TOKEN` for `docker login ghcr.io`.
 2. Watch the `Docker Build and Push` run in Actions.
 3. Verify package tags in GitHub Packages:
   - expected tags include `test-publish-1`
+4. Verify a published release exists in the Releases tab:
+  - expected release/tag include `test-publish-1`
 
 Or run manually from GitHub Actions:
 1. Open `Actions` -> `Docker Build and Push` -> `Run workflow`
 2. Enter the `tag` input (example: `1.2.3`)
-3. Run the workflow and verify the package tag in GHCR
+3. Run the workflow and verify the package tag in GHCR and a published release in the Releases tab
 
 ## Notes
 
