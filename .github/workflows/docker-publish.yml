@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Container tag to publish (for example 1.2.3)"
+        description: "Container tag to publish (for example 2026.6.1)"
         required: true
         type: string
 
@@ -20,6 +20,7 @@ jobs:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     name: Build and push to GitHub Container Registry
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
     permissions:
       contents: read
       packages: write
@@ -70,19 +71,23 @@ jobs:
           echo "IMAGE_NAME=${image,,}" >> "$GITHUB_ENV"
 
       - name: Login to GitHub Container Registry
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup QEMU with credential support (fixes sudo in cross-arch builds)
-        run: docker run --rm --privileged multiarch/qemu-user-static --reset -p yes --credential yes
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
 
-      - name: Setup Docker buildx
-        run: docker buildx create --use
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
-      - name: Run Docker buildx
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --tag "${IMAGE_NAME}:${TAG}" \
-            --push .
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+          provenance: false
