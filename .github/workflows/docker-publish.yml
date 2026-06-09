@@ -89,7 +89,9 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+            ${{ env.IMAGE_NAME }}:latest
           provenance: false
 
       - name: Create or update GitHub Release
