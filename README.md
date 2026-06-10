@@ -15,6 +15,7 @@ This is a containerized version of OpenClaw with seamless onboarding on the CI m
 - Homebrew pre-installed for OpenClaw to install additional tools configured in a way that will persist between app updates
 - apt/apt-get disabled with a message telling openclaw to use brew instead
 - Globally installed node modules persisted between app updates
+- A bundled `companionintelligence` memory plugin that can use CI-Server as OpenClaw's active memory backend when `CI_SERVER_URL` and `CI_SERVER_TOKEN` are configured
 - Security features that complicate setup disabled which are not required on the CI marketplace due to OpenClaw already being protected when running behind the CI app proxy
 
 This creates a seamless one-click install experience for OpenClaw on the CI marketplace.
