@@ -7,6 +7,8 @@ services:
     init: true
     environment:
       APP_SEED: ${APP_SEED:-dev} # Provided by CI marketplace; fallback for local dev
+      CI_SERVER_URL: ${CI_SERVER_URL}
+      CI_SERVER_TOKEN: ${CI_SERVER_TOKEN}
     ports:
       - "18789:18789"
     volumes:
