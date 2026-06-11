@@ -20,6 +20,127 @@ This is a containerized version of OpenClaw with seamless onboarding on the CI m
 
 This creates a seamless one-click install experience for OpenClaw on the CI marketplace.
 
+## Companion Intelligence memory setup
+
+CI-OpenClaw ships with a bundled OpenClaw memory plugin named `companionintelligence`. When CI-Server credentials are available, startup selects it as OpenClaw's active memory backend and routes memory reads/writes through CI-Server.
+
+### Required CI-Server configuration
+
+Provide these environment variables to the OpenClaw container:
+
+```bash
+CI_SERVER_URL=http://ci-server:8642
+CI_SERVER_TOKEN=<ci-server-api-key>
+```
+
+For local Docker Compose outside the CI marketplace, `CI_SERVER_URL` is often:
+
+```bash
+CI_SERVER_URL=http://host.docker.internal:8642
+```
+
+If using the repo-level `.env` file for local development, also pass the values through `docker-compose.yml`:
+
+```yaml
+services:
+  openclaw:
+    environment:
+      APP_SEED: ${APP_SEED:-dev}
+      CI_SERVER_URL: ${CI_SERVER_URL}
+      CI_SERVER_TOKEN: ${CI_SERVER_TOKEN}
+```
+
+### First-run flow
+
+1. Start OpenClaw with the CI-Server env vars present:
+
+   ```bash
+   docker compose up --build
+   ```
+
+2. Open the setup UI:
+
+   ```text
+   http://localhost:18789
+   ```
+
+3. Complete OpenClaw onboarding for the model provider/API key.
+
+4. Restart once if the CI-Server env vars were added after onboarding:
+
+   ```bash
+   docker compose restart openclaw
+   ```
+
+On startup, `/app/bootstrap-ci-memory.sh` and the setup server reconcile the persistent OpenClaw config at `/data/.openclaw/openclaw.json`.
+
+### Expected OpenClaw config
+
+When CI memory is active, the reconciled config should contain:
+
+```json
+{
+  "plugins": {
+    "slots": {
+      "memory": "companionintelligence"
+    },
+    "entries": {
+      "companionintelligence": {
+        "enabled": true
+      }
+    }
+  },
+  "tools": {
+    "alsoAllow": ["memory_store"]
+  },
+  "hooks": {
+    "internal": {
+      "entries": {
+        "session-memory": {
+          "enabled": false
+        }
+      }
+    }
+  }
+}
+```
+
+`memory_store` is explicitly allowed because OpenClaw's `group:memory` profile includes `memory_search` and `memory_get`, but not memory writes.
+
+### CI-Server endpoints used
+
+The plugin calls:
+
+- `GET /api/health`
+- `GET /api/memory/context`
+- `POST /api/memory/recall`
+- `POST /api/memory/write`
+
+`POST /api/memory/write` is the durable write endpoint. Older Hermes docs may mention `/api/memory/note`; CI-OpenClaw uses `/write` first and only falls back to `/note` for compatibility.
+
+### Verify in a running container
+
+```bash
+docker compose exec openclaw openclaw plugins inspect companionintelligence --runtime --json
+```
+
+The plugin should be `loaded`, selected as the memory slot, and expose:
+
+```text
+memory_search
+memory_get
+memory_store
+```
+
+To re-run config repair manually:
+
+```bash
+docker compose exec openclaw /app/bootstrap-ci-memory.sh
+docker compose restart openclaw
+```
+
+If OpenClaw tries to write `USER.md`, `MEMORY.md`, or `/data/.openclaw/memory/main.sqlite`, the CI memory plugin should block that path. CI-Server is the authoritative memory backend when `companionintelligence` is active.
+
 ## License
 
 MIT
