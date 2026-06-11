@@ -224,6 +224,81 @@ function hasCiServerCredentials(env) {
   );
 }
 
+function disableBundledSessionMemoryHook(config) {
+  let changed = false;
+  if (
+    !config.hooks ||
+    typeof config.hooks !== "object" ||
+    Array.isArray(config.hooks)
+  ) {
+    config.hooks = {};
+    changed = true;
+  }
+  if (
+    !config.hooks.internal ||
+    typeof config.hooks.internal !== "object" ||
+    Array.isArray(config.hooks.internal)
+  ) {
+    config.hooks.internal = {};
+    changed = true;
+  }
+  if (
+    !config.hooks.internal.entries ||
+    typeof config.hooks.internal.entries !== "object" ||
+    Array.isArray(config.hooks.internal.entries)
+  ) {
+    config.hooks.internal.entries = {};
+    changed = true;
+  }
+
+  const entries = config.hooks.internal.entries;
+  const entry =
+    entries["session-memory"] &&
+    typeof entries["session-memory"] === "object" &&
+    !Array.isArray(entries["session-memory"])
+      ? entries["session-memory"]
+      : {};
+  if (entry.enabled !== false) {
+    entry.enabled = false;
+    entries["session-memory"] = entry;
+    changed = true;
+    console.log(
+      "Patched config: disabled bundled session-memory hook for CI memory",
+    );
+  }
+  return changed;
+}
+
+function ensureMemoryStoreToolAllowed(config) {
+  let changed = false;
+  if (
+    !config.tools ||
+    typeof config.tools !== "object" ||
+    Array.isArray(config.tools)
+  ) {
+    config.tools = {};
+    changed = true;
+  }
+  if (!Array.isArray(config.tools.alsoAllow)) {
+    config.tools.alsoAllow = [];
+    changed = true;
+  }
+  if (!config.tools.alsoAllow.includes("memory_store")) {
+    config.tools.alsoAllow.push("memory_store");
+    changed = true;
+    console.log("Patched config: allowed Companion Intelligence memory_store tool");
+  }
+  if (
+    Array.isArray(config.tools.allow) &&
+    !config.tools.allow.includes("memory_store")
+  ) {
+    config.tools.allow.push("memory_store");
+    changed = true;
+    console.log("Patched config: added memory_store to explicit tool allowlist");
+  }
+  return changed;
+}
+
 function ensureOpenClawPlugin(config, pluginId, pluginPath, label, options = {}) {
   const enableEntry = options.enableEntry !== false;
 
@@ -481,6 +556,8 @@ function reconcileConfig() {
           "Patched config: selected Companion Intelligence memory plugin",
         );
       }
+      changed = disableBundledSessionMemoryHook(config) || changed;
+      changed = ensureMemoryStoreToolAllowed(config) || changed;
     }
   }
 

@@ -3,6 +3,16 @@ const DEFAULT_TIMEOUT_MS = 10000;
 const DEFAULT_MAX_RESULTS = 5;
 const RECALL_PATH = "ci-server://recall";
 const PROFILE_PATH = "ci-server://profile";
+const CI_MEMORY_BOOTSTRAP_GUIDANCE = [
+  "",
+  "## Companion Intelligence Memory",
+  "",
+  "Companion Intelligence is the active OpenClaw memory backend.",
+  "For user profile facts, preferences, durable notes, decisions, prior-project context, and explicit remember/save requests, use the `memory_store` tool.",
+  "Do not create or edit `USER.md`, `MEMORY.md`, or `memory/*.md` for memory storage while this backend is active.",
+  "Do not inspect, query, edit, or write OpenClaw's local memory SQLite files such as `/data/.openclaw/memory/main.sqlite`; they are internal cache/index storage, not the Companion Intelligence memory system.",
+  "Use `memory_search` for topical recall and `memory_get` with `ci-server://profile` for the CI-Server profile block.",
+].join("\n");
 
 function jsonResult(payload) {
   return {
@@ -25,6 +35,86 @@ function textResult(text, details) {
 
 function normalizeString(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizePathForMatch(value) {
+  return normalizeString(value).replace(/\\/g, "/");
+}
+
+function isCiMemoryActive(config) {
+  return config?.plugins?.slots?.memory === PLUGIN_ID;
+}
+
+function isBlockedLocalMemoryReference(value) {
+  const text = normalizePathForMatch(value);
+  if (!text) return false;
+  const path = text.toLowerCase();
+  const basename = path.split("/").pop();
+  if (basename === "user.md" || basename === "memory.md") return true;
+  if (/(^|\/)memory\/[^/]+\.md(?:\s|$|["'])/u.test(path)) return true;
+  if (/(^|\s|["'])\/data\/\.openclaw\/memory(?:\/|\s|$|["'])/u.test(path)) return true;
+  if (/(^|\s|["'])\/data\/\.openclaw\/memory\/[^"'\s]+\.sqlite3?(?:\s|$|["'])/u.test(path)) {
+    return true;
+  }
+  if (/(^|\s|["'])\.openclaw\/memory\/[^"'\s]+\.sqlite3?(?:\s|$|["'])/u.test(path)) {
+    return true;
+  }
+  return false;
+}
+
+function collectToolStrings(value, strings = []) {
+  if (typeof value === "string") {
+    strings.push(value);
+    return strings;
+  }
+  if (!value || typeof value !== "object") return strings;
+  if (Array.isArray(value)) {
+    for (const item of value) collectToolStrings(item, strings);
+    return strings;
+  }
+
+  for (const entry of Object.values(value)) collectToolStrings(entry, strings);
+  return strings;
+}
+
+function getToolMemoryReferences(event) {
+  const strings = collectToolStrings(event?.params);
+  collectToolStrings(event?.derivedPaths, strings);
+  return strings;
+}
+
+function applyBootstrapMemoryGuidance(event) {
+  const context = event?.context;
+  if (!context || !isCiMemoryActive(context.cfg)) return;
+  if (!Array.isArray(context.bootstrapFiles)) return;
+
+  const agentsFile = context.bootstrapFiles.find((file) => file?.name === "AGENTS.md");
+  if (agentsFile) {
+    const content = typeof agentsFile.content === "string" ? agentsFile.content : "";
+    if (!content.includes("Companion Intelligence is the active OpenClaw memory backend.")) {
+      agentsFile.content = `${content.trimEnd()}\n${CI_MEMORY_BOOTSTRAP_GUIDANCE}\n`;
+      agentsFile.missing = false;
+    }
+    return;
+  }
+
+  context.bootstrapFiles.push({
+    name: "AGENTS.md",
+    path: "AGENTS.md",
+    missing: false,
+    content: CI_MEMORY_BOOTSTRAP_GUIDANCE.trimStart(),
+  });
+}
+
+function shouldBlockWorkspaceMemoryWrite(event, ctx) {
+  const config = ctx?.config || ctx?.cfg || event?.config;
+  if (config && !isCiMemoryActive(config)) return false;
+  const toolName = normalizeString(event?.toolName).toLowerCase();
+  if (toolName === "memory_store" || toolName === "memory_search" || toolName === "memory_get") {
+    return false;
+  }
+
+  return getToolMemoryReferences(event).some(isBlockedLocalMemoryReference);
 }
 
 function readLivePluginConfig(api, cfg) {
@@ -173,15 +263,24 @@ function createClient(api, cfg) {
       return normalizeString(body.block || body.text || body.context);
     },
     async note(content, options = {}) {
-      return await requestJson(config, "/api/memory/note", {
-        method: "POST",
-        body: {
-          content,
-          ...(options.source ? { source: options.source } : {}),
-          ...(options.title ? { title: options.title } : {}),
-          ...(options.sessionId ? { sessionId: options.sessionId } : {}),
-        },
-      });
+      const payload = {
+        content,
+        ...(options.source ? { source: options.source } : {}),
+        ...(options.title ? { title: options.title } : {}),
+        ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      };
+      try {
+        return await requestJson(config, "/api/memory/write", {
+          method: "POST",
+          body: payload,
+        });
+      } catch (error) {
+        if (!String(error?.message || error).includes("HTTP 404")) throw error;
+        return await requestJson(config, "/api/memory/note", {
+          method: "POST",
+          body: payload,
+        });
+      }
     },
   };
 }
@@ -197,6 +296,8 @@ function buildPromptSection({ availableTools }) {
   if (availableTools.has("memory_store")) {
     lines.push(
       "Use memory_store for explicit remember/save requests or durable facts the user clearly wants retained.",
+      "Do not write memory facts to USER.md, MEMORY.md, or memory/*.md; store them with memory_store so CI-Server can ingest them.",
+      "Do not inspect or write /data/.openclaw/memory/*.sqlite; those files are OpenClaw internals, not the CI memory database.",
     );
   }
   if (lines.length > 0) lines.push("");
@@ -404,6 +505,24 @@ export default {
       };
     }, {
       name: "memory_store",
+    });
+
+    api.registerHook?.("agent:bootstrap", applyBootstrapMemoryGuidance, {
+      name: "companionintelligence-memory-bootstrap",
+      description:
+        "Directs OpenClaw memory writes to CI-Server when Companion Intelligence is active.",
+      priority: 100,
+    });
+
+    api.on?.("before_tool_call", (event, ctx) => {
+      if (!shouldBlockWorkspaceMemoryWrite(event, ctx)) return;
+      return {
+        block: true,
+        blockReason:
+          "Companion Intelligence is the active memory backend. Use memory_store instead of editing USER.md, MEMORY.md, memory/*.md, or OpenClaw's local memory SQLite files.",
+      };
+    }, {
+      priority: 100,
     });
 
     api.registerCommand({

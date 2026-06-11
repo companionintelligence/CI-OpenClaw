@@ -106,6 +106,51 @@ if (shouldSelect) {
     slots.memory = pluginId;
     changed = true;
   }
+
+  config.hooks =
+    config.hooks && typeof config.hooks === "object" && !Array.isArray(config.hooks)
+      ? config.hooks
+      : {};
+  config.hooks.internal =
+    config.hooks.internal &&
+    typeof config.hooks.internal === "object" &&
+    !Array.isArray(config.hooks.internal)
+      ? config.hooks.internal
+      : {};
+  config.hooks.internal.entries =
+    config.hooks.internal.entries &&
+    typeof config.hooks.internal.entries === "object" &&
+    !Array.isArray(config.hooks.internal.entries)
+      ? config.hooks.internal.entries
+      : {};
+
+  const sessionMemoryEntry =
+    config.hooks.internal.entries["session-memory"] &&
+    typeof config.hooks.internal.entries["session-memory"] === "object" &&
+    !Array.isArray(config.hooks.internal.entries["session-memory"])
+      ? config.hooks.internal.entries["session-memory"]
+      : {};
+  if (sessionMemoryEntry.enabled !== false) {
+    sessionMemoryEntry.enabled = false;
+    config.hooks.internal.entries["session-memory"] = sessionMemoryEntry;
+    changed = true;
+  }
+
+  config.tools =
+    config.tools && typeof config.tools === "object" && !Array.isArray(config.tools)
+      ? config.tools
+      : {};
+  config.tools.alsoAllow = Array.isArray(config.tools.alsoAllow)
+    ? config.tools.alsoAllow
+    : [];
+  if (!config.tools.alsoAllow.includes("memory_store")) {
+    config.tools.alsoAllow.push("memory_store");
+    changed = true;
+  }
+  if (Array.isArray(config.tools.allow) && !config.tools.allow.includes("memory_store")) {
+    config.tools.allow.push("memory_store");
+    changed = true;
+  }
 }
 
 if (changed) {
