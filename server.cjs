@@ -242,6 +242,103 @@ function resolveInferenceApiKey(env) {
   );
 }
 
+function isEmbeddingModel(modelId) {
+  return /embed/i.test(modelId || "");
+}
+
+async function fetchJson(url, init) {
+  const response = await fetch(url, {
+    ...init,
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) {
+    return null;
+  }
+  return response.json();
+}
+
+async function fetchOllamaModelCapabilities(ollamaBaseUrl, modelId) {
+  const payload = await fetchJson(`${ollamaBaseUrl}/api/show`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: modelId }),
+  });
+  const caps = Array.isArray(payload?.capabilities) ? payload.capabilities : [];
+  return {
+    supportsTools: caps.includes("tools"),
+    reasoning: caps.includes("thinking"),
+    vision: caps.includes("vision"),
+  };
+}
+
+function buildOllamaModelEntry(modelId, displayName, capabilities) {
+  return {
+    id: modelId,
+    name: displayName || modelId,
+    reasoning: capabilities?.reasoning === true,
+    input: capabilities?.vision ? ["text", "image"] : ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 32000,
+    maxTokens: 4096,
+    compat: { supportsTools: capabilities?.supportsTools === true },
+  };
+}
+
+async function discoverOllamaModels(ollamaBaseUrl, defaultModel) {
+  const tagsPayload = await fetchJson(`${ollamaBaseUrl}/api/tags`);
+  const discovered = Array.isArray(tagsPayload?.models)
+    ? tagsPayload.models.map((model) => ({ id: model?.name || model?.model || "" }))
+    : [];
+  const discoveredIds = new Set(
+    discovered
+      .map((model) => model?.id)
+      .filter((id) => typeof id === "string" && id.length > 0),
+  );
+
+  const models = [];
+  const seen = new Set();
+  const addModel = async (id, name) => {
+    if (
+      typeof id !== "string" ||
+      id.length === 0 ||
+      seen.has(id) ||
+      isEmbeddingModel(id) ||
+      !discoveredIds.has(id)
+    ) {
+      return false;
+    }
+    seen.add(id);
+    const capabilities = await fetchOllamaModelCapabilities(ollamaBaseUrl, id);
+    models.push(buildOllamaModelEntry(id, name || id, capabilities));
+    return true;
+  };
+
+  for (const model of discovered) {
+    await addModel(model?.id, model?.id);
+  }
+
+  const defaultModelAvailable =
+    defaultModel && discoveredIds.has(defaultModel) ? defaultModel : null;
+  const firstModelId = models.find((model) => model.id !== "auto")?.id ?? null;
+  const autoTargetId = defaultModelAvailable || firstModelId;
+
+  if (autoTargetId) {
+    const autoCapabilities = await fetchOllamaModelCapabilities(
+      ollamaBaseUrl,
+      autoTargetId,
+    );
+    models.unshift(
+      buildOllamaModelEntry(
+        "auto",
+        `Hub Auto (${autoTargetId})`,
+        autoCapabilities,
+      ),
+    );
+  }
+
+  return { models, defaultModelAvailable, firstModelId };
+}
+
 function getGatewayToken() {
   const env = readEnv();
   if (env.OPENCLAW_GATEWAY_TOKEN) return env.OPENCLAW_GATEWAY_TOKEN;
@@ -301,7 +398,7 @@ function isConfigured() {
   );
 }
 
-function reconcileConfig() {
+async function reconcileConfig() {
   const config = readConfig();
   if (!config) return;
   const env = readEnv();
@@ -491,7 +588,88 @@ function reconcileConfig() {
     );
   }
 
-  if (defaultModel) {
+  try {
+    const {
+      models: discoveredModels,
+      defaultModelAvailable,
+      firstModelId,
+    } = await discoverOllamaModels(ollamaBaseUrl, defaultModel);
+
+    if (discoveredModels.length > 0) {
+      if (
+        JSON.stringify(currentHubProvider.models || []) !==
+        JSON.stringify(discoveredModels)
+      ) {
+        config.models.providers["ci-hub"] = {
+          ...nextHubProvider,
+          models: discoveredModels,
+        };
+        changed = true;
+        console.log(
+          `Patched config: synced ${discoveredModels.length} ci-hub Ollama model(s)`,
+        );
+      }
+
+      config.agents = config.agents || {};
+      config.agents.defaults = config.agents.defaults || {};
+      const existingModels = config.agents.defaults.models || {};
+      const mergedModels = Object.fromEntries(
+        Object.entries(existingModels).filter(
+          ([key]) => !key.startsWith("ci-hub/"),
+        ),
+      );
+      for (const model of discoveredModels) {
+        const key = `ci-hub/${model.id}`;
+        mergedModels[key] = existingModels[key] || {};
+      }
+      if (
+        JSON.stringify(config.agents.defaults.models || {}) !==
+        JSON.stringify(mergedModels)
+      ) {
+        config.agents.defaults.models = mergedModels;
+        changed = true;
+        console.log("Patched config: merged ci-hub model options");
+      }
+
+      const existingPrimary = config.agents.defaults.model?.primary;
+      let primaryId = null;
+      if (
+        typeof existingPrimary === "string" &&
+        existingPrimary.startsWith("ci-hub/")
+      ) {
+        const currentId = existingPrimary.slice("ci-hub/".length);
+        if (discoveredModels.some((model) => model.id === currentId)) {
+          primaryId = currentId;
+        }
+      }
+      if (!primaryId) {
+        primaryId = defaultModelAvailable || firstModelId;
+      }
+      if (primaryId) {
+        config.agents.defaults.model = config.agents.defaults.model || {};
+        const nextPrimaryModel = `ci-hub/${primaryId}`;
+        if (config.agents.defaults.model.primary !== nextPrimaryModel) {
+          config.agents.defaults.model.primary = nextPrimaryModel;
+          changed = true;
+          console.log(
+            `Patched config: set default agent model to ${nextPrimaryModel}`,
+          );
+        }
+      }
+    } else {
+      console.warn(
+        `No Ollama chat models discovered at ${ollamaBaseUrl}; preserving existing ci-hub model catalog`,
+      );
+    }
+  } catch (error) {
+    console.warn(
+      `Failed to sync ci-hub Ollama model catalog: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+
+  if (defaultModel && !config.agents?.defaults?.model?.primary) {
     config.agents = config.agents || {};
     config.agents.defaults = config.agents.defaults || {};
     config.agents.defaults.model = config.agents.defaults.model || {};
@@ -537,8 +715,6 @@ function startOpenclaw({ repair = true } = {}) {
   }
 
   openclawStarting = true;
-  reconcileConfig();
-
   const spawnGateway = () => {
     openclawStarting = false;
     console.log("Starting OpenClaw gateway...");
@@ -560,20 +736,29 @@ function startOpenclaw({ repair = true } = {}) {
     });
   };
 
+  const startAfterReconcile = () =>
+    Promise.resolve(reconcileConfig()).catch((error) => {
+      console.error(
+        "Failed to reconcile OpenClaw config:",
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+
   if (!repair) {
     // Fresh onboarding just wrote this config, so avoid a full repair/migration
     // pass before the first gateway start. We still run doctor on normal
     // already-configured container starts where upgrade or stale-state repairs
     // are plausible.
     console.log("Skipping openclaw doctor after fresh onboarding");
-    spawnGateway();
+    startAfterReconcile().finally(spawnGateway);
     return;
   }
 
   // .finally() ensures the gateway starts even if doctor fails or rejects —
   // a degraded gateway is better than no gateway.
   console.log("Running openclaw doctor before gateway start...");
-  runDoctor().finally(spawnGateway);
+  startAfterReconcile()
+    .finally(() => runDoctor().finally(spawnGateway));
 }
 
 // Read static files at startup
