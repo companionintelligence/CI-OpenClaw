@@ -1,0 +1,43 @@
+{
+  "id": "companionintelligence",
+  "name": "Companion Intelligence Memory",
+  "description": "Uses CI-Server as the active OpenClaw memory backend.",
+  "version": "1.0.0",
+  "kind": "memory",
+  "activation": {
+    "onStartup": false
+  },
+  "contracts": {
+    "tools": [
+      "memory_get",
+      "memory_search",
+      "memory_store"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "CI-Server base URL. Falls back to CI_SERVER_URL."
+      },
+      "token": {
+        "type": "string",
+        "description": "CI-Server API key. Falls back to CI_SERVER_TOKEN."
+      },
+      "maxResults": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 20,
+        "description": "Default recall result count."
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 60000,
+        "description": "HTTP request timeout for CI-Server calls."
+      }
+    }
+  }
+}

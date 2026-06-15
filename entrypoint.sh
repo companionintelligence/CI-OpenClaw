@@ -4,5 +4,6 @@
 set -e
 
 /app/bootstrap-from-hub.sh || true
+/app/bootstrap-ci-memory.sh || true
 
 exec node /app/setup-server.cjs

@@ -1,0 +1,11 @@
+{
+  "name": "ci-openclaw-plugin-companionintelligence",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ]
+  }
+}

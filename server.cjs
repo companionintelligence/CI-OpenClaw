@@ -18,6 +18,9 @@ const OPENCLAW_PORT = 18790; // Internal port for OpenClaw gateway
 const SKELETON_DIR = "/home-skeleton";
 const CI_PLUGIN_ID = "ci-runtime";
 const CI_PLUGIN_PATH = "/app/openclaw-context/plugins/ci-runtime";
+const CI_MEMORY_PLUGIN_ID = "companionintelligence";
+const CI_MEMORY_PLUGIN_PATH =
+  "/app/openclaw-context/plugins/companionintelligence";
 // Anti-CSWSH token for the setup terminal WebSocket. Browsers don't enforce the
 // same-origin policy on WebSocket upgrades, so without this any site could connect
 // to /api/terminal and hijack the onboarding PTY. We embed APP_SEED (per-user
@@ -210,6 +213,162 @@ function removeArrayItem(items, item) {
       changed = true;
     }
   }
+  return changed;
+}
+
+function hasCiServerCredentials(env) {
+  return !!(
+    env.CI_SERVER_URL &&
+    env.CI_SERVER_TOKEN &&
+    env.CI_SERVER_ENABLED !== "false"
+  );
+}
+
+function disableBundledSessionMemoryHook(config) {
+  let changed = false;
+  if (
+    !config.hooks ||
+    typeof config.hooks !== "object" ||
+    Array.isArray(config.hooks)
+  ) {
+    config.hooks = {};
+    changed = true;
+  }
+  if (
+    !config.hooks.internal ||
+    typeof config.hooks.internal !== "object" ||
+    Array.isArray(config.hooks.internal)
+  ) {
+    config.hooks.internal = {};
+    changed = true;
+  }
+  if (
+    !config.hooks.internal.entries ||
+    typeof config.hooks.internal.entries !== "object" ||
+    Array.isArray(config.hooks.internal.entries)
+  ) {
+    config.hooks.internal.entries = {};
+    changed = true;
+  }
+
+  const entries = config.hooks.internal.entries;
+  const entry =
+    entries["session-memory"] &&
+    typeof entries["session-memory"] === "object" &&
+    !Array.isArray(entries["session-memory"])
+      ? entries["session-memory"]
+      : {};
+  if (entry.enabled !== false) {
+    entry.enabled = false;
+    entries["session-memory"] = entry;
+    changed = true;
+    console.log(
+      "Patched config: disabled bundled session-memory hook for CI memory",
+    );
+  }
+  return changed;
+}
+
+function ensureMemoryStoreToolAllowed(config) {
+  let changed = false;
+  if (
+    !config.tools ||
+    typeof config.tools !== "object" ||
+    Array.isArray(config.tools)
+  ) {
+    config.tools = {};
+    changed = true;
+  }
+  if (!Array.isArray(config.tools.alsoAllow)) {
+    config.tools.alsoAllow = [];
+    changed = true;
+  }
+  if (!config.tools.alsoAllow.includes("memory_store")) {
+    config.tools.alsoAllow.push("memory_store");
+    changed = true;
+    console.log("Patched config: allowed Companion Intelligence memory_store tool");
+  }
+  if (
+    Array.isArray(config.tools.allow) &&
+    !config.tools.allow.includes("memory_store")
+  ) {
+    config.tools.allow.push("memory_store");
+    changed = true;
+    console.log("Patched config: added memory_store to explicit tool allowlist");
+  }
+  return changed;
+}
+
+function ensureOpenClawPlugin(config, pluginId, pluginPath, label, options = {}) {
+  const enableEntry = options.enableEntry !== false;
+
+  if (!fs.existsSync(pluginPath)) {
+    console.warn(
+      `CI context: ${pluginPath} not found; plugin config will be reconciled on next startup`,
+    );
+    return false;
+  }
+
+  let changed = false;
+  if (
+    !config.plugins ||
+    typeof config.plugins !== "object" ||
+    Array.isArray(config.plugins)
+  ) {
+    config.plugins = {};
+  }
+  if (config.plugins.enabled !== true) {
+    config.plugins.enabled = true;
+    changed = true;
+    console.log("Patched config: enabled plugins");
+  }
+
+  const pluginPaths = ensureArrayPath(config, ["plugins", "load", "paths"]);
+  if (!pluginPaths.includes(pluginPath)) {
+    pluginPaths.push(pluginPath);
+    changed = true;
+    console.log(`Patched config: added ${label} plugin path`);
+  }
+
+  if (enableEntry) {
+    if (
+      Array.isArray(config.plugins.deny) &&
+      removeArrayItem(config.plugins.deny, pluginId)
+    ) {
+      changed = true;
+      console.log(`Patched config: removed ${label} plugin from deny list`);
+    }
+
+    const allowedPlugins = config.plugins.allow;
+    if (
+      Array.isArray(allowedPlugins) &&
+      allowedPlugins.length > 0 &&
+      !allowedPlugins.includes(pluginId)
+    ) {
+      allowedPlugins.push(pluginId);
+      changed = true;
+      console.log(`Patched config: added ${label} plugin to allow list`);
+    }
+  }
+
+  if (
+    !config.plugins.entries ||
+    typeof config.plugins.entries !== "object" ||
+    Array.isArray(config.plugins.entries)
+  ) {
+    config.plugins.entries = {};
+  }
+  const entry = config.plugins.entries[pluginId] || {};
+  const nextEnabled = enableEntry;
+  if (entry.enabled !== nextEnabled) {
+    entry.enabled = nextEnabled;
+    config.plugins.entries[pluginId] = entry;
+    changed = true;
+    console.log(
+      `Patched config: ${nextEnabled ? "enabled" : "disabled"} ${label} plugin`,
+    );
+  }
+
   return changed;
 }
 
@@ -448,66 +607,55 @@ async function reconcileConfig() {
   }
 
   // Enable CI-managed context through OpenClaw's supported plugin surface.
-  // The plugin also ships a `ci` skill, so one load path covers both the
+  // The runtime plugin also ships a `ci` skill, so one load path covers both the
   // always-on runtime context and deeper on-demand guidance.
-  if (fs.existsSync(CI_PLUGIN_PATH)) {
-    if (
-      !config.plugins ||
-      typeof config.plugins !== "object" ||
-      Array.isArray(config.plugins)
-    ) {
-      config.plugins = {};
-    }
-    if (config.plugins.enabled !== true) {
-      config.plugins.enabled = true;
-      changed = true;
-      console.log("Patched config: enabled plugins");
-    }
+  changed =
+    ensureOpenClawPlugin(config, CI_PLUGIN_ID, CI_PLUGIN_PATH, "CI runtime") ||
+    changed;
 
-    const pluginPaths = ensureArrayPath(config, ["plugins", "load", "paths"]);
-    if (!pluginPaths.includes(CI_PLUGIN_PATH)) {
-      pluginPaths.push(CI_PLUGIN_PATH);
-      changed = true;
-      console.log("Patched config: added CI runtime plugin path");
+  // Install the Companion Intelligence memory plugin as a selectable active
+  // memory backend. Keep the entry disabled until selected so OpenClaw does not
+  // load two active memory runtimes.
+  const currentMemorySlot =
+    config.plugins &&
+    config.plugins.slots &&
+    typeof config.plugins.slots === "object" &&
+    !Array.isArray(config.plugins.slots)
+      ? config.plugins.slots.memory
+      : undefined;
+  const shouldSelectCiMemory =
+    (hasCiServerCredentials(env) || currentMemorySlot === CI_MEMORY_PLUGIN_ID) &&
+    (currentMemorySlot === undefined ||
+      currentMemorySlot === "" ||
+      currentMemorySlot === "memory-core" ||
+      currentMemorySlot === CI_MEMORY_PLUGIN_ID);
+  changed =
+    ensureOpenClawPlugin(
+      config,
+      CI_MEMORY_PLUGIN_ID,
+      CI_MEMORY_PLUGIN_PATH,
+      "Companion Intelligence memory",
+      { enableEntry: shouldSelectCiMemory },
+    ) || changed;
+  if (fs.existsSync(CI_MEMORY_PLUGIN_PATH)) {
+    if (shouldSelectCiMemory) {
+      if (
+        !config.plugins.slots ||
+        typeof config.plugins.slots !== "object" ||
+        Array.isArray(config.plugins.slots)
+      ) {
+        config.plugins.slots = {};
+      }
+      if (config.plugins.slots.memory !== CI_MEMORY_PLUGIN_ID) {
+        config.plugins.slots.memory = CI_MEMORY_PLUGIN_ID;
+        changed = true;
+        console.log(
+          "Patched config: selected Companion Intelligence memory plugin",
+        );
+      }
+      changed = disableBundledSessionMemoryHook(config) || changed;
+      changed = ensureMemoryStoreToolAllowed(config) || changed;
     }
-
-    if (
-      Array.isArray(config.plugins.deny) &&
-      removeArrayItem(config.plugins.deny, CI_PLUGIN_ID)
-    ) {
-      changed = true;
-      console.log("Patched config: removed CI runtime plugin from deny list");
-    }
-
-    const allowedPlugins = config.plugins.allow;
-    if (
-      Array.isArray(allowedPlugins) &&
-      allowedPlugins.length > 0 &&
-      !allowedPlugins.includes(CI_PLUGIN_ID)
-    ) {
-      allowedPlugins.push(CI_PLUGIN_ID);
-      changed = true;
-      console.log("Patched config: added CI runtime plugin to allow list");
-    }
-
-    if (
-      !config.plugins.entries ||
-      typeof config.plugins.entries !== "object" ||
-      Array.isArray(config.plugins.entries)
-    ) {
-      config.plugins.entries = {};
-    }
-    const entry = config.plugins.entries[CI_PLUGIN_ID] || {};
-    if (entry.enabled !== true) {
-      entry.enabled = true;
-      config.plugins.entries[CI_PLUGIN_ID] = entry;
-      changed = true;
-      console.log("Patched config: enabled CI runtime plugin");
-    }
-  } else {
-    console.warn(
-      `CI context: ${CI_PLUGIN_PATH} not found; plugin config will be reconciled on next startup`,
-    );
   }
 
   // Ensure a gateway auth token exists — the onboard CLI does not generate one,
