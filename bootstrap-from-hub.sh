@@ -29,9 +29,11 @@ DATA_DIR="${OPENCLAW_DATA_DIR:-/data/.openclaw}"
 ENV_FILE="${DATA_DIR}/.env"
 
 # Fallback list used when the Hub doesn't send X-Hub-Managed-Keys
-# (older Hub releases). Kept in sync with AppBootstrapService's
+# (older Hub releases). Kept in sync with AppCredentialsService's
 # OPENCLAW env keys as a last resort.
-FALLBACK_MANAGED_KEYS="OPENAI_API_BASE,OPENAI_API_KEY,DEFAULT_MODEL,DEFAULT_MODEL_BACKEND_ID,EMBEDDINGS_MODEL,EMBEDDINGS_MODEL_BACKEND_ID,OLLAMA_HOST"
+FALLBACK_MANAGED_KEYS="OPENAI_API_BASE,OPENAI_API_KEY,DEFAULT_MODEL,EMBEDDINGS_MODEL,OLLAMA_HOST"
+# Deprecated keys kept for removal-only migration of existing .env files.
+DEPRECATED_MANAGED_KEYS="DEFAULT_MODEL_BACKEND_ID,EMBEDDINGS_MODEL_BACKEND_ID"
 
 log() {
   echo "[hub-bootstrap] $*"
@@ -46,7 +48,7 @@ fetch_bootstrap() {
     MANAGED_KEYS="${BOOTSTRAP_FIXTURE_MANAGED_KEYS:-}"
     return 0
   fi
-  url="${CI_HUB_URL}/api/inference/apps/${HUB_APP_SLUG}/bootstrap.env"
+  url="${CI_HUB_URL}/api/inference/apps/${HUB_APP_SLUG}/credentials.env"
   headers_tmp="$(mktemp)"
   if ! body="$(curl --silent --show-error --fail --max-time 5 --retry 1 --retry-delay 2 -D "${headers_tmp}" "${url}")"; then
     rm -f "${headers_tmp}"
@@ -67,9 +69,18 @@ keys_to_pattern() {
   printf '%s' "${csv}" | tr ',' '\n' | awk 'NF { printf("%s^%s=", sep, $0); sep="|" }'
 }
 
-# Strip lines whose key is in MANAGED_KEYS. Reads stdin, writes stdout.
+# Strip lines whose key is in MANAGED_KEYS (plus deprecated keys we always
+# remove during migration). Reads stdin, writes stdout.
 strip_hub_keys() {
-  pattern="$(keys_to_pattern "${MANAGED_KEYS}")"
+  strip_keys="${MANAGED_KEYS}"
+  if [ -n "${DEPRECATED_MANAGED_KEYS}" ]; then
+    if [ -n "${strip_keys}" ]; then
+      strip_keys="${strip_keys},${DEPRECATED_MANAGED_KEYS}"
+    else
+      strip_keys="${DEPRECATED_MANAGED_KEYS}"
+    fi
+  fi
+  pattern="$(keys_to_pattern "${strip_keys}")"
   if [ -z "${pattern}" ]; then
     cat
   else
