@@ -286,7 +286,9 @@ function normalizeTurnMessages(messages, limit = 4000) {
 
 // The just-completed exchange: the last assistant message and the last user
 // message preceding it. Mirrors Hermes sync_turn(user, assistant); CI-Server
-// dedupes on the server side so re-sends are cheap.
+// dedupes on the server side so re-sends are cheap. Requires BOTH a user and an
+// assistant message — an unpaired assistant (e.g. a proactive/heartbeat turn)
+// is not a conversation exchange and is skipped.
 function latestExchange(turns) {
   let assistantIdx = -1;
   for (let i = turns.length - 1; i >= 0; i--) {
@@ -297,10 +299,8 @@ function latestExchange(turns) {
   for (let i = assistantIdx - 1; i >= 0; i--) {
     if (turns[i].role === "user") { userIdx = i; break; }
   }
-  const exchange = [];
-  if (userIdx !== -1) exchange.push(turns[userIdx]);
-  exchange.push(turns[assistantIdx]);
-  return exchange;
+  if (userIdx === -1) return [];
+  return [turns[userIdx], turns[assistantIdx]];
 }
 
 // Fire-and-forget transcript sync. Never throws into the agent run: a failed or
