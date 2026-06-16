@@ -58,7 +58,6 @@ async function withCiServer(handler, fn) {
   finally { await new Promise((r) => server.close(r)); }
 }
 const created = (req, res) => { res.writeHead(201, { "Content-Type": "application/json" }); res.end("{}"); };
-const wait = () => new Promise((r) => setTimeout(r, 60));
 
 await test("registers agent_end + before_compaction (and keeps before_tool_call)", () => {
   const { api, hooks } = makeApi();
@@ -77,7 +76,6 @@ await test("agent_end posts only the latest user/assistant exchange", () =>
       { role: "tool", content: "noise" },
       { role: "assistant", content: [{ type: "output_text", text: "second a" }] },
     ] }, { sessionId: "s1" });
-    await wait();
     const t = cap.find((c) => c.url === "/api/memory/turn");
     assert.equal(t.key, "k1");
     assert.equal(t.body.platform, "openclaw");
@@ -97,7 +95,6 @@ await test("before_compaction flushes the dropped user/assistant messages", () =
       { role: "user", content: "u1" },
       { role: "assistant", content: "a1" },
     ] }, { sessionKey: "s2" });
-    await wait();
     const t = cap.find((c) => c.url === "/api/memory/turn");
     assert.equal(t.body.sessionId, "s2");
     assert.deepEqual(t.body.messages, [
@@ -111,7 +108,6 @@ await test("unconfigured CI-Server: no network call, no throw", () =>
     const { api, hooks } = makeApi(); // no CI_SERVER_* env
     plugin.register(api);
     await hooks.agent_end({ success: true, messages: [{ role: "user", content: "x" }, { role: "assistant", content: "y" }] }, {});
-    await wait();
     assert.equal(cap.length, 0);
   }));
 
@@ -120,7 +116,6 @@ await test("CI-Server 500 is swallowed (turn never breaks)", () =>
     const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "k5" });
     plugin.register(api);
     await hooks.agent_end({ success: true, messages: [{ role: "user", content: "x" }, { role: "assistant", content: "y" }] }, {});
-    await wait();
   }));
 
 await test("failed turn (success:false) is skipped", () =>
@@ -128,7 +123,6 @@ await test("failed turn (success:false) is skipped", () =>
     const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "k6" });
     plugin.register(api);
     await hooks.agent_end({ success: false, messages: [{ role: "user", content: "x" }, { role: "assistant", content: "y" }] }, {});
-    await wait();
     assert.equal(cap.length, 0);
   }));
 
@@ -137,7 +131,6 @@ await test("user with no assistant reply posts nothing", () =>
     const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "k7" });
     plugin.register(api);
     await hooks.agent_end({ success: true, messages: [{ role: "user", content: "only user" }] }, {});
-    await wait();
     assert.equal(cap.length, 0);
   }));
 
@@ -146,7 +139,6 @@ await test("unpaired assistant (no preceding user) posts nothing", () =>
     const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "k8" });
     plugin.register(api);
     await hooks.agent_end({ success: true, messages: [{ role: "assistant", content: "proactive ping" }] }, {});
-    await wait();
     assert.equal(cap.length, 0);
   }));
 
