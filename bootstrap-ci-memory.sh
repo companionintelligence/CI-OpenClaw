@@ -107,6 +107,19 @@ if (shouldSelect) {
     changed = true;
   }
 
+  // The plugin's agent_end turn-sync is a conversation hook; non-bundled
+  // (path-loaded) plugins only receive it when allowConversationAccess is set.
+  const entryHooks =
+    entry.hooks && typeof entry.hooks === "object" && !Array.isArray(entry.hooks)
+      ? entry.hooks
+      : {};
+  if (entryHooks.allowConversationAccess !== true) {
+    entryHooks.allowConversationAccess = true;
+    entry.hooks = entryHooks;
+    entries[pluginId] = entry;
+    changed = true;
+  }
+
   config.hooks =
     config.hooks && typeof config.hooks === "object" && !Array.isArray(config.hooks)
       ? config.hooks

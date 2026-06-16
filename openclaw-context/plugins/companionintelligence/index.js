@@ -243,6 +243,79 @@ function buildSearchResults(block, query, maxResults) {
   return results;
 }
 
+// --- Transcript normalization -------------------------------------------------
+// OpenClaw turn/compaction hooks deliver messages in mixed shapes (string
+// content, or arrays of typed text blocks). These mirror OpenClaw's own
+// agent_end transcript extraction so we persist the same text the runtime sees.
+const TEXT_BLOCK_TYPES = new Set(["text", "input_text", "output_text"]);
+
+function readTextValue(value) {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object" && typeof value.value === "string") return value.value;
+  return "";
+}
+
+function extractTextBlock(block) {
+  if (!block || typeof block !== "object") return "";
+  const type = block.type;
+  if (typeof type !== "string" || !TEXT_BLOCK_TYPES.has(type)) return "";
+  return readTextValue(block.text);
+}
+
+function extractMessageText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map(extractTextBlock).filter(Boolean).join("\n");
+  return extractTextBlock(content);
+}
+
+// Normalize OpenClaw transcript messages into CI-Server /api/memory/turn turns.
+// Keeps only user/assistant text (the roles CI-Server accepts) and clamps each
+// message the same way Hermes does.
+function normalizeTurnMessages(messages, limit = 4000) {
+  if (!Array.isArray(messages)) return [];
+  const turns = [];
+  for (const message of messages) {
+    if (!message || typeof message !== "object") continue;
+    const role = message.role;
+    if (role !== "user" && role !== "assistant") continue;
+    const text = extractMessageText(message.content).trim();
+    if (text) turns.push({ role, content: text.slice(0, limit) });
+  }
+  return turns;
+}
+
+// The just-completed exchange: the last assistant message and the last user
+// message preceding it. Mirrors Hermes sync_turn(user, assistant); CI-Server
+// dedupes on the server side so re-sends are cheap.
+function latestExchange(turns) {
+  let assistantIdx = -1;
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === "assistant") { assistantIdx = i; break; }
+  }
+  if (assistantIdx === -1) return [];
+  let userIdx = -1;
+  for (let i = assistantIdx - 1; i >= 0; i--) {
+    if (turns[i].role === "user") { userIdx = i; break; }
+  }
+  const exchange = [];
+  if (userIdx !== -1) exchange.push(turns[userIdx]);
+  exchange.push(turns[assistantIdx]);
+  return exchange;
+}
+
+// Fire-and-forget transcript sync. Never throws into the agent run: a failed or
+// unconfigured CI-Server must not break the turn (matches Hermes behavior).
+async function syncTurn(api, messages, sessionId) {
+  if (!messages.length) return;
+  const client = createClient(api);
+  if (!client.config.url || !client.config.token) return;
+  try {
+    await client.turn(messages, { sessionId });
+  } catch (error) {
+    api.log?.debug?.(`CI-Server turn sync failed: ${String(error?.message || error)}`);
+  }
+}
+
 function createClient(api, cfg) {
   const config = resolveConfig(api, cfg);
   return {
@@ -281,6 +354,17 @@ function createClient(api, cfg) {
           body: payload,
         });
       }
+    },
+    async turn(messages, options = {}) {
+      const payload = {
+        messages,
+        platform: options.platform || "openclaw",
+        ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      };
+      return await requestJson(config, "/api/memory/turn", {
+        method: "POST",
+        body: payload,
+      });
     },
   };
 }
@@ -523,6 +607,29 @@ export default {
       };
     }, {
       priority: 100,
+    });
+
+    // Persist each completed exchange to CI-Server, mirroring Hermes sync_turn.
+    // agent_end is a conversation hook, so the plugin entry must set
+    // `hooks.allowConversationAccess: true` (the CI bootstrap does this).
+    api.on?.("agent_end", async (event, ctx) => {
+      if (event?.success === false) return;
+      const exchange = latestExchange(normalizeTurnMessages(event?.messages));
+      await syncTurn(api, exchange, normalizeString(ctx?.sessionId || ctx?.sessionKey));
+    }, {
+      priority: 50,
+      timeoutMs: 15000,
+    });
+
+    // Flush messages about to be dropped from the context window before they are
+    // compacted away, mirroring Hermes on_pre_compress. before_compaction is not
+    // a conversation hook and needs no extra access flag.
+    api.on?.("before_compaction", async (event, ctx) => {
+      const turns = normalizeTurnMessages(event?.messages);
+      await syncTurn(api, turns, normalizeString(ctx?.sessionId || ctx?.sessionKey));
+    }, {
+      priority: 50,
+      timeoutMs: 15000,
     });
 
     api.registerCommand({

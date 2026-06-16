@@ -269,6 +269,36 @@ function disableBundledSessionMemoryHook(config) {
   return changed;
 }
 
+function ensureMemoryConversationAccess(config) {
+  // The CI memory plugin's agent_end turn-sync is a conversation hook; a
+  // path-loaded (non-bundled) plugin only receives it when its entry opts in
+  // via hooks.allowConversationAccess.
+  let changed = false;
+  if (
+    !config.plugins.entries ||
+    typeof config.plugins.entries !== "object" ||
+    Array.isArray(config.plugins.entries)
+  ) {
+    config.plugins.entries = {};
+    changed = true;
+  }
+  const entry = config.plugins.entries[CI_MEMORY_PLUGIN_ID] || {};
+  const hooks =
+    entry.hooks && typeof entry.hooks === "object" && !Array.isArray(entry.hooks)
+      ? entry.hooks
+      : {};
+  if (hooks.allowConversationAccess !== true) {
+    hooks.allowConversationAccess = true;
+    entry.hooks = hooks;
+    config.plugins.entries[CI_MEMORY_PLUGIN_ID] = entry;
+    changed = true;
+    console.log(
+      "Patched config: enabled conversation access for CI memory turn-sync",
+    );
+  }
+  return changed;
+}
+
 function ensureMemoryStoreToolAllowed(config) {
   let changed = false;
   if (
@@ -654,6 +684,7 @@ async function reconcileConfig() {
         );
       }
       changed = disableBundledSessionMemoryHook(config) || changed;
+      changed = ensureMemoryConversationAccess(config) || changed;
       changed = ensureMemoryStoreToolAllowed(config) || changed;
     }
   }
