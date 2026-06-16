@@ -148,6 +148,16 @@ Hermes docs may mention `/api/memory/note`; CI-OpenClaw uses `/write` first and
 only falls back to `/note` for compatibility. `POST /api/memory/turn` is the
 transcript-ingest endpoint used by automatic turn-sync.
 
+### Unit tests
+
+The plugin's turn-sync behavior (transcript normalization, the `agent_end` and
+`before_compaction` hooks, error tolerance) is covered by a dependency-free Node
+test that drives the real plugin against a mock CI-Server:
+
+```bash
+node tests/companionintelligence.plugin.test.mjs
+```
+
 ### Verify in a running container
 
 ```bash

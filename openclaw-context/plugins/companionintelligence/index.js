@@ -248,6 +248,8 @@ function buildSearchResults(block, query, maxResults) {
 // content, or arrays of typed text blocks). These mirror OpenClaw's own
 // agent_end transcript extraction so we persist the same text the runtime sees.
 const TEXT_BLOCK_TYPES = new Set(["text", "input_text", "output_text"]);
+// Per-message content clamp before sending to CI-Server, matching Hermes.
+const MAX_TURN_CONTENT_CHARS = 4000;
 
 function readTextValue(value) {
   if (typeof value === "string") return value;
@@ -271,7 +273,7 @@ function extractMessageText(content) {
 // Normalize OpenClaw transcript messages into CI-Server /api/memory/turn turns.
 // Keeps only user/assistant text (the roles CI-Server accepts) and clamps each
 // message the same way Hermes does.
-function normalizeTurnMessages(messages, limit = 4000) {
+function normalizeTurnMessages(messages, limit = MAX_TURN_CONTENT_CHARS) {
   if (!Array.isArray(messages)) return [];
   const turns = [];
   for (const message of messages) {
