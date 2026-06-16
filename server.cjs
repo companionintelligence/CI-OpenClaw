@@ -282,7 +282,11 @@ function ensureMemoryConversationAccess(config) {
     config.plugins.entries = {};
     changed = true;
   }
-  const entry = config.plugins.entries[CI_MEMORY_PLUGIN_ID] || {};
+  const existingEntry = config.plugins.entries[CI_MEMORY_PLUGIN_ID];
+  const entry =
+    existingEntry && typeof existingEntry === "object" && !Array.isArray(existingEntry)
+      ? existingEntry
+      : {};
   const hooks =
     entry.hooks && typeof entry.hooks === "object" && !Array.isArray(entry.hooks)
       ? entry.hooks

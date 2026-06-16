@@ -82,7 +82,10 @@ if (!paths.includes(pluginPath)) {
 }
 
 const entries = ensureObject(config.plugins, "entries");
-const entry = entries[pluginId] && typeof entries[pluginId] === "object" ? entries[pluginId] : {};
+const entry =
+  entries[pluginId] && typeof entries[pluginId] === "object" && !Array.isArray(entries[pluginId])
+    ? entries[pluginId]
+    : {};
 const slots =
   config.plugins.slots && typeof config.plugins.slots === "object" && !Array.isArray(config.plugins.slots)
     ? config.plugins.slots
