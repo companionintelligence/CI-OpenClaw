@@ -54,7 +54,8 @@ async function withCiServer(handler, fn) {
     });
   });
   await new Promise((r) => server.listen(0, r));
-  try { await fn(server.address().port, captured); } finally { server.close(); }
+  try { await fn(server.address().port, captured); }
+  finally { await new Promise((r) => server.close(r)); }
 }
 const created = (req, res) => { res.writeHead(201, { "Content-Type": "application/json" }); res.end("{}"); };
 const wait = () => new Promise((r) => setTimeout(r, 60));
