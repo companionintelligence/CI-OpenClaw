@@ -16,8 +16,7 @@ set -e
 # mounts manage permissions externally and don't allow it): we warn and continue
 # so init can proceed or surface the real error itself, instead of `set -e`
 # aborting a container that might have booted fine.
-probe="/data/.entrypoint-write-test"
-if ( : > "$probe" ) 2>/dev/null; then
+if probe="$(mktemp /data/.entrypoint-write-test.XXXXXX 2>/dev/null)"; then
   rm -f "$probe"
 else
   echo "[entrypoint] /data is not writable as uid $(id -u) (owned by uid $(stat -c %u /data 2>/dev/null)); taking ownership"
