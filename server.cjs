@@ -269,6 +269,40 @@ function disableBundledSessionMemoryHook(config) {
   return changed;
 }
 
+function ensureMemoryConversationAccess(config) {
+  // The CI memory plugin's agent_end turn-sync is a conversation hook; a
+  // path-loaded (non-bundled) plugin only receives it when its entry opts in
+  // via hooks.allowConversationAccess.
+  let changed = false;
+  if (
+    !config.plugins.entries ||
+    typeof config.plugins.entries !== "object" ||
+    Array.isArray(config.plugins.entries)
+  ) {
+    config.plugins.entries = {};
+    changed = true;
+  }
+  const existingEntry = config.plugins.entries[CI_MEMORY_PLUGIN_ID];
+  const entry =
+    existingEntry && typeof existingEntry === "object" && !Array.isArray(existingEntry)
+      ? existingEntry
+      : {};
+  const hooks =
+    entry.hooks && typeof entry.hooks === "object" && !Array.isArray(entry.hooks)
+      ? entry.hooks
+      : {};
+  if (hooks.allowConversationAccess !== true) {
+    hooks.allowConversationAccess = true;
+    entry.hooks = hooks;
+    config.plugins.entries[CI_MEMORY_PLUGIN_ID] = entry;
+    changed = true;
+    console.log(
+      "Patched config: enabled conversation access for CI memory turn-sync",
+    );
+  }
+  return changed;
+}
+
 function ensureMemoryStoreToolAllowed(config) {
   let changed = false;
   if (
@@ -562,6 +596,14 @@ async function reconcileConfig() {
   if (!config) return;
   const env = readEnv();
 
+  // CI-Server credentials may be supplied as container environment variables
+  // (the Hub injects them this way) rather than written into the .env file.
+  // Mirror bootstrap-ci-memory.sh, which reads process.env, so the setup-server
+  // reconcile activates CI memory consistently regardless of where creds live.
+  for (const key of ["CI_SERVER_URL", "CI_SERVER_TOKEN", "CI_SERVER_ENABLED"]) {
+    if (!env[key] && process.env[key]) env[key] = process.env[key];
+  }
+
   let changed = false;
 
   // Ensure allowInsecureAuth is set (needed for the CI app proxy)
@@ -654,6 +696,7 @@ async function reconcileConfig() {
         );
       }
       changed = disableBundledSessionMemoryHook(config) || changed;
+      changed = ensureMemoryConversationAccess(config) || changed;
       changed = ensureMemoryStoreToolAllowed(config) || changed;
     }
   }

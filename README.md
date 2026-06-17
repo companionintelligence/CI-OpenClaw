@@ -86,7 +86,10 @@ When CI memory is active, the reconciled config should contain:
     },
     "entries": {
       "companionintelligence": {
-        "enabled": true
+        "enabled": true,
+        "hooks": {
+          "allowConversationAccess": true
+        }
       }
     }
   },
@@ -107,6 +110,29 @@ When CI memory is active, the reconciled config should contain:
 
 `memory_store` is explicitly allowed because OpenClaw's `group:memory` profile includes `memory_search` and `memory_get`, but not memory writes.
 
+`hooks.allowConversationAccess: true` is required for the plugin's automatic
+turn-sync (see below). `agent_end` is a conversation hook, and OpenClaw only
+delivers conversation hooks to a path-loaded plugin when its entry opts in. The
+bootstrap and setup server both set this when CI memory is selected.
+
+### Automatic conversation capture (turn-sync)
+
+Beyond explicit `memory_store` calls, the plugin passively streams the
+conversation into CI-Server so OpenClaw populates memory the same way Hermes
+does. It registers two OpenClaw hooks:
+
+- **`agent_end`** — after each completed turn, posts the latest user/assistant
+  exchange to `POST /api/memory/turn` (mirrors the Hermes `sync_turn`).
+- **`before_compaction`** — flushes the messages about to be dropped from the
+  context window before they are compacted away (mirrors the Hermes
+  `on_pre_compress`).
+
+Both calls carry `platform: "openclaw"` and the session id, are fire-and-forget
+(a failed or unconfigured CI-Server never breaks the turn), and rely on
+CI-Server's server-side dedupe so re-sends are cheap. OpenClaw's bundled
+`session-memory` hook stays disabled because CI-Server is the authoritative
+transcript store.
+
 ### CI-Server endpoints used
 
 The plugin calls:
@@ -115,8 +141,22 @@ The plugin calls:
 - `GET /api/memory/context`
 - `POST /api/memory/recall`
 - `POST /api/memory/write`
+- `POST /api/memory/turn`
 
-`POST /api/memory/write` is the durable write endpoint. Older Hermes docs may mention `/api/memory/note`; CI-OpenClaw uses `/write` first and only falls back to `/note` for compatibility.
+`POST /api/memory/write` is the durable write endpoint for explicit notes. Older
+Hermes docs may mention `/api/memory/note`; CI-OpenClaw uses `/write` first and
+only falls back to `/note` for compatibility. `POST /api/memory/turn` is the
+transcript-ingest endpoint used by automatic turn-sync.
+
+### Unit tests
+
+The plugin's turn-sync behavior (transcript normalization, the `agent_end` and
+`before_compaction` hooks, error tolerance) is covered by a dependency-free Node
+test that drives the real plugin against a mock CI-Server:
+
+```bash
+node tests/companionintelligence.plugin.test.mjs
+```
 
 ### Verify in a running container
 

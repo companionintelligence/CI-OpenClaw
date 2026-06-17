@@ -82,7 +82,10 @@ if (!paths.includes(pluginPath)) {
 }
 
 const entries = ensureObject(config.plugins, "entries");
-const entry = entries[pluginId] && typeof entries[pluginId] === "object" ? entries[pluginId] : {};
+const entry =
+  entries[pluginId] && typeof entries[pluginId] === "object" && !Array.isArray(entries[pluginId])
+    ? entries[pluginId]
+    : {};
 const slots =
   config.plugins.slots && typeof config.plugins.slots === "object" && !Array.isArray(config.plugins.slots)
     ? config.plugins.slots
@@ -104,6 +107,19 @@ if (shouldSelect) {
   config.plugins.slots = slots;
   if (slots.memory !== pluginId) {
     slots.memory = pluginId;
+    changed = true;
+  }
+
+  // The plugin's agent_end turn-sync is a conversation hook; non-bundled
+  // (path-loaded) plugins only receive it when allowConversationAccess is set.
+  const entryHooks =
+    entry.hooks && typeof entry.hooks === "object" && !Array.isArray(entry.hooks)
+      ? entry.hooks
+      : {};
+  if (entryHooks.allowConversationAccess !== true) {
+    entryHooks.allowConversationAccess = true;
+    entry.hooks = entryHooks;
+    entries[pluginId] = entry;
     changed = true;
   }
 
