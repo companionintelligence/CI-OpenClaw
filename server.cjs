@@ -492,14 +492,17 @@ function buildOllamaModelEntry(modelId, displayName, capabilities) {
   // the per-model limit is unknown, stay conservative at the historical 32000
   // default rather than the possibly-larger numCtx.
   const effCtx = numCtx ? Math.min(numCtx, capabilities?.contextLimit ?? 32000) : undefined;
+  const contextWindow = effCtx || 32000;
   return {
     id: modelId,
     name: displayName || modelId,
     reasoning: capabilities?.reasoning === true,
     input: capabilities?.vision ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: effCtx || 32000,
-    maxTokens: 4096,
+    contextWindow,
+    // Output budget can't exceed the total context window (keeps small-context
+    // models internally consistent).
+    maxTokens: Math.min(4096, contextWindow),
     compat: { supportsTools: capabilities?.supportsTools === true },
     ...(effCtx ? { options: { num_ctx: effCtx } } : {}),
   };
