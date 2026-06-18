@@ -492,7 +492,9 @@ function buildOllamaModelEntry(modelId, displayName, capabilities) {
   // the per-model limit is unknown, stay conservative at the historical 32000
   // default rather than the possibly-larger numCtx.
   const effCtx = numCtx ? Math.min(numCtx, capabilities?.contextLimit ?? 32000) : undefined;
-  const contextWindow = effCtx || 32000;
+  // Without an explicit num_ctx, advertise the historical 32000 default but never
+  // more than the model's known window (small-window models would be rejected).
+  const contextWindow = effCtx ?? Math.min(32000, capabilities?.contextLimit ?? 32000);
   return {
     id: modelId,
     name: displayName || modelId,
