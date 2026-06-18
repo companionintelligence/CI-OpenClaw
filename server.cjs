@@ -464,16 +464,27 @@ async function fetchOllamaModelCapabilities(ollamaBaseUrl, modelId) {
   };
 }
 
+// Hardware-aware context window injected by the Hub (CI_LLM_NUM_CTX). Caps both
+// the agent's token budget and the native Ollama num_ctx so OpenClaw doesn't pack
+// to Ollama's oversized memory-based default (e.g. 262144 on unified-memory APUs).
+function resolveHubNumCtx() {
+  const raw = process.env.CI_LLM_NUM_CTX || readEnv().CI_LLM_NUM_CTX || "";
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 function buildOllamaModelEntry(modelId, displayName, capabilities) {
+  const numCtx = resolveHubNumCtx();
   return {
     id: modelId,
     name: displayName || modelId,
     reasoning: capabilities?.reasoning === true,
     input: capabilities?.vision ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 32000,
+    contextWindow: numCtx || 32000,
     maxTokens: 4096,
     compat: { supportsTools: capabilities?.supportsTools === true },
+    ...(numCtx ? { options: { num_ctx: numCtx } } : {}),
   };
 }
 
