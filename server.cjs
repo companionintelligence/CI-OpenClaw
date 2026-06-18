@@ -460,7 +460,9 @@ async function fetchOllamaModelCapabilities(ollamaBaseUrl, modelId) {
   // model_info exposes the model's trained context as "<arch>.context_length".
   const info = payload?.model_info && typeof payload.model_info === "object" ? payload.model_info : {};
   const ctxEntry = Object.entries(info).find(([k]) => k.endsWith(".context_length"));
-  const contextLimit = Number.isFinite(ctxEntry?.[1]) ? ctxEntry[1] : undefined;
+  // model_info may serialize the value as a number or a numeric string — coerce.
+  const ctxNum = ctxEntry ? Number(ctxEntry[1]) : Number.NaN;
+  const contextLimit = Number.isFinite(ctxNum) && ctxNum > 0 ? ctxNum : undefined;
   return {
     supportsTools: caps.includes("tools"),
     reasoning: caps.includes("thinking"),
@@ -494,7 +496,7 @@ function buildOllamaModelEntry(modelId, displayName, capabilities) {
     reasoning: capabilities?.reasoning === true,
     input: capabilities?.vision ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: effCtx || capabilities?.contextLimit || 32000,
+    contextWindow: effCtx || 32000,
     maxTokens: 4096,
     compat: { supportsTools: capabilities?.supportsTools === true },
     ...(effCtx ? { options: { num_ctx: effCtx } } : {}),
