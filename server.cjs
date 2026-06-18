@@ -488,8 +488,10 @@ function resolveHubNumCtx() {
 function buildOllamaModelEntry(modelId, displayName, capabilities) {
   const numCtx = resolveHubNumCtx() || undefined;
   // Never request more context than the model supports: numCtx is computed for
-  // the Hub's default chat model and may exceed a smaller model's window.
-  const effCtx = numCtx ? Math.min(numCtx, capabilities?.contextLimit || numCtx) : undefined;
+  // the Hub's default chat model and may exceed a smaller model's window. When
+  // the per-model limit is unknown, stay conservative at the historical 32000
+  // default rather than the possibly-larger numCtx.
+  const effCtx = numCtx ? Math.min(numCtx, capabilities?.contextLimit ?? 32000) : undefined;
   return {
     id: modelId,
     name: displayName || modelId,
