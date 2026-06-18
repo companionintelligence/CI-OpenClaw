@@ -176,6 +176,20 @@ assert_contains "user NEW_HUB_KEY preserved (not in hardcoded list)" "NEW_HUB_KE
 assert_not_contains "Hub's NEW_HUB_KEY dropped (not in hardcoded list)" "NEW_HUB_KEY=hub-value" "${data_dir}/.env"
 rm -rf "${data_dir}" "${fixture}"
 
+# ─── Test 9: CI_LLM_NUM_CTX retained via hardcoded fallback (no header) ──────
+echo "test: CI_LLM_NUM_CTX is in the hardcoded fallback and is overwritten from Hub"
+data_dir="$(setup_data)"
+printf 'CI_LLM_NUM_CTX=8192\n' > "${data_dir}/.env"
+fixture="$(write_fixture $'OPENAI_API_BASE=http://hub/v1\nCI_LLM_NUM_CTX=32768\n')"
+# No BOOTSTRAP_FIXTURE_MANAGED_KEYS — falls back to the hardcoded list, which now
+# includes CI_LLM_NUM_CTX, so the Hub value overwrites the stale local one.
+OPENCLAW_DATA_DIR="${data_dir}" \
+BOOTSTRAP_FIXTURE_FILE="${fixture}" \
+  "${SCRIPT}" >/dev/null 2>&1
+assert_contains "CI_LLM_NUM_CTX overwritten from Hub via fallback" "CI_LLM_NUM_CTX=32768" "${data_dir}/.env"
+assert_not_contains "stale CI_LLM_NUM_CTX dropped" "CI_LLM_NUM_CTX=8192" "${data_dir}/.env"
+rm -rf "${data_dir}" "${fixture}"
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 echo
 echo "Results: ${PASS} passed, ${FAIL} failed"

@@ -457,34 +457,47 @@ async function fetchOllamaModelCapabilities(ollamaBaseUrl, modelId) {
     body: JSON.stringify({ name: modelId }),
   });
   const caps = Array.isArray(payload?.capabilities) ? payload.capabilities : [];
+  // model_info exposes the model's trained context as "<arch>.context_length".
+  const info = payload?.model_info && typeof payload.model_info === "object" ? payload.model_info : {};
+  const ctxEntry = Object.entries(info).find(([k]) => k.endsWith(".context_length"));
+  const contextLimit = Number.isFinite(ctxEntry?.[1]) ? ctxEntry[1] : undefined;
   return {
     supportsTools: caps.includes("tools"),
     reasoning: caps.includes("thinking"),
     vision: caps.includes("vision"),
+    contextLimit,
   };
 }
 
 // Hardware-aware context window injected by the Hub (CI_LLM_NUM_CTX). Caps both
 // the agent's token budget and the native Ollama num_ctx so OpenClaw doesn't pack
 // to Ollama's oversized memory-based default (e.g. 262144 on unified-memory APUs).
+// Memoized: the value only changes on container restart, and buildOllamaModelEntry
+// is called once per discovered model.
+let _hubNumCtx;
 function resolveHubNumCtx() {
+  if (_hubNumCtx !== undefined) return _hubNumCtx;
   const raw = process.env.CI_LLM_NUM_CTX || readEnv().CI_LLM_NUM_CTX || "";
   const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
+  _hubNumCtx = Number.isFinite(n) && n > 0 ? n : null;
+  return _hubNumCtx;
 }
 
 function buildOllamaModelEntry(modelId, displayName, capabilities) {
-  const numCtx = resolveHubNumCtx();
+  const numCtx = resolveHubNumCtx() || undefined;
+  // Never request more context than the model supports: numCtx is computed for
+  // the Hub's default chat model and may exceed a smaller model's window.
+  const effCtx = numCtx ? Math.min(numCtx, capabilities?.contextLimit || numCtx) : undefined;
   return {
     id: modelId,
     name: displayName || modelId,
     reasoning: capabilities?.reasoning === true,
     input: capabilities?.vision ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: numCtx || 32000,
+    contextWindow: effCtx || capabilities?.contextLimit || 32000,
     maxTokens: 4096,
     compat: { supportsTools: capabilities?.supportsTools === true },
-    ...(numCtx ? { options: { num_ctx: numCtx } } : {}),
+    ...(effCtx ? { options: { num_ctx: effCtx } } : {}),
   };
 }
 
