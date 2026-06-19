@@ -457,23 +457,56 @@ async function fetchOllamaModelCapabilities(ollamaBaseUrl, modelId) {
     body: JSON.stringify({ name: modelId }),
   });
   const caps = Array.isArray(payload?.capabilities) ? payload.capabilities : [];
+  // model_info exposes the model's trained context as "<arch>.context_length".
+  const info = payload?.model_info && typeof payload.model_info === "object" ? payload.model_info : {};
+  const ctxEntry = Object.entries(info).find(([k]) => k.endsWith(".context_length"));
+  // model_info may serialize the value as a number or a numeric string — coerce.
+  const ctxNum = ctxEntry ? Number(ctxEntry[1]) : Number.NaN;
+  const contextLimit = Number.isFinite(ctxNum) && ctxNum > 0 ? ctxNum : undefined;
   return {
     supportsTools: caps.includes("tools"),
     reasoning: caps.includes("thinking"),
     vision: caps.includes("vision"),
+    contextLimit,
   };
 }
 
+// Hardware-aware context window injected by the Hub (CI_LLM_NUM_CTX). Caps both
+// the agent's token budget and the native Ollama num_ctx so OpenClaw doesn't pack
+// to Ollama's oversized memory-based default (e.g. 262144 on unified-memory APUs).
+// Memoized: the value only changes on container restart, and buildOllamaModelEntry
+// is called once per discovered model.
+let _hubNumCtx;
+function resolveHubNumCtx() {
+  if (_hubNumCtx !== undefined) return _hubNumCtx;
+  const raw = process.env.CI_LLM_NUM_CTX || readEnv().CI_LLM_NUM_CTX || "";
+  const n = Number.parseInt(raw, 10);
+  _hubNumCtx = Number.isFinite(n) && n > 0 ? n : null;
+  return _hubNumCtx;
+}
+
 function buildOllamaModelEntry(modelId, displayName, capabilities) {
+  const numCtx = resolveHubNumCtx() || undefined;
+  // Never request more context than the model supports: numCtx is computed for
+  // the Hub's default chat model and may exceed a smaller model's window. When
+  // the per-model limit is unknown, stay conservative at the historical 32000
+  // default rather than the possibly-larger numCtx.
+  const effCtx = numCtx ? Math.min(numCtx, capabilities?.contextLimit ?? 32000) : undefined;
+  // Without an explicit num_ctx, advertise the historical 32000 default but never
+  // more than the model's known window (small-window models would be rejected).
+  const contextWindow = effCtx ?? Math.min(32000, capabilities?.contextLimit ?? 32000);
   return {
     id: modelId,
     name: displayName || modelId,
     reasoning: capabilities?.reasoning === true,
     input: capabilities?.vision ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 32000,
-    maxTokens: 4096,
+    contextWindow,
+    // Output budget can't exceed the total context window (keeps small-context
+    // models internally consistent).
+    maxTokens: Math.min(4096, contextWindow),
     compat: { supportsTools: capabilities?.supportsTools === true },
+    ...(effCtx ? { options: { num_ctx: effCtx } } : {}),
   };
 }
 
