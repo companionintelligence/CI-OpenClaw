@@ -34,6 +34,15 @@ for a second release on the same day.
      `ci-openclaw` findings).
    - Open a PR against the marketplace default branch (`dev`) and merge it once the
      image from step 2 is published.
+4. **Deploy the catalog.** The `Deploy App Catalog` workflow runs on push to **`main`**,
+   *not* on `dev` merges — so merging to `dev` alone does not publish anything. After
+   the PR lands on `dev`, fast-forward `main` to it and push:
+   ```bash
+   git push origin origin/dev:main
+   ```
+   That triggers the deploy (ships every valid `config.json` to R2/D1, then
+   `reconcile.js` prunes). CI-Hub picks up the new version on its next hourly pull of
+   `/api/store`.
 
 > The marketplace `version` and the image tag for **ci-openclaw** are both **un-prefixed**
 > (`2026.6.20`) and must match exactly. (ci-hermes uses the `v`-prefixed form — see its
