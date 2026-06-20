@@ -5,6 +5,40 @@ This repository publishes container images with:
 - image registry: `ghcr.io`
 - tags pushed: release tag only
 
+## Cut a Release (runbook)
+
+End-to-end steps to ship a new version of CI-OpenClaw and point the marketplace at it.
+Tags are date-based and **un-prefixed**: `YYYY.M.D` (e.g. `2026.6.20`). Use `YYYY.M.D.N`
+for a second release on the same day.
+
+1. **Tag the release** from an up-to-date `master` — the tag push triggers the build:
+   ```bash
+   git fetch origin
+   git tag 2026.6.20 origin/master    # tag the commit you want to ship
+   git push origin 2026.6.20
+   ```
+   Or trigger it manually: `Actions` → `Docker Build and Push` → `Run workflow`, with
+   the `tag` input (e.g. `2026.6.20`).
+2. **Watch the build** in `Actions` → `Docker Build and Push` for the tag. It builds
+   multi-arch (`amd64`/`arm64`), pushes
+   `ghcr.io/companionintelligence/ci-openclaw:<TAG>`, and publishes a GitHub Release.
+   Wait for it to go green before step 3 (the marketplace must not point at an image
+   that does not exist yet).
+3. **Bump the marketplace** in `CI-Marketplace` so the appliance installs the new image:
+   - `apps/ci-openclaw/config.json` → set `"version": "<TAG>"` (un-prefixed) and
+     `"updated_at"` to the current time in **epoch milliseconds**
+     (`echo "$(date +%s)000"`).
+   - `apps/ci-openclaw/docker-compose.json` → set the `image:` tag to
+     `ghcr.io/companionintelligence/ci-openclaw:<TAG>`.
+   - Validate: `bun test && bun run scripts/audit-apps.ts` (expect `ERR=0` and no new
+     `ci-openclaw` findings).
+   - Open a PR against the marketplace default branch (`dev`) and merge it once the
+     image from step 2 is published.
+
+> The marketplace `version` and the image tag for **ci-openclaw** are both **un-prefixed**
+> (`2026.6.20`) and must match exactly. (ci-hermes uses the `v`-prefixed form — see its
+> own README-docker-publish.md.)
+
 ## What The Workflow Does
 
 The workflow runs when:
