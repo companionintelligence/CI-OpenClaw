@@ -57,21 +57,28 @@ function readEnv() {
 // config propagates on restart instead of the gateway re-reading the old token.
 const HUB_AUTHORITATIVE_ENV_KEYS = ["CI_SERVER_URL", "CI_SERVER_TOKEN", "CI_SERVER_ENABLED"];
 
+// Overlay Hub-authoritative keys from the live container env onto `env`,
+// mutating and returning it. The container value wins whenever it is set
+// (including CI_SERVER_ENABLED="false", which must be able to disable memory
+// over a stale .env). Keys the container doesn't set are left untouched, so
+// .env / wizard values still apply on older Hub releases and local dev.
+function applyHubAuthoritativeEnv(env) {
+  for (const key of HUB_AUTHORITATIVE_ENV_KEYS) {
+    const fromContainer = process.env[key];
+    if (fromContainer !== undefined && fromContainer !== "") {
+      env[key] = fromContainer;
+    }
+  }
+  return env;
+}
+
 // Build the environment for spawned OpenClaw processes (gateway, doctor,
 // onboard). The persisted .env provides most values — wizard output and the
 // inference keys the Hub delivers only over HTTP — but Hub-authoritative keys
 // are taken from the live container env so a stale persisted copy can't shadow
-// them. Falls back to the .env value when the container env doesn't set the key
-// (older Hub, local dev), keeping prior behavior intact.
+// them.
 function buildChildEnv() {
-  const merged = { ...process.env, ...readEnv() };
-  for (const key of HUB_AUTHORITATIVE_ENV_KEYS) {
-    const fromContainer = process.env[key];
-    if (fromContainer !== undefined && fromContainer !== "") {
-      merged[key] = fromContainer;
-    }
-  }
-  return merged;
+  return applyHubAuthoritativeEnv({ ...process.env, ...readEnv() });
 }
 
 function writeEnv(env) {
@@ -657,9 +664,9 @@ async function reconcileConfig() {
   // (the Hub injects them this way) rather than written into the .env file.
   // Mirror bootstrap-ci-memory.sh, which reads process.env, so the setup-server
   // reconcile activates CI memory consistently regardless of where creds live.
-  for (const key of ["CI_SERVER_URL", "CI_SERVER_TOKEN", "CI_SERVER_ENABLED"]) {
-    if (!env[key] && process.env[key]) env[key] = process.env[key];
-  }
+  // Same precedence as buildChildEnv(): the live container value wins over a
+  // stale .env, so e.g. a Hub CI_SERVER_ENABLED="false" actually disables memory.
+  applyHubAuthoritativeEnv(env);
 
   let changed = false;
 
