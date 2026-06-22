@@ -31,7 +31,7 @@ async function test(label, fn) {
 
 const plugin = (await import(PLUGIN)).default;
 
-function makeApi(env = {}) {
+function makeApi(env = {}, pluginConfig = {}) {
   for (const k of Object.keys(process.env)) if (k.startsWith("CI_SERVER")) delete process.env[k];
   Object.assign(process.env, env);
   const hooks = {};
@@ -40,7 +40,7 @@ function makeApi(env = {}) {
     registerMemoryCapability() {}, registerTool() {},
     registerHook(name, handler) { regHooks[name] = handler; },
     registerCommand() {}, on(name, handler) { hooks[name] = handler; },
-    log: { debug() {}, info() {}, warn() {}, error() {} }, pluginConfig: {},
+    log: { debug() {}, info() {}, warn() {}, error() {} }, pluginConfig,
   };
   return { api, hooks, regHooks };
 }
@@ -190,6 +190,21 @@ await test("agent:bootstrap degrades to guidance-only when context fetch fails",
     const agents = context.bootstrapFiles.find((f) => f.name === "AGENTS.md");
     assert.ok(agents.content.includes("Companion Intelligence is the active OpenClaw memory backend."), "guidance still present");
     assert.ok(!agents.content.includes("<!-- ci-memory:user-context -->"), "no profile block on failure");
+  }));
+
+await test("agent:bootstrap respects injectUserContext:false opt-out (guidance only, no fetch)", () =>
+  withCiServer(contextServer("# User Context\n- Name: Test User"), async (port, cap) => {
+    const { api, regHooks } = makeApi(
+      { CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "ke" },
+      { injectUserContext: false },
+    );
+    plugin.register(api);
+    const context = { cfg: CI_MEMORY_ACTIVE_CFG, bootstrapFiles: [] };
+    await regHooks["agent:bootstrap"]({ context });
+    const agents = context.bootstrapFiles.find((f) => f.name === "AGENTS.md");
+    assert.ok(agents.content.includes("Companion Intelligence is the active OpenClaw memory backend."), "guidance present");
+    assert.ok(!agents.content.includes("<!-- ci-memory:user-context -->"), "no profile block when opted out");
+    assert.ok(!cap.some((c) => c.url === "/api/memory/context"), "no context fetch when opted out");
   }));
 
 await test("agent:bootstrap is a no-op when CI memory is not the active backend", () =>
