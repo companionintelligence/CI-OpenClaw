@@ -58,10 +58,11 @@ function readEnv() {
 const HUB_AUTHORITATIVE_ENV_KEYS = ["CI_SERVER_URL", "CI_SERVER_TOKEN", "CI_SERVER_ENABLED"];
 
 // Overlay Hub-authoritative keys from the live container env onto `env`,
-// mutating and returning it. The container value wins whenever it is set
-// (including CI_SERVER_ENABLED="false", which must be able to disable memory
-// over a stale .env). Keys the container doesn't set are left untouched, so
-// .env / wizard values still apply on older Hub releases and local dev.
+// mutating and returning it. A non-empty container value wins (including
+// CI_SERVER_ENABLED="false", which must be able to disable memory over a stale
+// .env). An unset or empty-string container value is ignored — so an
+// unsubstituted docker-compose `${VAR}` that resolves to "" doesn't blank out a
+// .env / wizard value — leaving older-Hub and local-dev behavior intact.
 function applyHubAuthoritativeEnv(env) {
   for (const key of HUB_AUTHORITATIVE_ENV_KEYS) {
     const fromContainer = process.env[key];
