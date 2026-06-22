@@ -14,6 +14,10 @@ const CI_MEMORY_BOOTSTRAP_GUIDANCE = [
   "Use `memory_search` for topical recall and `memory_get` with `ci-server://profile` for the CI-Server profile block.",
 ].join("\n");
 
+// Marker delimiting the live user-context block injected at agent bootstrap, so
+// it can be deduplicated within a single bootstrap assembly.
+const CI_MEMORY_USER_CONTEXT_MARKER = "<!-- ci-memory:user-context -->";
+
 function jsonResult(payload) {
   return {
     content: [
@@ -83,11 +87,10 @@ function getToolMemoryReferences(event) {
   return strings;
 }
 
-function applyBootstrapMemoryGuidance(event) {
-  const context = event?.context;
-  if (!context || !isCiMemoryActive(context.cfg)) return;
-  if (!Array.isArray(context.bootstrapFiles)) return;
-
+// Ensure the bootstrap memory guidance is present in AGENTS.md. Synchronous and
+// idempotent: appends to an existing AGENTS.md (unless already present) or
+// creates one.
+function injectBootstrapGuidance(context) {
   const agentsFile = context.bootstrapFiles.find((file) => file?.name === "AGENTS.md");
   if (agentsFile) {
     const content = typeof agentsFile.content === "string" ? agentsFile.content : "";
@@ -104,6 +107,69 @@ function applyBootstrapMemoryGuidance(event) {
     missing: false,
     content: CI_MEMORY_BOOTSTRAP_GUIDANCE.trimStart(),
   });
+}
+
+// Fetch the live CI-Server user-context block (current user, top preferences,
+// quick stats). Best-effort and bounded: any error or missing config yields ""
+// so bootstrap is never blocked or broken.
+async function fetchUserContextBlock(api, cfg) {
+  try {
+    const client = createClient(api, cfg);
+    if (!client.config.url || !client.config.token) return "";
+    return normalizeString(await client.context());
+  } catch {
+    return "";
+  }
+}
+
+// Inject the live user-context block into AGENTS.md so models that don't
+// proactively call memory tools (e.g. small local models) still see who the
+// user is without a tool round-trip. Deduplicated via the marker.
+function injectUserContext(context, block) {
+  if (!block) return;
+  const section = [
+    CI_MEMORY_USER_CONTEXT_MARKER,
+    "## Known User Context (Companion Intelligence Memory)",
+    "",
+    "Retrieved live from the active memory backend. Treat this as known facts",
+    "about the current user — you do not need to call a tool to obtain it. Use",
+    "memory_search for anything not covered here.",
+    "",
+    block,
+    "",
+  ].join("\n");
+
+  const agentsFile = context.bootstrapFiles.find((file) => file?.name === "AGENTS.md");
+  if (agentsFile) {
+    const content = typeof agentsFile.content === "string" ? agentsFile.content : "";
+    if (content.includes(CI_MEMORY_USER_CONTEXT_MARKER)) return;
+    agentsFile.content = `${content.trimEnd()}\n\n${section}`;
+    agentsFile.missing = false;
+    return;
+  }
+
+  context.bootstrapFiles.push({
+    name: "AGENTS.md",
+    path: "AGENTS.md",
+    missing: false,
+    content: section,
+  });
+}
+
+async function applyBootstrapMemoryGuidance(event, api) {
+  const context = event?.context;
+  if (!context || !isCiMemoryActive(context.cfg)) return;
+  if (!Array.isArray(context.bootstrapFiles)) return;
+
+  // Static guidance first — synchronous, so it lands even if the bootstrap hook
+  // runner does not await async handlers.
+  injectBootstrapGuidance(context);
+
+  // Then inject the live user-context block. Best-effort: a failed/empty fetch
+  // leaves the guidance-only behavior intact (no regression for strong models
+  // that retrieve via memory_search/memory_get).
+  const block = await fetchUserContextBlock(api, context.cfg);
+  injectUserContext(context, block);
 }
 
 function shouldBlockWorkspaceMemoryWrite(event, ctx) {
@@ -593,11 +659,12 @@ export default {
       name: "memory_store",
     });
 
-    api.registerHook?.("agent:bootstrap", applyBootstrapMemoryGuidance, {
+    api.registerHook?.("agent:bootstrap", (event) => applyBootstrapMemoryGuidance(event, api), {
       name: "companionintelligence-memory-bootstrap",
       description:
-        "Directs OpenClaw memory writes to CI-Server when Companion Intelligence is active.",
+        "Directs OpenClaw memory writes to CI-Server and injects the live CI-Server user-context block at bootstrap so memory works without the model calling a tool.",
       priority: 100,
+      timeoutMs: 5000,
     });
 
     api.on?.("before_tool_call", (event, ctx) => {

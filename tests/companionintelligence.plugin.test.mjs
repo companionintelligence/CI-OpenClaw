@@ -35,13 +35,17 @@ function makeApi(env = {}) {
   for (const k of Object.keys(process.env)) if (k.startsWith("CI_SERVER")) delete process.env[k];
   Object.assign(process.env, env);
   const hooks = {};
+  const regHooks = {};
   const api = {
-    registerMemoryCapability() {}, registerTool() {}, registerHook() {},
+    registerMemoryCapability() {}, registerTool() {},
+    registerHook(name, handler) { regHooks[name] = handler; },
     registerCommand() {}, on(name, handler) { hooks[name] = handler; },
     log: { debug() {}, info() {}, warn() {}, error() {} }, pluginConfig: {},
   };
-  return { api, hooks };
+  return { api, hooks, regHooks };
 }
+
+const CI_MEMORY_ACTIVE_CFG = { plugins: { slots: { memory: "companionintelligence" } } };
 
 async function withCiServer(handler, fn) {
   const captured = [];
@@ -140,6 +144,62 @@ await test("unpaired assistant (no preceding user) posts nothing", () =>
     plugin.register(api);
     await hooks.agent_end({ success: true, messages: [{ role: "assistant", content: "proactive ping" }] }, {});
     assert.equal(cap.length, 0);
+  }));
+
+const contextServer = (block) => (req, res) => {
+  if (req.url === "/api/memory/context") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ block }));
+    return;
+  }
+  res.writeHead(404); res.end("{}");
+};
+
+await test("agent:bootstrap injects guidance + live user-context into AGENTS.md", () =>
+  withCiServer(contextServer("# User Context\n- Name: Test User\n- Pref: Bowling"), async (port, cap) => {
+    const { api, regHooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kb" });
+    plugin.register(api);
+    const context = { cfg: CI_MEMORY_ACTIVE_CFG, bootstrapFiles: [] };
+    await regHooks["agent:bootstrap"]({ context });
+    const agents = context.bootstrapFiles.find((f) => f.name === "AGENTS.md");
+    assert.ok(agents, "AGENTS.md created");
+    assert.ok(agents.content.includes("Companion Intelligence is the active OpenClaw memory backend."), "guidance present");
+    assert.ok(agents.content.includes("- Name: Test User"), "live profile present");
+    assert.ok(agents.content.includes("- Pref: Bowling"), "preferences present");
+    assert.ok(cap.some((c) => c.url === "/api/memory/context" && c.key === "kb"), "context fetched with key");
+  }));
+
+await test("agent:bootstrap is idempotent (no duplicate user-context block)", () =>
+  withCiServer(contextServer("# User Context\n- Name: Test User"), async (port) => {
+    const { api, regHooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kb2" });
+    plugin.register(api);
+    const context = { cfg: CI_MEMORY_ACTIVE_CFG, bootstrapFiles: [] };
+    await regHooks["agent:bootstrap"]({ context });
+    await regHooks["agent:bootstrap"]({ context });
+    const agents = context.bootstrapFiles.find((f) => f.name === "AGENTS.md");
+    const markers = agents.content.split("<!-- ci-memory:user-context -->").length - 1;
+    assert.equal(markers, 1, "user-context injected exactly once");
+  }));
+
+await test("agent:bootstrap degrades to guidance-only when context fetch fails", () =>
+  withCiServer((req, res) => { res.writeHead(500); res.end("{}"); }, async (port) => {
+    const { api, regHooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kc" });
+    plugin.register(api);
+    const context = { cfg: CI_MEMORY_ACTIVE_CFG, bootstrapFiles: [] };
+    await regHooks["agent:bootstrap"]({ context });
+    const agents = context.bootstrapFiles.find((f) => f.name === "AGENTS.md");
+    assert.ok(agents.content.includes("Companion Intelligence is the active OpenClaw memory backend."), "guidance still present");
+    assert.ok(!agents.content.includes("<!-- ci-memory:user-context -->"), "no profile block on failure");
+  }));
+
+await test("agent:bootstrap is a no-op when CI memory is not the active backend", () =>
+  withCiServer(contextServer("# User Context"), async (port, cap) => {
+    const { api, regHooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kd" });
+    plugin.register(api);
+    const context = { cfg: { plugins: { slots: { memory: "memory-core" } } }, bootstrapFiles: [] };
+    await regHooks["agent:bootstrap"]({ context });
+    assert.equal(context.bootstrapFiles.length, 0, "nothing injected");
+    assert.equal(cap.length, 0, "no context fetch");
   }));
 
 console.log(`\n${PASS} passed, ${FAIL} failed`);
