@@ -179,7 +179,7 @@ async function applyBootstrapMemoryGuidance(event, api) {
   // explicit opt-out (config `injectUserContext: false`) for deployments that
   // don't want profile data sent to the model; default stays on.
   const pluginConfig = readLivePluginConfig(api, context.cfg);
-  if (pluginConfig.injectUserContext === false) return;
+  if (pluginConfig.injectUserContext === false || !featureEnabled("CI_MEMORY_CONTEXT_ENABLED")) return;
 
   // Then inject the live user-context block. Best-effort: a failed/empty fetch
   // leaves the guidance-only behavior intact (no regression for strong models
@@ -213,6 +213,20 @@ function readLivePluginConfig(api, cfg) {
   return entryConfig && typeof entryConfig === "object" && !Array.isArray(entryConfig)
     ? entryConfig
     : api.pluginConfig || {};
+}
+
+// API-system feature flags. Each CI-Server API the plugin uses can be turned
+// on/off independently via an env var (default on). Flag names match CI-Hermes:
+//   CI_MEMORY_CONTEXT_ENABLED  — L0 profile (/api/memory/context): bootstrap block + memory_get
+//   CI_MEMORY_RECALL_ENABLED   — L1 recall (/api/memory/recall): memory_search
+//   CI_MEMORY_TURN_ENABLED     — turn-sync (/api/memory/turn): agent_end + before_compaction
+//   CI_MEMORY_WRITE_ENABLED    — durable notes (/api/memory/write): memory_store
+//   CI_INTENTS_ENABLED         — intent catalog (/api/intents): ci_list_intents
+const FEATURE_FALSY = new Set(["0", "false", "no", "off"]);
+function featureEnabled(envName, defaultOn = true) {
+  const raw = process.env[envName];
+  if (raw === undefined || String(raw).trim() === "") return defaultOn;
+  return !FEATURE_FALSY.has(String(raw).trim().toLowerCase());
 }
 
 function normalizeBaseUrl(url) {
@@ -687,29 +701,38 @@ export default {
       },
     });
 
-    api.registerTool(() => createMemorySearchTool(api), {
-      name: "memory_search",
-    });
-    api.registerTool(() => createMemoryGetTool(api), {
-      name: "memory_get",
-    });
-    api.registerTool((ctx) => {
-      const tool = createMemoryStoreTool(api);
-      return {
-        ...tool,
-        execute: (toolCallId, params, signal, onUpdate) =>
-          tool.execute(toolCallId, params, signal, onUpdate, ctx),
-      };
-    }, {
-      name: "memory_store",
-    });
+    // Each tool is registered only when its CI-Server API system is enabled.
+    if (featureEnabled("CI_MEMORY_RECALL_ENABLED")) {
+      api.registerTool(() => createMemorySearchTool(api), {
+        name: "memory_search",
+      });
+    }
+    if (featureEnabled("CI_MEMORY_CONTEXT_ENABLED")) {
+      api.registerTool(() => createMemoryGetTool(api), {
+        name: "memory_get",
+      });
+    }
+    if (featureEnabled("CI_MEMORY_WRITE_ENABLED")) {
+      api.registerTool((ctx) => {
+        const tool = createMemoryStoreTool(api);
+        return {
+          ...tool,
+          execute: (toolCallId, params, signal, onUpdate) =>
+            tool.execute(toolCallId, params, signal, onUpdate, ctx),
+        };
+      }, {
+        name: "memory_store",
+      });
+    }
 
     // Curated CI Intent catalog discovery — lets the agent learn the typed,
     // privacy-labelled vocabulary CI-Server publishes (one shared catalog instead
     // of bespoke per-harness glue) and prefer those intents over raw CRUD.
-    api.registerTool(() => createListIntentsTool(api), {
-      name: "ci_list_intents",
-    });
+    if (featureEnabled("CI_INTENTS_ENABLED")) {
+      api.registerTool(() => createListIntentsTool(api), {
+        name: "ci_list_intents",
+      });
+    }
 
     api.registerHook?.("agent:bootstrap", (event) => applyBootstrapMemoryGuidance(event, api), {
       name: "companionintelligence-memory-bootstrap",
@@ -734,7 +757,7 @@ export default {
     // agent_end is a conversation hook, so the plugin entry must set
     // `hooks.allowConversationAccess: true` (the CI bootstrap does this).
     api.on?.("agent_end", async (event, ctx) => {
-      if (event?.success === false) return;
+      if (event?.success === false || !featureEnabled("CI_MEMORY_TURN_ENABLED")) return;
       const exchange = latestExchange(normalizeTurnMessages(event?.messages));
       await syncTurn(api, exchange, normalizeString(ctx?.sessionId || ctx?.sessionKey));
     }, {
@@ -746,6 +769,7 @@ export default {
     // compacted away, mirroring Hermes on_pre_compress. before_compaction is not
     // a conversation hook and needs no extra access flag.
     api.on?.("before_compaction", async (event, ctx) => {
+      if (!featureEnabled("CI_MEMORY_TURN_ENABLED")) return;
       const turns = normalizeTurnMessages(event?.messages);
       await syncTurn(api, turns, normalizeString(ctx?.sessionId || ctx?.sessionKey));
     }, {
