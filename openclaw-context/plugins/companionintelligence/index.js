@@ -1,3 +1,5 @@
+import { fetchIntentManifest, describeCatalogForPrompt } from "./intentCatalog.js";
+
 const PLUGIN_ID = "companionintelligence";
 const DEFAULT_TIMEOUT_MS = 10000;
 const DEFAULT_MAX_RESULTS = 5;
@@ -213,6 +215,13 @@ function readLivePluginConfig(api, cfg) {
     : api.pluginConfig || {};
 }
 
+function normalizeBaseUrl(url) {
+  // Strip trailing slashes and a legacy `/api/mcp` suffix (matches CI-Hermes) so
+  // an old config value pointing at the MCP path still resolves to the gateway base.
+  const base = url.replace(/\/+$/, "");
+  return base.endsWith("/api/mcp") ? base.slice(0, -"/api/mcp".length) : base;
+}
+
 function resolveConfig(api, cfg) {
   const pluginConfig = readLivePluginConfig(api, cfg);
   const url = normalizeString(pluginConfig.url || process.env.CI_SERVER_URL);
@@ -227,7 +236,7 @@ function resolveConfig(api, cfg) {
       : DEFAULT_MAX_RESULTS;
 
   return {
-    url: url.replace(/\/+$/, ""),
+    url: normalizeBaseUrl(url),
     token,
     timeoutMs,
     maxResults,
@@ -599,6 +608,28 @@ function createMemoryGetTool(api) {
   };
 }
 
+function createListIntentsTool(api) {
+  return {
+    name: "ci_list_intents",
+    label: "List CI Intents",
+    description:
+      "List the curated Companion Intelligence intent catalog — the typed, privacy-labelled actions to prefer over raw CRUD (memory.*, knowledge.*, people.*, places.*, calendar.*, media.*). Returns each intent's tool name to call.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    execute: async () => {
+      const client = createClient(api);
+      const manifest = await fetchIntentManifest((path) => requestJson(client.config, path));
+      if (!manifest) {
+        return jsonResult({ available: false, error: "CI Intent catalog unavailable" });
+      }
+      return jsonResult({
+        available: true,
+        domains: Array.isArray(manifest.domains) ? manifest.domains.map((d) => d.key) : [],
+        catalog: describeCatalogForPrompt(manifest),
+      });
+    },
+  };
+}
+
 function createMemoryStoreTool(api) {
   return {
     name: "memory_store",
@@ -671,6 +702,13 @@ export default {
       };
     }, {
       name: "memory_store",
+    });
+
+    // Curated CI Intent catalog discovery — lets the agent learn the typed,
+    // privacy-labelled vocabulary CI-Server publishes (one shared catalog instead
+    // of bespoke per-harness glue) and prefer those intents over raw CRUD.
+    api.registerTool(() => createListIntentsTool(api), {
+      name: "ci_list_intents",
     });
 
     api.registerHook?.("agent:bootstrap", (event) => applyBootstrapMemoryGuidance(event, api), {
