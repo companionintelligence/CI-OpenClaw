@@ -138,7 +138,7 @@ async function runAgentEnd(api) {
   );
 }
 
-test("agent_end posts a turn by default", async () => {
+test("agent_end posts a turn (POST /api/memory/turn with platform/sessionId and auth headers)", async () => {
   const calls = [];
   const origFetch = global.fetch;
   global.fetch = async (url, opts) => {
@@ -149,6 +149,14 @@ test("agent_end posts a turn by default", async () => {
     await runAgentEnd(register());
     assert.equal(calls.length, 1);
     assert.ok(calls[0].url.includes("/api/memory/turn"), calls[0].url);
+    assert.equal(calls[0].opts.method, "POST");
+    assert.equal(calls[0].opts.headers["x-api-key"], "tok");
+    assert.equal(calls[0].opts.headers["Content-Type"], "application/json");
+    assert.equal(calls[0].opts.headers["Accept"], "application/json");
+    const body = JSON.parse(calls[0].opts.body);
+    assert.equal(body.platform, "openclaw");
+    assert.equal(body.sessionId, "s1");
+    assert.ok(Array.isArray(body.messages) && body.messages.length >= 1);
   } finally {
     global.fetch = origFetch;
     clearFlags();
@@ -180,17 +188,20 @@ async function runBeforeCompaction(api) {
   );
 }
 
-test("before_compaction posts a turn by default", async () => {
+test("before_compaction posts a turn by default (platform/sessionId in body)", async () => {
   const calls = [];
   const origFetch = global.fetch;
-  global.fetch = async (url) => {
-    calls.push(String(url));
+  global.fetch = async (url, opts) => {
+    calls.push({ url: String(url), opts });
     return { ok: true, status: 200, text: async () => "{}" };
   };
   try {
     await runBeforeCompaction(register());
     assert.equal(calls.length, 1);
-    assert.ok(calls[0].includes("/api/memory/turn"), calls[0]);
+    assert.ok(calls[0].url.includes("/api/memory/turn"), calls[0].url);
+    const body = JSON.parse(calls[0].opts.body);
+    assert.equal(body.platform, "openclaw");
+    assert.equal(body.sessionId, "s1");
   } finally {
     global.fetch = origFetch;
     clearFlags();
@@ -249,8 +260,19 @@ test("memory_search.execute recalls from /api/memory/recall and builds results",
     const payload = JSON.parse(res.content[0].text);
     assert.ok(calls[0].url.includes("/api/memory/recall"), calls[0].url);
     assert.deepEqual(JSON.parse(calls[0].body), { query: "hi", maxResults: 3 });
-    assert.ok(Array.isArray(payload.results) && payload.results.length >= 1);
-    assert.ok(payload.results[0].snippet.includes("alpha"));
+    // 3 lines / maxResults=3 -> chunkSize 1 -> exactly 3 results, with the
+    // scoring schedule [1, 0.9, 0.8] (first chunk = 1.0, others decay).
+    assert.equal(payload.results.length, 3);
+    assert.equal(payload.results[0].snippet, "alpha");
+    assert.equal(payload.results[1].snippet, "beta");
+    assert.equal(payload.results[2].snippet, "gamma");
+    assert.equal(payload.results[0].score, 1);
+    assert.equal(payload.results[1].score, 0.9);
+    for (const r of payload.results) {
+      assert.equal(r.source, "memory");
+      assert.ok(r.path.startsWith("ci-server://recall#"), r.path);
+      assert.ok(r.citation.includes("hi"));
+    }
   } finally {
     global.fetch = origFetch;
     clearFlags();
@@ -357,12 +379,12 @@ test("memory_store.execute requires content", async () => {
   }
 });
 
-test("memory_store.execute falls back to /api/memory/note on 404", async () => {
-  const urls = [];
+test("memory_store.execute falls back to /api/memory/note on 404 with the same POST body", async () => {
+  const calls = [];
   const origFetch = global.fetch;
-  global.fetch = async (url) => {
+  global.fetch = async (url, opts) => {
     const u = String(url);
-    urls.push(u);
+    calls.push({ url: u, opts });
     if (u.includes("/api/memory/write")) return { ok: false, status: 404, text: async () => "{}" };
     return { ok: true, status: 200, text: async () => "{}" };
   };
@@ -371,8 +393,110 @@ test("memory_store.execute falls back to /api/memory/note on 404", async () => {
     const res = await api._toolFactories["memory_store"]({}).execute("id", { content: "x" });
     const payload = JSON.parse(res.content[0].text);
     assert.equal(payload.ok, true);
-    assert.ok(urls.some((u) => u.includes("/api/memory/write")));
-    assert.ok(urls.some((u) => u.includes("/api/memory/note")));
+    assert.equal(calls.length, 2);
+    assert.ok(calls[0].url.includes("/api/memory/write"));
+    assert.ok(calls[1].url.includes("/api/memory/note"));
+    // The fallback must POST and carry the same payload — a regression that
+    // sent GET, dropped the body, or shuffled fields would now fail.
+    assert.equal(calls[1].opts.method, "POST");
+    const body = JSON.parse(calls[1].opts.body);
+    assert.equal(body.content, "x");
+    assert.equal(body.source, "openclaw");
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+// ── local-memory-write guard (protects the CI memory backend's integrity) ─────
+
+const CI_ACTIVE = { config: { plugins: { slots: { memory: "companionintelligence" } } } };
+
+test("before_tool_call blocks the agent writing local MEMORY.md when CI memory is active", () => {
+  const api = register();
+  const guard = api._handlers["before_tool_call"];
+  assert.equal(typeof guard, "function");
+  const res = guard({ toolName: "write_file", params: { path: "MEMORY.md", content: "x" } }, CI_ACTIVE);
+  assert.equal(res?.block, true);
+  assert.ok(res.blockReason);
+  clearFlags();
+});
+
+test("before_tool_call allows normal file writes and the plugin's own memory tools", () => {
+  const api = register();
+  const guard = api._handlers["before_tool_call"];
+  assert.equal(guard({ toolName: "write_file", params: { path: "src/index.ts" } }, CI_ACTIVE), undefined);
+  assert.equal(guard({ toolName: "memory_store", params: { content: "remember" } }, CI_ACTIVE), undefined);
+  clearFlags();
+});
+
+test("before_tool_call does not block when CI memory is not the active backend", () => {
+  const api = register();
+  const guard = api._handlers["before_tool_call"];
+  const ctx = { config: { plugins: { slots: { memory: "other-provider" } } } };
+  assert.equal(guard({ toolName: "write_file", params: { path: "MEMORY.md" } }, ctx), undefined);
+  clearFlags();
+});
+
+// Path matching covers the variants the guard's regex must catch; a regression in
+// the regex (case, sub-path, sqlite extension, backslash) would now fail here.
+for (const path of [
+  "USER.md",
+  "user.md",
+  "MEMORY.md",
+  "/repo/memory/notes.md",
+  "/data/.openclaw/memory/main.sqlite",
+  "/data/.openclaw/memory/index.sqlite3",
+]) {
+  test(`before_tool_call blocks a write referencing ${path}`, () => {
+    const api = register();
+    const res = api._handlers["before_tool_call"]({ toolName: "write_file", params: { path } }, CI_ACTIVE);
+    assert.equal(res?.block, true, `path ${path} should be blocked`);
+    clearFlags();
+  });
+}
+
+for (const path of ["USER_notes.md", "src/memory.txt", "/data/.openclaw/cache/x.sqlite"]) {
+  test(`before_tool_call does NOT block unrelated ${path}`, () => {
+    const api = register();
+    assert.equal(
+      api._handlers["before_tool_call"]({ toolName: "write_file", params: { path } }, CI_ACTIVE),
+      undefined,
+      `path ${path} should not be blocked`,
+    );
+    clearFlags();
+  });
+}
+
+// ── transport-layer (requestJson) — empty body + error-detail extraction ──────
+
+test("memory_search.execute treats an empty server body as {} (no JSON parse throw)", async () => {
+  const origFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200, text: async () => "" });
+  try {
+    const api = register();
+    const res = await api._toolFactories["memory_search"]().execute("id", { query: "q" });
+    const payload = JSON.parse(res.content[0].text);
+    assert.deepEqual(payload.results, []); // empty block → no chunks
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("memory_search.execute surfaces the server's body.error in the thrown HTTP message", async () => {
+  const origFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: false,
+    status: 500,
+    text: async () => JSON.stringify({ error: "boom-detail" }),
+  });
+  try {
+    const api = register();
+    await assert.rejects(
+      api._toolFactories["memory_search"]().execute("id", { query: "q" }),
+      (err) => String(err.message).includes("boom-detail") && String(err.message).includes("500"),
+    );
   } finally {
     global.fetch = origFetch;
     clearFlags();
