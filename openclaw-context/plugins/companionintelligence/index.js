@@ -801,3 +801,6 @@ export default {
     });
   },
 };
+
+// Exported for unit tests (does not affect the default-export plugin entrypoint).
+export { featureEnabled, normalizeBaseUrl };
