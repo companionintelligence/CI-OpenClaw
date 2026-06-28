@@ -233,3 +233,148 @@ test("ci_list_intents tool fetches /api/intents and returns the rendered catalog
     clearFlags();
   }
 });
+
+// ── memory tool execute() handlers — the core memory functionality ────────────
+
+test("memory_search.execute recalls from /api/memory/recall and builds results", async () => {
+  const calls = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    calls.push({ url: String(url), body: opts?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify({ block: "alpha\nbeta\ngamma" }) };
+  };
+  try {
+    const api = register();
+    const res = await api._toolFactories["memory_search"]().execute("id", { query: "hi", maxResults: 3 });
+    const payload = JSON.parse(res.content[0].text);
+    assert.ok(calls[0].url.includes("/api/memory/recall"), calls[0].url);
+    assert.deepEqual(JSON.parse(calls[0].body), { query: "hi", maxResults: 3 });
+    assert.ok(Array.isArray(payload.results) && payload.results.length >= 1);
+    assert.ok(payload.results[0].snippet.includes("alpha"));
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("memory_search.execute requires a query and never calls the server", async () => {
+  let called = false;
+  const origFetch = global.fetch;
+  global.fetch = async () => {
+    called = true;
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  try {
+    const api = register();
+    const res = await api._toolFactories["memory_search"]().execute("id", { query: "" });
+    const payload = JSON.parse(res.content[0].text);
+    assert.deepEqual(payload.results, []);
+    assert.ok(payload.error);
+    assert.equal(called, false);
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("memory_get.execute returns the CI-Server profile block", async () => {
+  const origFetch = global.fetch;
+  global.fetch = async (url) => {
+    assert.ok(String(url).includes("/api/memory/context"), String(url));
+    return { ok: true, status: 200, text: async () => JSON.stringify({ block: "PROFILE LINE 1\nLINE 2" }) };
+  };
+  try {
+    const api = register();
+    const res = await api._toolFactories["memory_get"]().execute("id", { path: "ci-server://profile" });
+    assert.ok(JSON.stringify(JSON.parse(res.content[0].text)).includes("PROFILE LINE 1"));
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("memory_get.execute reports unsupported non-profile paths without calling the server", async () => {
+  let called = false;
+  const origFetch = global.fetch;
+  global.fetch = async () => {
+    called = true;
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  try {
+    const api = register();
+    const res = await api._toolFactories["memory_get"]().execute("id", { path: "/some/file.md" });
+    const payload = JSON.parse(res.content[0].text);
+    assert.equal(payload.found, false);
+    assert.ok(payload.error);
+    assert.equal(called, false);
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("memory_store.execute writes a durable note with source + sessionId", async () => {
+  const posts = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    posts.push({ url: String(url), body: opts?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify({ id: "n1" }) };
+  };
+  try {
+    const api = register();
+    // memory_store's factory is wrapped to bake the conversation ctx in.
+    const tool = api._toolFactories["memory_store"]({ sessionId: "s1" });
+    const res = await tool.execute("id", { content: "remember X", title: "T" });
+    const payload = JSON.parse(res.content[0].text);
+    assert.equal(payload.ok, true);
+    assert.ok(posts[0].url.includes("/api/memory/write"), posts[0].url);
+    const sent = JSON.parse(posts[0].body);
+    assert.equal(sent.content, "remember X");
+    assert.equal(sent.source, "openclaw");
+    assert.equal(sent.sessionId, "s1");
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("memory_store.execute requires content", async () => {
+  let called = false;
+  const origFetch = global.fetch;
+  global.fetch = async () => {
+    called = true;
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  try {
+    const api = register();
+    const res = await api._toolFactories["memory_store"]({}).execute("id", { content: "" });
+    const payload = JSON.parse(res.content[0].text);
+    assert.equal(payload.ok, false);
+    assert.equal(called, false);
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("memory_store.execute falls back to /api/memory/note on 404", async () => {
+  const urls = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url) => {
+    const u = String(url);
+    urls.push(u);
+    if (u.includes("/api/memory/write")) return { ok: false, status: 404, text: async () => "{}" };
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  try {
+    const api = register();
+    const res = await api._toolFactories["memory_store"]({}).execute("id", { content: "x" });
+    const payload = JSON.parse(res.content[0].text);
+    assert.equal(payload.ok, true);
+    assert.ok(urls.some((u) => u.includes("/api/memory/write")));
+    assert.ok(urls.some((u) => u.includes("/api/memory/note")));
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
