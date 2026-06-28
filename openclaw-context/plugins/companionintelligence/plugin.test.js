@@ -17,6 +17,7 @@ function clearFlags() {
 
 function makeApi() {
   const tools = [];
+  const toolFactories = {};
   const commands = [];
   const handlers = {};
   return {
@@ -24,8 +25,9 @@ function makeApi() {
     config: {},
     runtime: {},
     registerMemoryCapability() {},
-    registerTool(_factory, opts) {
+    registerTool(factory, opts) {
       tools.push(opts.name);
+      toolFactories[opts.name] = factory;
     },
     registerCommand(opts) {
       commands.push(opts?.name ?? opts);
@@ -38,10 +40,31 @@ function makeApi() {
     },
     log: { debug() {}, info() {}, warn() {} },
     _tools: tools,
+    _toolFactories: toolFactories,
     _commands: commands,
     _handlers: handlers,
   };
 }
+
+const MANIFEST = {
+  version: "1.0.0",
+  domains: [{ key: "memory", title: "Memory", description: "x" }],
+  entities: [],
+  intents: [
+    {
+      name: "memory.recall",
+      tool: "memory_recall",
+      domain: "memory",
+      title: "Recall",
+      description: "Recall stored facts.",
+      parameters: { type: "object" },
+      privacy: { access: "read", sensitivity: "personal", destructive: false, external: false },
+      consumes: [],
+      produces: ["concept"],
+      phrases: [],
+    },
+  ],
+};
 
 // Register the plugin with the given env flags set. Flags are left in place so
 // hook handlers (which re-check the flag when invoked) see them; the next call
@@ -142,6 +165,69 @@ test("agent_end no-ops (no fetch) when CI_MEMORY_TURN_ENABLED=off", async () => 
   try {
     await runAgentEnd(register({ CI_MEMORY_TURN_ENABLED: "false" }));
     assert.equal(calls.length, 0, "turn sync must not fire when disabled");
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+async function runBeforeCompaction(api) {
+  const handler = api._handlers["before_compaction"];
+  assert.equal(typeof handler, "function");
+  await handler(
+    { messages: [{ role: "user", content: "u" }, { role: "assistant", content: "a" }] },
+    { sessionId: "s1" },
+  );
+}
+
+test("before_compaction posts a turn by default", async () => {
+  const calls = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url) => {
+    calls.push(String(url));
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  try {
+    await runBeforeCompaction(register());
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].includes("/api/memory/turn"), calls[0]);
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("before_compaction no-ops (no fetch) when CI_MEMORY_TURN_ENABLED=off", async () => {
+  const calls = [];
+  const origFetch = global.fetch;
+  global.fetch = async (...a) => {
+    calls.push(a);
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  try {
+    await runBeforeCompaction(register({ CI_MEMORY_TURN_ENABLED: "false" }));
+    assert.equal(calls.length, 0, "turn sync must not fire when disabled");
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+// Exercise a real tool's execute() handler end-to-end (not just registration).
+test("ci_list_intents tool fetches /api/intents and returns the rendered catalog", async () => {
+  const origFetch = global.fetch;
+  global.fetch = async (url) => {
+    assert.ok(String(url).includes("/api/intents"), String(url));
+    return { ok: true, status: 200, text: async () => JSON.stringify(MANIFEST) };
+  };
+  try {
+    const api = register();
+    const tool = api._toolFactories["ci_list_intents"]();
+    const result = await tool.execute();
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.available, true);
+    assert.deepEqual(payload.domains, ["memory"]);
+    assert.ok(payload.catalog.includes("memory_recall"), payload.catalog);
   } finally {
     global.fetch = origFetch;
     clearFlags();
