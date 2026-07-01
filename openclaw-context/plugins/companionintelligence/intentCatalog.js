@@ -3,7 +3,8 @@
  *
  * Historically each CI harness re-implemented its own integration glue. CI-Server
  * now publishes ONE curated, typed, domain-organized capability catalog at
- * `GET /api/intents` and as an `intents://catalog` MCP resource. This module lets
+ * `GET /api/agent/intents` (legacy alias `/api/intents`; also an
+ * `intents://catalog` MCP resource). This module lets
  * OpenClaw consume that shared catalog so the agent prefers the curated,
  * privacy-labelled intents over raw CRUD, and so adding capabilities upstream
  * automatically reaches the harness.
@@ -21,16 +22,22 @@
  * @param {(path: string) => Promise<any>} getJson
  * @returns {Promise<object|null>}
  */
+// Canonical path first, then the deprecated alias for older CI-Server builds
+// that still serve the catalog from /api/intents.
+const CATALOG_PATHS = ["/api/agent/intents", "/api/intents"];
+
 export async function fetchIntentManifest(getJson) {
-  try {
-    const body = await getJson("/api/intents");
-    if (!body || !Array.isArray(body.intents)) {
-      return null;
+  for (const path of CATALOG_PATHS) {
+    try {
+      const body = await getJson(path);
+      if (body && Array.isArray(body.intents)) {
+        return body;
+      }
+    } catch {
+      // try the next path
     }
-    return body;
-  } catch {
-    return null;
   }
+  return null;
 }
 
 /**
