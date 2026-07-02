@@ -26,5 +26,6 @@ fi
 
 /app/bootstrap-from-hub.sh || true
 /app/bootstrap-ci-memory.sh || true
+/app/bootstrap-ci-hub-mcp.sh || true
 
 exec node /app/setup-server.cjs

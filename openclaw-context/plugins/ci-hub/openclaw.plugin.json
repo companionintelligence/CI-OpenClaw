@@ -1,0 +1,15 @@
+{
+  "id": "ci-hub",
+  "name": "CI Hub",
+  "version": "1.0.0",
+  "description": "OpenClaw plugin for controlling CI-Hub via MCP. Provides tool access, wake notifications, and SSE event streaming.",
+  "author": "Companion Intelligence",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

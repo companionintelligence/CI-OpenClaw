@@ -21,6 +21,8 @@ const CI_PLUGIN_PATH = "/app/openclaw-context/plugins/ci-runtime";
 const CI_MEMORY_PLUGIN_ID = "companionintelligence";
 const CI_MEMORY_PLUGIN_PATH =
   "/app/openclaw-context/plugins/companionintelligence";
+const CI_HUB_PLUGIN_ID = "ci-hub";
+const CI_HUB_PLUGIN_PATH = "/app/openclaw-context/plugins/ci-hub";
 // Anti-CSWSH token for the setup terminal WebSocket. Browsers don't enforce the
 // same-origin policy on WebSocket upgrades, so without this any site could connect
 // to /api/terminal and hijack the onboarding PTY. We embed APP_SEED (per-user
@@ -55,7 +57,16 @@ function readEnv() {
 // token left behind by a prior install whose data dir survived an incomplete
 // uninstall. For these keys the live container env wins, so an updated Hub
 // config propagates on restart instead of the gateway re-reading the old token.
-const HUB_AUTHORITATIVE_ENV_KEYS = ["CI_SERVER_URL", "CI_SERVER_TOKEN", "CI_SERVER_ENABLED"];
+const HUB_AUTHORITATIVE_ENV_KEYS = [
+  "CI_SERVER_URL",
+  "CI_SERVER_TOKEN",
+  "CI_SERVER_ENABLED",
+  "HUB_URL",
+  "HUB_MCP_URL",
+  "HUB_MCP_API_KEY",
+  "HUB_WAKE_SECRET",
+  "HUB_MCP_ENABLED",
+];
 
 // Overlay Hub-authoritative keys from the live container env onto `env`,
 // mutating and returning it. A non-empty container value wins (including
@@ -253,6 +264,14 @@ function hasCiServerCredentials(env) {
     env.CI_SERVER_URL &&
     env.CI_SERVER_TOKEN &&
     env.CI_SERVER_ENABLED !== "false"
+  );
+}
+
+function hasHubMcpCredentials(env) {
+  return !!(
+    (env.HUB_URL || env.HUB_MCP_URL) &&
+    env.HUB_MCP_API_KEY &&
+    env.HUB_MCP_ENABLED !== "false"
   );
 }
 
@@ -765,6 +784,16 @@ async function reconcileConfig() {
       changed = ensureMemoryStoreToolAllowed(config) || changed;
     }
   }
+
+  // Enable the CI-Hub MCP plugin when Hub injects MCP credentials.
+  changed =
+    ensureOpenClawPlugin(
+      config,
+      CI_HUB_PLUGIN_ID,
+      CI_HUB_PLUGIN_PATH,
+      "CI Hub MCP",
+      { enableEntry: hasHubMcpCredentials(env) },
+    ) || changed;
 
   // Ensure a gateway auth token exists — the onboard CLI does not generate one,
   // so without this the Control UI WebSocket fails with "token_missing".
