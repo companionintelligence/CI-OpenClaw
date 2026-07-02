@@ -16,6 +16,7 @@ This is a containerized version of OpenClaw with seamless onboarding on the CI m
 - apt/apt-get disabled with a message telling openclaw to use brew instead
 - Globally installed node modules persisted between app updates
 - A bundled `companionintelligence` memory plugin that can use CI-Server as OpenClaw's active memory backend when `CI_SERVER_URL` and `CI_SERVER_TOKEN` are configured
+- A bundled `ci-hub` plugin that connects to Hub MCP automatically when the Hub injects `HUB_URL` / `HUB_MCP_API_KEY` (default on CI marketplace installs with MCP enabled)
 - Security features that complicate setup disabled which are not required on the CI marketplace due to OpenClaw already being protected when running behind the CI app proxy
 
 This creates a seamless one-click install experience for OpenClaw on the CI marketplace.
@@ -180,6 +181,30 @@ docker compose restart openclaw
 ```
 
 If OpenClaw tries to write `USER.md`, `MEMORY.md`, or `/data/.openclaw/memory/main.sqlite`, the CI memory plugin should block that path. CI-Server is the authoritative memory backend when `companionintelligence` is active.
+
+## Hub MCP (platform tools)
+
+On CI marketplace installs, the Hub injects MCP credentials automatically (`HUB_URL`, `HUB_MCP_URL`, `HUB_MCP_API_KEY`, `HUB_WAKE_SECRET`). Container startup runs:
+
+1. `/app/bootstrap-from-hub.sh` — inference + Hub env
+2. `/app/bootstrap-ci-memory.sh` — optional CI-Server memory plugin
+3. `/app/bootstrap-ci-hub-mcp.sh` — registers the bundled `ci-hub` plugin
+
+The setup server also reconciles the plugin into `openclaw.json` when credentials are present. Hub-authoritative env keys always win over stale values in `/data/.openclaw/.env`.
+
+If Hub MCP is disabled (`HUB_MCP_ENABLED=false` in the container env), bootstrap steps no-op gracefully. Run `cihub mcp setup` on the Hub to provision a key for existing installs.
+
+To rebuild the vendored plugin after changing `ci-hub/packages/openclaw-plugin`:
+
+```bash
+cd ci-hub/packages/openclaw-plugin && pnpm bundle
+```
+
+The bundle is written to `packages/openclaw-plugin/dist/hub-plugin.mjs` by default. To sync into this repo's vendored plugin directory:
+
+```bash
+OPENCLAW_PLUGIN_OUT_DIR=/path/to/CI-OpenClaw/openclaw-context/plugins/ci-hub pnpm bundle
+```
 
 ## License
 
