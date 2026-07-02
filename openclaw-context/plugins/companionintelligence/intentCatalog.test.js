@@ -50,11 +50,24 @@ const MANIFEST = {
   ],
 };
 
-test("fetchIntentManifest returns the manifest when valid", async () => {
+test("fetchIntentManifest prefers the canonical /api/agent/intents path", async () => {
+  const seen = [];
   const manifest = await fetchIntentManifest(async (path) => {
-    assert.equal(path, "/api/intents");
+    seen.push(path);
     return MANIFEST;
   });
+  assert.deepEqual(seen, ["/api/agent/intents"]);
+  assert.equal(manifest.intents.length, 3);
+});
+
+test("fetchIntentManifest falls back to /api/intents when the agent path 404s", async () => {
+  const seen = [];
+  const manifest = await fetchIntentManifest(async (path) => {
+    seen.push(path);
+    if (path === "/api/agent/intents") throw new Error("HTTP 404"); // older CI-Server
+    return MANIFEST;
+  });
+  assert.deepEqual(seen, ["/api/agent/intents", "/api/intents"]);
   assert.equal(manifest.intents.length, 3);
 });
 
