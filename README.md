@@ -192,7 +192,7 @@ On CI marketplace installs, the Hub injects MCP credentials automatically (`HUB_
 
 The setup server also reconciles the plugin into `openclaw.json` when credentials are present. Hub-authoritative env keys always win over stale values in `/data/.openclaw/.env`.
 
-If Hub MCP is disabled (`MCP_ENABLED=false` on the Hub), bootstrap steps no-op gracefully. Run `cihub mcp setup` on the Hub to provision a key for existing installs.
+If Hub MCP is disabled (`HUB_MCP_ENABLED=false` in the container env), bootstrap steps no-op gracefully. Run `cihub mcp setup` on the Hub to provision a key for existing installs.
 
 To rebuild the vendored plugin after changing `ci-hub/packages/openclaw-plugin`:
 

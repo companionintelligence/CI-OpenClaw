@@ -64,6 +64,10 @@ var McpClient = class {
         } else if (line.startsWith("data: ") && currentEvent === "endpoint") {
           const messagesUrl = line.slice(6).trim();
           this.log.info(`Discovered MCP messages endpoint: ${messagesUrl}`);
+          try {
+            await reader.cancel();
+          } catch {
+          }
           return messagesUrl;
         }
       }
@@ -347,13 +351,27 @@ var SseListenerService = class {
 };
 
 // src/index.ts
+function resolveHubBaseUrl(config) {
+  if (config.hubUrl) {
+    return config.hubUrl.replace(/\/$/, "");
+  }
+  const hubUrl = process.env.HUB_URL?.trim();
+  if (hubUrl) {
+    return hubUrl.replace(/\/$/, "");
+  }
+  const mcpUrl = process.env.HUB_MCP_URL?.trim();
+  if (mcpUrl) {
+    return mcpUrl.replace(/\/api\/mcp\/sse\/?$/i, "").replace(/\/api\/mcp\/?$/i, "").replace(/\/$/, "");
+  }
+  return void 0;
+}
 async function register(api, config) {
-  const hubUrl = config.hubUrl || process.env.HUB_URL;
+  const hubUrl = resolveHubBaseUrl(config);
   const hubApiKey = config.hubApiKey || process.env.HUB_API_KEY;
   const mcpApiKey = config.mcpApiKey || process.env.HUB_MCP_API_KEY || hubApiKey;
   const wakeSecret = config.wakeSecret || process.env.HUB_WAKE_SECRET;
   if (!hubUrl || !mcpApiKey) {
-    api.log.error("CI-Hub plugin requires hubUrl and mcpApiKey (via config or HUB_URL/HUB_MCP_API_KEY env vars)");
+    api.log.error("CI-Hub plugin requires hubUrl and mcpApiKey (via config or HUB_URL/HUB_MCP_URL/HUB_MCP_API_KEY env vars)");
     return;
   }
   api.log.info(`CI-Hub plugin initializing (hub: ${hubUrl})`);
@@ -384,12 +402,16 @@ async function register(api, config) {
     }
   }
   const wakeHandler = createWakeEndpointHandler(api, wakeSecret, config.wakeFilter);
-  api.registerHttpRoute({
-    method: "POST",
-    path: "/hooks/hub-wake",
-    handler: wakeHandler
-  });
-  api.log.info("Registered wake endpoint: POST /hooks/hub-wake");
+  if (wakeSecret) {
+    api.registerHttpRoute({
+      method: "POST",
+      path: "/hooks/hub-wake",
+      handler: wakeHandler
+    });
+    api.log.info("Registered wake endpoint: POST /hooks/hub-wake");
+  } else {
+    api.log.warn("HUB_WAKE_SECRET not set — wake endpoint disabled");
+  }
   if (config.sseEnabled) {
     const sseListener = new SseListenerService(hubUrl, mcpApiKey, api, config.wakeFilter);
     await sseListener.start();

@@ -14,6 +14,7 @@
 #
 # Inputs:
 #   CI_HUB_URL              Hub backend URL    (default: http://ci-os-hub:5002)
+#                           Falls back to HUB_URL when Hub injects MCP env at install time.
 #   HUB_APP_SLUG            App slug           (default: openclaw)
 #   OPENCLAW_DATA_DIR       Data dir           (default: /data/.openclaw)
 #   BOOTSTRAP_FIXTURE_FILE          For tests: read body from this file
@@ -23,7 +24,7 @@
 #   $OPENCLAW_DATA_DIR/.env   merged in place
 set -eu
 
-CI_HUB_URL="${CI_HUB_URL:-http://ci-os-hub:5002}"
+CI_HUB_URL="${CI_HUB_URL:-${HUB_URL:-http://ci-os-hub:5002}}"
 HUB_APP_SLUG="${HUB_APP_SLUG:-openclaw}"
 DATA_DIR="${OPENCLAW_DATA_DIR:-/data/.openclaw}"
 ENV_FILE="${DATA_DIR}/.env"

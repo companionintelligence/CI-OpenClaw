@@ -2,7 +2,7 @@ import { register as registerHubPlugin } from "./hub-plugin.mjs";
 
 /**
  * OpenClaw plugin entry. Credentials come from Hub-injected env vars
- * (HUB_URL, HUB_MCP_API_KEY, HUB_WAKE_SECRET) — never from openclaw.json.
+ * (HUB_URL or HUB_MCP_URL, HUB_MCP_API_KEY, HUB_WAKE_SECRET) — never from openclaw.json.
  */
 export default {
   id: "ci-hub",

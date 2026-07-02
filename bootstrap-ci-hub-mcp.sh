@@ -7,7 +7,7 @@ set -eu
 DATA_DIR="${OPENCLAW_DATA_DIR:-/data/.openclaw}"
 CONFIG_FILE="${DATA_DIR}/openclaw.json"
 PLUGIN_ID="ci-hub"
-PLUGIN_PATH="/app/openclaw-context/plugins/ci-hub"
+PLUGIN_PATH="${CI_HUB_PLUGIN_PATH:-/app/openclaw-context/plugins/ci-hub}"
 
 log() {
   echo "[ci-hub-bootstrap] $*"
