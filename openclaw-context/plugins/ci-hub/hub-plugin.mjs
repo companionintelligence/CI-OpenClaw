@@ -490,37 +490,38 @@ async function register(api, config) {
   } catch (error) {
     api.log.warn(`Hub unreachable at ${hubUrl}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  let mcpClient = null;
-  if (process.env.HUB_MCP_LEGACY_CLIENT === "true") {
-    api.log.warn("HUB_MCP_LEGACY_CLIENT=true \u2014 using the legacy in-plugin Hub MCP client; prefer the native mcp.servers.ci-hub config");
-    mcpClient = new McpClient(hubUrl, mcpApiKey, api.log);
-    await mcpClient.connect();
-    if (mcpClient.isConnected()) {
-      try {
-        const tools = await mcpClient.listTools();
-        for (const tool of tools) {
-          api.registerTool({
-            name: tool.name,
-            description: tool.description,
-            inputSchema: tool.inputSchema,
-            handler: async (args) => mcpClient?.callTool(tool.name, args)
-          });
-        }
-        api.log.info(`Registered ${tools.length} Hub MCP tools (legacy client)`);
-      } catch (error) {
-        api.log.error(`Failed to register Hub tools: ${error instanceof Error ? error.message : String(error)}`);
+  const mcpClient = new McpClient(hubUrl, mcpApiKey, api.log);
+  await mcpClient.connect();
+  if (mcpClient.isConnected() && process.env.HUB_MCP_LEGACY_CLIENT === "true") {
+    api.log.warn("HUB_MCP_LEGACY_CLIENT=true \u2014 also registering Hub tools via the in-plugin client (native mcp.servers.ci-hub is the default path)");
+    try {
+      const tools = await mcpClient.listTools();
+      for (const tool of tools) {
+        api.registerTool({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+          handler: async (args) => mcpClient.callTool(tool.name, args)
+        });
       }
+      api.log.info(`Registered ${tools.length} Hub MCP tools (legacy client)`);
+    } catch (error) {
+      api.log.error(`Failed to register Hub tools: ${error instanceof Error ? error.message : String(error)}`);
     }
   } else {
-    api.log.info("Hub MCP tools served via native OpenClaw mcp.servers.ci-hub config; in-plugin MCP client disabled");
+    api.log.info("Hub MCP tools served via native OpenClaw mcp.servers.ci-hub config; in-plugin client used only for inference discovery");
   }
-  const wakeHandler = createWakeEndpointHandler(api, wakeSecret, config.wakeFilter);
-  api.registerHttpRoute({
-    method: "POST",
-    path: "/hooks/hub-wake",
-    handler: wakeHandler
-  });
-  api.log.info("Registered wake endpoint: POST /hooks/hub-wake");
+  if (wakeSecret) {
+    const wakeHandler = createWakeEndpointHandler(api, wakeSecret, config.wakeFilter);
+    api.registerHttpRoute({
+      method: "POST",
+      path: "/hooks/hub-wake",
+      handler: wakeHandler
+    });
+    api.log.info("Registered wake endpoint: POST /hooks/hub-wake");
+  } else {
+    api.log.warn("HUB_WAKE_SECRET not set \u2014 wake endpoint disabled (would be unauthenticated otherwise)");
+  }
   if (config.sseEnabled) {
     const sseListener = new SseListenerService(hubUrl, mcpApiKey, api, config.wakeFilter);
     await sseListener.start();
@@ -530,7 +531,7 @@ async function register(api, config) {
 async function autoConfigureInference(api, hubUrl, apiKey, mcpClient) {
   try {
     let inferenceStatus = null;
-    if (mcpClient?.isConnected()) {
+    if (mcpClient.isConnected()) {
       try {
         inferenceStatus = unwrapToolResult(await mcpClient.callTool("hub_get_inference_status", {}));
       } catch {
