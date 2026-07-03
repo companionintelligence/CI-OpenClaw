@@ -16,7 +16,7 @@ This is a containerized version of OpenClaw with seamless onboarding on the CI m
 - apt/apt-get disabled with a message telling openclaw to use brew instead
 - Globally installed node modules persisted between app updates
 - A bundled `companionintelligence` memory plugin that can use CI-Server as OpenClaw's active memory backend when `CI_SERVER_URL` and `CI_SERVER_TOKEN` are configured
-- A bundled `ci-hub` plugin that connects to Hub MCP automatically when the Hub injects `HUB_URL` / `HUB_MCP_API_KEY` (default on CI marketplace installs with MCP enabled)
+- Automatic Hub MCP tool access via a native `mcp.servers.ci-hub` entry in `openclaw.json` (Streamable HTTP), registered when the Hub injects `HUB_URL` / `HUB_MCP_API_KEY` (default on CI marketplace installs with MCP enabled). A bundled `ci-hub` plugin additionally provides the wake endpoint, app-event SSE, and local-inference auto-config.
 - Security features that complicate setup disabled which are not required on the CI marketplace due to OpenClaw already being protected when running behind the CI app proxy
 
 This creates a seamless one-click install experience for OpenClaw on the CI marketplace.
@@ -188,11 +188,11 @@ On CI marketplace installs, the Hub injects MCP credentials automatically (`HUB_
 
 1. `/app/bootstrap-from-hub.sh` — inference + Hub env
 2. `/app/bootstrap-ci-memory.sh` — optional CI-Server memory plugin
-3. `/app/bootstrap-ci-hub-mcp.sh` — registers the bundled `ci-hub` plugin
+3. `/app/bootstrap-ci-hub-mcp.sh` — registers the Hub as a native MCP server (`mcp.servers.ci-hub`, Streamable HTTP) and enables the `ci-hub` companion plugin
 
-The setup server also reconciles the plugin into `openclaw.json` when credentials are present. Hub-authoritative env keys always win over stale values in `/data/.openclaw/.env`.
+Hub MCP **tools** load through OpenClaw's built-in MCP client via the `mcp.servers.ci-hub` entry — `url: …/api/mcp`, `transport: "streamable-http"`, and `Authorization: "Bearer ${HUB_MCP_API_KEY}"` (an env-template ref, so the key is never written to `openclaw.json`). The `ci-hub` plugin no longer runs a hand-rolled MCP client (kept behind `HUB_MCP_LEGACY_CLIENT=true` for rollback); it provides the wake endpoint, app-event SSE, and inference auto-config. The setup server also reconciles both the native entry and the plugin into `openclaw.json` when credentials are present. Hub-authoritative env keys always win over stale values in `/data/.openclaw/.env`.
 
-If Hub MCP is disabled (`HUB_MCP_ENABLED=false` in the container env), bootstrap steps no-op gracefully. Run `cihub mcp setup` on the Hub to provision a key for existing installs.
+If Hub MCP is disabled (`HUB_MCP_ENABLED=false` in the container env), bootstrap steps no-op gracefully (and remove any prior `mcp.servers.ci-hub` entry). Run `cihub mcp setup` on the Hub to provision a key for existing installs.
 
 To rebuild the vendored plugin after changing `ci-hub/packages/openclaw-plugin`:
 

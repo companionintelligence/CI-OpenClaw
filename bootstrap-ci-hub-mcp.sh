@@ -95,6 +95,45 @@ if (entry.enabled !== shouldEnable) {
   changed = true;
 }
 
+// Register the Hub as a native OpenClaw MCP server (mcp.servers.ci-hub) so Hub
+// tools load via OpenClaw's built-in Streamable HTTP client. Mirrors
+// server.cjs's ensureHubMcpServer(). The Bearer token stays as the literal
+// ${HUB_MCP_API_KEY} env-template ref — OpenClaw resolves it at activation, so
+// the raw key is never persisted to openclaw.json.
+function canonicalHubMcpUrl() {
+  let raw = (process.env.HUB_MCP_URL || "").trim();
+  if (!raw) {
+    const base = (process.env.HUB_URL || "").trim().replace(/\/+$/, "");
+    raw = base ? `${base}/api/mcp` : "";
+  }
+  raw = raw.replace(/\/+$/, "");
+  if (raw.endsWith("/api/mcp/sse")) raw = raw.slice(0, -"/sse".length);
+  if (!raw) return "";
+  return raw.endsWith("/api/mcp") ? raw : `${raw}/api/mcp`;
+}
+
+const mcpUrl = shouldEnable ? canonicalHubMcpUrl() : "";
+if (shouldEnable && mcpUrl) {
+  const mcp = ensureObject(config, "mcp");
+  const servers = ensureObject(mcp, "servers");
+  const desired = {
+    url: mcpUrl,
+    transport: "streamable-http",
+    headers: { Authorization: "Bearer ${HUB_MCP_API_KEY}" },
+    timeout: 180,
+    connectTimeout: 60,
+  };
+  if (JSON.stringify(servers["ci-hub"]) !== JSON.stringify(desired)) {
+    servers["ci-hub"] = desired;
+    changed = true;
+    console.log(`[ci-hub-bootstrap] ci-hub MCP server → ${mcpUrl}`);
+  }
+} else if (config.mcp && config.mcp.servers && config.mcp.servers["ci-hub"]) {
+  delete config.mcp.servers["ci-hub"];
+  changed = true;
+  console.log("[ci-hub-bootstrap] removed ci-hub MCP server (Hub MCP disabled or credentials absent)");
+}
+
 if (changed) {
   fs.writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   if (shouldEnable) {
