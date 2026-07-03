@@ -503,7 +503,7 @@ async function register(api, config) {
             name: tool.name,
             description: tool.description,
             inputSchema: tool.inputSchema,
-            handler: async (args) => mcpClient.callTool(tool.name, args)
+            handler: async (args) => mcpClient?.callTool(tool.name, args)
           });
         }
         api.log.info(`Registered ${tools.length} Hub MCP tools (legacy client)`);
@@ -530,7 +530,7 @@ async function register(api, config) {
 async function autoConfigureInference(api, hubUrl, apiKey, mcpClient) {
   try {
     let inferenceStatus = null;
-    if (mcpClient && mcpClient.isConnected()) {
+    if (mcpClient?.isConnected()) {
       try {
         inferenceStatus = unwrapToolResult(await mcpClient.callTool("hub_get_inference_status", {}));
       } catch {
