@@ -1,82 +1,88 @@
 // src/mcp-client.ts
+var MCP_CLIENT_PROTOCOL_VERSION = "2025-11-25";
+var REQUEST_TIMEOUT_MS = 15e3;
+var McpTransportError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "McpTransportError";
+  }
+};
+async function fetchWithTimeout(url, init, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 var McpClient = class {
   hubUrl;
   apiKey;
   connected = false;
-  messagesUrl = null;
+  sessionId = null;
   requestId = 0;
   backoffMs = 1e3;
   maxBackoffMs = 6e4;
-  sseAbortController = null;
+  // Pending reconnect timer + a disposed flag so disconnect() can cancel the backoff loop instead of
+  // reconnecting after an intentional teardown (a fired timer would otherwise revive the connection).
+  reconnectTimer = null;
+  disposed = false;
   log;
   constructor(hubUrl, apiKey, log) {
     this.hubUrl = hubUrl.replace(/\/$/, "");
     this.apiKey = apiKey;
     this.log = log;
   }
+  get endpoint() {
+    return `${this.hubUrl}/api/mcp`;
+  }
   async connect() {
+    this.disposed = false;
     try {
-      this.sseAbortController = new AbortController();
-      this.log.info("Connecting to Hub MCP SSE endpoint...");
-      this.messagesUrl = await this.discoverMessagesEndpoint();
-      const initResponse = await this.sendMessage("initialize", {});
-      if (initResponse.result) {
-        this.connected = true;
-        this.backoffMs = 1e3;
-        this.log.info("MCP client connected to Hub");
+      this.log.info("Connecting to Hub MCP endpoint...");
+      const { response, body } = await this.post("initialize", {
+        protocolVersion: MCP_CLIENT_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "openclaw-plugin", version: "1.0" }
+      });
+      const sessionId = response.headers.get("mcp-session-id");
+      if (body.error || !body.result || !sessionId) {
+        throw new Error(body.error ? body.error.message : "initialize did not establish a session");
       }
+      if (this.disposed) {
+        await fetchWithTimeout(this.endpoint, { method: "DELETE", headers: this.buildHeaders(sessionId) }).catch(() => void 0);
+        this.log.info("MCP connect aborted (client disconnected during initialize)");
+        return;
+      }
+      const staleSessionId = this.sessionId;
+      if (staleSessionId && staleSessionId !== sessionId) {
+        fetchWithTimeout(this.endpoint, { method: "DELETE", headers: this.buildHeaders(staleSessionId) }).catch(() => void 0);
+      }
+      this.sessionId = sessionId;
+      this.connected = true;
+      this.backoffMs = 1e3;
+      this.log.info("MCP client connected to Hub");
     } catch (error) {
       this.connected = false;
-      this.messagesUrl = null;
+      this.sessionId = null;
       this.log.warn(`MCP connection failed: ${error instanceof Error ? error.message : String(error)}`);
       this.scheduleReconnect();
     }
   }
-  /**
-   * Connect to the SSE endpoint and extract the messages URL from the
-   * `endpoint` event, per MCP HTTP+SSE transport spec.
-   */
-  async discoverMessagesEndpoint() {
-    const sseUrl = `${this.hubUrl}/api/mcp/sse`;
-    const response = await fetch(sseUrl, {
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-      signal: this.sseAbortController?.signal
-    });
-    if (!response.ok) {
-      throw new Error(`SSE connection failed: ${response.status} ${response.statusText}`);
+  async disconnect() {
+    this.disposed = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
-    if (!response.body) {
-      throw new Error("SSE response has no body");
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let currentEvent = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) throw new Error("SSE stream ended before endpoint event");
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        if (line.startsWith("event: ")) {
-          currentEvent = line.slice(7).trim();
-        } else if (line.startsWith("data: ") && currentEvent === "endpoint") {
-          const messagesUrl = line.slice(6).trim();
-          this.log.info(`Discovered MCP messages endpoint: ${messagesUrl}`);
-          try {
-            await reader.cancel();
-          } catch {
-          }
-          return messagesUrl;
-        }
+    if (this.sessionId) {
+      try {
+        await fetchWithTimeout(this.endpoint, { method: "DELETE", headers: this.buildHeaders(this.sessionId) });
+      } catch {
       }
     }
-  }
-  async disconnect() {
-    this.sseAbortController?.abort();
-    this.sseAbortController = null;
-    this.messagesUrl = null;
+    this.sessionId = null;
     this.connected = false;
     this.log.info("MCP client disconnected");
   }
@@ -87,51 +93,151 @@ var McpClient = class {
     if (!this.connected) {
       throw new Error("Hub MCP server is not connected");
     }
-    const response = await this.sendMessage("tools/list", {});
-    if (response.error) {
-      throw new Error(response.error.message);
+    try {
+      const body = await this.sendMessage("tools/list", {});
+      if (body.error) {
+        throw new Error(body.error.message);
+      }
+      return body.result.tools;
+    } catch (error) {
+      if (error instanceof McpTransportError || !this.connected) {
+        this.connected = false;
+        this.scheduleReconnect();
+      }
+      throw error;
     }
-    return response.result.tools;
   }
   async callTool(name, args) {
     if (!this.connected) {
       return { error: "Hub MCP server is not connected" };
     }
     try {
-      const response = await this.sendMessage("tools/call", { name, arguments: args });
-      if (response.error) {
-        return { error: response.error.message };
+      const body = await this.sendMessage("tools/call", { name, arguments: args });
+      if (body.error) {
+        return { error: body.error.message };
       }
-      return response.result;
-    } catch {
-      this.connected = false;
-      this.scheduleReconnect();
-      return { error: "Hub MCP server is not connected" };
+      return body.result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof McpTransportError || !this.connected) {
+        this.connected = false;
+        this.scheduleReconnect();
+      } else {
+        this.log.warn(`MCP tool call '${name}' failed: ${message}`);
+      }
+      return { error: message };
     }
   }
+  /** Send a JSON-RPC message over the established session; a 404 means the session expired. */
   async sendMessage(method, params) {
-    const url = this.messagesUrl ?? `${this.hubUrl}/api/mcp/messages`;
-    const id = ++this.requestId;
-    const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`
-      },
-      body,
-      signal: this.sseAbortController?.signal
-    });
-    if (!response.ok) {
-      throw new Error(`MCP request failed: ${response.status} ${response.statusText}`);
+    const { response, body } = await this.post(method, params, this.sessionId ?? void 0);
+    if (response.status === 404) {
+      this.connected = false;
+      this.sessionId = null;
+      throw new Error("MCP session not found");
     }
-    return await response.json();
+    return body;
+  }
+  /**
+   * POST a JSON-RPC request to the single MCP endpoint and parse the JSON or SSE response body.
+   * ONE AbortController spans both the request and the body read, so a Hub that hangs after sending
+   * headers still trips the timeout (a headers-only guard would leave `response.text()` unbounded).
+   * Network faults and timeouts throw {@link McpTransportError}; an HTTP error status from a live
+   * server stays a plain Error (the session may still be valid).
+   */
+  async post(method, params, sessionId) {
+    const id = ++this.requestId;
+    const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      let response;
+      try {
+        response = await fetch(this.endpoint, {
+          method: "POST",
+          headers: this.buildHeaders(sessionId),
+          body: payload,
+          signal: controller.signal
+        });
+      } catch (error) {
+        throw new McpTransportError(
+          controller.signal.aborted ? `MCP request timed out after ${REQUEST_TIMEOUT_MS}ms` : `MCP request failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      const discardBody = () => void response.body?.cancel().catch(() => void 0);
+      if (response.status === 502 || response.status === 504) {
+        discardBody();
+        throw new McpTransportError(`MCP request failed: ${response.status} ${response.statusText}`);
+      }
+      if (response.status === 404) {
+        discardBody();
+        return { response, body: { jsonrpc: "2.0", id, error: { code: -32001, message: "Session not found (HTTP 404)" } } };
+      }
+      if (!response.ok) {
+        discardBody();
+        throw new Error(`MCP request failed: ${response.status} ${response.statusText}`);
+      }
+      let text;
+      try {
+        text = await response.text();
+      } catch (error) {
+        throw new McpTransportError(
+          controller.signal.aborted ? `MCP response timed out after ${REQUEST_TIMEOUT_MS}ms` : `MCP response body failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      return { response, body: this.parseRpcBody(text, response.headers.get("content-type") ?? "") };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  buildHeaders(sessionId) {
+    const headers = {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      Authorization: `Bearer ${this.apiKey}`
+    };
+    if (sessionId) headers["mcp-session-id"] = sessionId;
+    return headers;
+  }
+  /** Extract the JSON-RPC payload from a plain JSON body or the last `data:` line of an SSE frame.
+   *  Pure parse — the body TEXT is read (and timeout-guarded) by post(), so parse failures here are
+   *  unambiguously server-side, never transport faults. Convention: gate on `application/json` (else
+   *  parse as SSE) — kept identical to the Layer-2 QA bridge (scripts/qa-mcp-bridge.ts) so both
+   *  hand-rolled clients resolve an ambiguous content-type the same way. The two are intentionally
+   *  NOT a shared module: the QA script is dependency-free so it ships to fleet nodes unchanged. */
+  parseRpcBody(text, contentType) {
+    if (contentType.includes("application/json")) {
+      return JSON.parse(text);
+    }
+    const dataLines = text.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice("data:".length).trim()).filter(Boolean);
+    for (let i = dataLines.length - 1; i >= 0; i--) {
+      try {
+        return JSON.parse(dataLines[i]);
+      } catch {
+      }
+    }
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error("no JSON-RPC payload in MCP response");
+    }
   }
   scheduleReconnect() {
+    if (this.disposed || this.reconnectTimer) {
+      return;
+    }
     const delay = this.backoffMs;
     this.backoffMs = Math.min(this.backoffMs * 2, this.maxBackoffMs);
     this.log.info(`Reconnecting to Hub MCP in ${delay}ms...`);
-    setTimeout(() => this.connect(), delay);
+    const timer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.disposed) {
+        return;
+      }
+      void this.connect();
+    }, delay);
+    timer.unref?.();
+    this.reconnectTimer = timer;
   }
 };
 
@@ -351,67 +457,70 @@ var SseListenerService = class {
 };
 
 // src/index.ts
-function resolveHubBaseUrl(config) {
-  if (config.hubUrl) {
-    return config.hubUrl.replace(/\/$/, "");
+function unwrapToolResult(result) {
+  const wrapped = result;
+  if (!wrapped || wrapped.isError) {
+    return null;
   }
-  const hubUrl = process.env.HUB_URL?.trim();
-  if (hubUrl) {
-    return hubUrl.replace(/\/$/, "");
+  const text = wrapped.content?.[0]?.text;
+  if (typeof text !== "string") {
+    return null;
   }
-  const mcpUrl = process.env.HUB_MCP_URL?.trim();
-  if (mcpUrl) {
-    return mcpUrl.replace(/\/api\/mcp\/sse\/?$/i, "").replace(/\/api\/mcp\/?$/i, "").replace(/\/$/, "");
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
   }
-  return void 0;
 }
 async function register(api, config) {
-  const hubUrl = resolveHubBaseUrl(config);
+  const hubUrl = config.hubUrl || process.env.HUB_URL;
   const hubApiKey = config.hubApiKey || process.env.HUB_API_KEY;
   const mcpApiKey = config.mcpApiKey || process.env.HUB_MCP_API_KEY || hubApiKey;
   const wakeSecret = config.wakeSecret || process.env.HUB_WAKE_SECRET;
   if (!hubUrl || !mcpApiKey) {
-    api.log.error("CI-Hub plugin requires hubUrl and mcpApiKey (via config or HUB_URL/HUB_MCP_URL/HUB_MCP_API_KEY env vars)");
+    api.log.error("CI-Hub plugin requires hubUrl and mcpApiKey (via config or HUB_URL/HUB_MCP_API_KEY env vars)");
     return;
   }
   api.log.info(`CI-Hub plugin initializing (hub: ${hubUrl})`);
   try {
-    const healthResponse = await fetch(`${hubUrl.replace(/\/$/, "")}/api/health`);
+    const healthResponse = await fetchWithTimeout(`${hubUrl.replace(/\/$/, "")}/api/health`, {});
     if (!healthResponse.ok) {
       api.log.warn(`Hub health check failed: ${healthResponse.status}`);
     }
   } catch (error) {
     api.log.warn(`Hub unreachable at ${hubUrl}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const mcpClient = new McpClient(hubUrl, mcpApiKey, api.log);
-  await mcpClient.connect();
-  if (mcpClient.isConnected()) {
-    try {
-      const tools = await mcpClient.listTools();
-      for (const tool of tools) {
-        api.registerTool({
-          name: tool.name,
-          description: tool.description,
-          inputSchema: tool.inputSchema,
-          handler: async (args) => mcpClient.callTool(tool.name, args)
-        });
+  let mcpClient = null;
+  if (process.env.HUB_MCP_LEGACY_CLIENT === "true") {
+    api.log.warn("HUB_MCP_LEGACY_CLIENT=true \u2014 using the legacy in-plugin Hub MCP client; prefer the native mcp.servers.ci-hub config");
+    mcpClient = new McpClient(hubUrl, mcpApiKey, api.log);
+    await mcpClient.connect();
+    if (mcpClient.isConnected()) {
+      try {
+        const tools = await mcpClient.listTools();
+        for (const tool of tools) {
+          api.registerTool({
+            name: tool.name,
+            description: tool.description,
+            inputSchema: tool.inputSchema,
+            handler: async (args) => mcpClient.callTool(tool.name, args)
+          });
+        }
+        api.log.info(`Registered ${tools.length} Hub MCP tools (legacy client)`);
+      } catch (error) {
+        api.log.error(`Failed to register Hub tools: ${error instanceof Error ? error.message : String(error)}`);
       }
-      api.log.info(`Registered ${tools.length} Hub MCP tools`);
-    } catch (error) {
-      api.log.error(`Failed to register Hub tools: ${error instanceof Error ? error.message : String(error)}`);
     }
+  } else {
+    api.log.info("Hub MCP tools served via native OpenClaw mcp.servers.ci-hub config; in-plugin MCP client disabled");
   }
   const wakeHandler = createWakeEndpointHandler(api, wakeSecret, config.wakeFilter);
-  if (wakeSecret) {
-    api.registerHttpRoute({
-      method: "POST",
-      path: "/hooks/hub-wake",
-      handler: wakeHandler
-    });
-    api.log.info("Registered wake endpoint: POST /hooks/hub-wake");
-  } else {
-    api.log.warn("HUB_WAKE_SECRET not set — wake endpoint disabled");
-  }
+  api.registerHttpRoute({
+    method: "POST",
+    path: "/hooks/hub-wake",
+    handler: wakeHandler
+  });
+  api.log.info("Registered wake endpoint: POST /hooks/hub-wake");
   if (config.sseEnabled) {
     const sseListener = new SseListenerService(hubUrl, mcpApiKey, api, config.wakeFilter);
     await sseListener.start();
@@ -421,17 +530,16 @@ async function register(api, config) {
 async function autoConfigureInference(api, hubUrl, apiKey, mcpClient) {
   try {
     let inferenceStatus = null;
-    if (mcpClient.isConnected()) {
+    if (mcpClient && mcpClient.isConnected()) {
       try {
-        const result = await mcpClient.callTool("hub_get_inference_status", {});
-        inferenceStatus = result;
+        inferenceStatus = unwrapToolResult(await mcpClient.callTool("hub_get_inference_status", {}));
       } catch {
         api.log.debug("hub_get_inference_status not yet available \u2014 trying REST fallback");
       }
     }
     if (!inferenceStatus) {
       try {
-        const response = await fetch(`${hubUrl.replace(/\/$/, "")}/api/inference/status`);
+        const response = await fetchWithTimeout(`${hubUrl.replace(/\/$/, "")}/api/inference/status`, {});
         if (response.ok) {
           inferenceStatus = await response.json();
         }
@@ -453,7 +561,7 @@ async function autoConfigureInference(api, hubUrl, apiKey, mcpClient) {
     const isEmbeddingModel = (id) => /embed/i.test(id);
     let localModels = [];
     try {
-      const response = await fetch(`${ollamaNativeUrl}/api/tags`);
+      const response = await fetchWithTimeout(`${ollamaNativeUrl}/api/tags`, {});
       if (response.ok) {
         const payload = await response.json();
         localModels = (payload.models ?? []).filter((model) => typeof model.name === "string" && model.name.length > 0 && !isEmbeddingModel(model.name)).map((model) => ({

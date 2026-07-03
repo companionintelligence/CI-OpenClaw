@@ -2,7 +2,7 @@
   "id": "ci-hub",
   "name": "CI Hub",
   "version": "1.0.0",
-  "description": "OpenClaw plugin for controlling CI-Hub via MCP. Provides tool access, wake notifications, and SSE event streaming.",
+  "description": "CI-Hub companion plugin: wake notifications, app-event SSE streaming, and local-inference auto-configuration. Hub MCP tools are served by OpenClaw's built-in MCP client via the mcp.servers.ci-hub config entry.",
   "author": "Companion Intelligence",
   "activation": {
     "onStartup": true

@@ -275,6 +275,74 @@ function hasHubMcpCredentials(env) {
   );
 }
 
+// Canonical Streamable HTTP MCP endpoint for the Hub. CI-Hub serves MCP at a
+// single `/api/mcp` endpoint (the legacy `/api/mcp/sse` route was removed).
+// Prefer HUB_MCP_URL; fall back to HUB_URL + `/api/mcp`. A legacy `/api/mcp/sse`
+// suffix is normalized down to `/api/mcp` (never appended) so an already-correct
+// injected URL is not corrupted. Returns "" when no base URL is available.
+function canonicalHubMcpUrl(env) {
+  let raw = (env.HUB_MCP_URL || "").trim();
+  if (!raw) {
+    const base = (env.HUB_URL || "").trim().replace(/\/+$/, "");
+    raw = base ? `${base}/api/mcp` : "";
+  }
+  raw = raw.replace(/\/+$/, "");
+  if (raw.endsWith("/api/mcp/sse")) {
+    raw = raw.slice(0, -"/sse".length);
+  }
+  if (!raw) return "";
+  return raw.endsWith("/api/mcp") ? raw : `${raw}/api/mcp`;
+}
+
+// Register (or remove) the Hub as a native OpenClaw MCP server under
+// `mcp.servers.ci-hub`, so Hub tools load through OpenClaw's built-in Streamable
+// HTTP MCP client rather than the plugin's legacy hand-rolled client.
+//
+// The Bearer token is written as the literal env-template `${HUB_MCP_API_KEY}`,
+// which OpenClaw resolves at gateway activation — the raw key is never persisted
+// to openclaw.json (matching the plugin's original env-only credential design).
+// When Hub MCP creds are absent/disabled, an existing `ci-hub` server entry is
+// removed so the agent doesn't keep a dead endpoint. Returns true if it changed.
+function ensureHubMcpServer(config, env) {
+  const enabled = hasHubMcpCredentials(env);
+  const url = enabled ? canonicalHubMcpUrl(env) : "";
+
+  if (!enabled || !url) {
+    // Remove any previously-written entry when creds are gone/disabled.
+    const existing = config.mcp && config.mcp.servers && config.mcp.servers["ci-hub"];
+    if (existing) {
+      delete config.mcp.servers["ci-hub"];
+      console.log("Patched config: removed ci-hub MCP server (Hub MCP disabled or credentials absent)");
+      return true;
+    }
+    return false;
+  }
+
+  if (!config.mcp || typeof config.mcp !== "object" || Array.isArray(config.mcp)) {
+    config.mcp = {};
+  }
+  if (!config.mcp.servers || typeof config.mcp.servers !== "object" || Array.isArray(config.mcp.servers)) {
+    config.mcp.servers = {};
+  }
+
+  const desired = {
+    url,
+    transport: "streamable-http",
+    headers: { Authorization: "Bearer ${HUB_MCP_API_KEY}" },
+    timeout: 180,
+    connectTimeout: 60,
+  };
+
+  const current = config.mcp.servers["ci-hub"];
+  // Deep-equal on the small, fixed shape keeps reconcile idempotent.
+  if (JSON.stringify(current) === JSON.stringify(desired)) {
+    return false;
+  }
+  config.mcp.servers["ci-hub"] = desired;
+  console.log(`Patched config: registered ci-hub MCP server (Streamable HTTP, ${url})`);
+  return true;
+}
+
 function disableBundledSessionMemoryHook(config) {
   let changed = false;
   if (
@@ -785,7 +853,13 @@ async function reconcileConfig() {
     }
   }
 
-  // Enable the CI-Hub MCP plugin when Hub injects MCP credentials.
+  // Register Hub tools through OpenClaw's built-in MCP client (native
+  // mcp.servers.ci-hub), gated on Hub MCP credentials.
+  changed = ensureHubMcpServer(config, env) || changed;
+
+  // Enable the CI-Hub companion plugin (wake endpoint, app-event SSE, inference
+  // auto-config) when Hub injects MCP credentials. Tool access itself comes from
+  // the native mcp.servers.ci-hub entry above, not this plugin.
   changed =
     ensureOpenClawPlugin(
       config,
