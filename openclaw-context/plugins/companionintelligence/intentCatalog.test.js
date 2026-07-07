@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert";
 
-import { fetchIntentManifest, describeCatalogForPrompt, manifestToToolSpecs } from "./intentCatalog.js";
+import {
+  fetchIntentManifest,
+  describeCatalogForPrompt,
+  manifestToToolSpecs,
+  executePathCandidates,
+} from "./intentCatalog.js";
 
 const MANIFEST = {
   version: "1.0.0",
@@ -102,4 +107,29 @@ test("manifestToToolSpecs maps intents to executable tool specs", () => {
   assert.equal(specs[0].name, "memory_recall");
   assert.ok(specs[0].parameters);
   assert.deepEqual(manifestToToolSpecs(null), []);
+});
+
+test("manifestToToolSpecs carries the dotted intent id, title, and privacy for filtering", () => {
+  const specs = manifestToToolSpecs(MANIFEST);
+  assert.equal(specs[0].intent, "memory.recall");
+  assert.equal(specs[0].title, "Recall knowledge");
+  assert.deepEqual(specs[0].privacy, MANIFEST.intents[0].privacy);
+  assert.equal(specs[1].privacy.destructive, true);
+  assert.equal(specs[2].privacy.external, true);
+  // A manifest intent missing privacy maps to null (caller must treat as unexecutable).
+  const bare = manifestToToolSpecs({ intents: [{ name: "x.y", tool: "x_y" }] });
+  assert.equal(bare[0].privacy, null);
+  assert.deepEqual(bare[0].parameters, { type: "object", properties: {} });
+});
+
+test("executePathCandidates mirrors CATALOG_PATHS ordering (agent path first)", () => {
+  assert.deepEqual(executePathCandidates("predictions.forecast"), [
+    "/api/agent/intents/predictions.forecast/execute",
+    "/api/intents/predictions.forecast/execute",
+  ]);
+  // The underscored executable form is an accepted alias on the server.
+  assert.deepEqual(executePathCandidates("predictions_forecast"), [
+    "/api/agent/intents/predictions_forecast/execute",
+    "/api/intents/predictions_forecast/execute",
+  ]);
 });

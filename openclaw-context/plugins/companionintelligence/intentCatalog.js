@@ -83,12 +83,31 @@ export function describeCatalogForPrompt(manifest) {
 }
 
 /**
- * Adapt the manifest intents into OpenClaw tool specs (name/description/parameters).
- * The caller wires an `execute` handler — e.g. routing to CI-Server's MCP server,
- * which exposes the same intents as executable tools.
+ * REST execution path candidates for one intent, mirroring CATALOG_PATHS ordering
+ * (canonical agent path first, then the legacy alias). The caller POSTs the tool
+ * input JSON to the first path and falls back to the second when the route is
+ * missing (HTTP 404 on older CI-Server builds). CI-Server accepts either the
+ * dotted intent id (`predictions.forecast`) or the underscored tool name
+ * (`predictions_forecast`) in the path.
+ *
+ * @param {string} intentName
+ * @returns {string[]}
+ */
+export function executePathCandidates(intentName) {
+  const name = encodeURIComponent(String(intentName ?? "").trim());
+  return CATALOG_PATHS.map((base) => `${base}/${name}/execute`);
+}
+
+/**
+ * Adapt the manifest intents into OpenClaw tool specs. The caller wires an
+ * `execute` handler — e.g. POSTing to CI-Server's REST intent executor
+ * (see {@link executePathCandidates}), which runs the same tools MCP exposes.
+ * Each spec carries the executable tool name (`name`), the original dotted
+ * intent id (`intent`), the JSON-Schema `parameters`, and the `privacy` labels
+ * so the caller can filter destructive/external intents before registration.
  *
  * @param {object|null} manifest
- * @returns {Array<{name: string, description: string, parameters: object}>}
+ * @returns {Array<{name: string, intent: string, title: string, description: string, parameters: object, privacy: object|null}>}
  */
 export function manifestToToolSpecs(manifest) {
   if (!manifest || !Array.isArray(manifest.intents)) {
@@ -97,7 +116,10 @@ export function manifestToToolSpecs(manifest) {
 
   return manifest.intents.map((intent) => ({
     name: intent.tool,
+    intent: intent.name,
+    title: intent.title,
     description: intent.description,
     parameters: intent.parameters || { type: "object", properties: {} },
+    privacy: intent.privacy && typeof intent.privacy === "object" ? intent.privacy : null,
   }));
 }

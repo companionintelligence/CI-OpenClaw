@@ -134,6 +134,28 @@ CI-Server's server-side dedupe so re-sends are cheap. OpenClaw's bundled
 `session-memory` hook stays disabled because CI-Server is the authoritative
 transcript store.
 
+### CI Intent catalog (discovery + execution)
+
+The plugin also consumes CI-Server's curated intent catalog:
+
+- **Discovery** — the `ci_list_intents` tool fetches `GET /api/agent/intents`
+  (falling back to the legacy `GET /api/intents`) and renders the typed,
+  privacy-labelled catalog for the agent.
+- **Execution** — at startup the plugin registers one OpenClaw tool per
+  **non-destructive, non-external** intent in that catalog (e.g.
+  `predictions_forecast`), each POSTing its parameters to CI-Server's generic
+  REST executor `POST /api/intents/:name/execute` and returning the structured
+  `ToolResult`. Destructive/external intents are filtered client-side and are
+  also refused (403) by the server. Failures come back as structured error
+  results, never throws; if the catalog or executor is unavailable the plugin
+  degrades to discovery-only.
+
+Flags (default **on**, same convention as the memory flags):
+
+- `CI_INTENTS_ENABLED` — the whole intent subsystem (`ci_list_intents` +
+  executable intent tools)
+- `CI_INTENT_TOOLS_ENABLED` — just the executable intent tools (sub-switch)
+
 ### CI-Server endpoints used
 
 The plugin calls:
@@ -143,6 +165,8 @@ The plugin calls:
 - `POST /api/memory/recall`
 - `POST /api/memory/write`
 - `POST /api/memory/turn`
+- `GET /api/agent/intents` (falls back to `GET /api/intents`)
+- `POST /api/intents/:name/execute` (tried as `POST /api/agent/intents/:name/execute` first)
 
 `POST /api/memory/write` is the durable write endpoint for explicit notes. Older
 Hermes docs may mention `/api/memory/note`; CI-OpenClaw uses `/write` first and
@@ -157,6 +181,13 @@ test that drives the real plugin against a mock CI-Server:
 
 ```bash
 node tests/companionintelligence.plugin.test.mjs
+```
+
+The plugin's own unit tests (memory tools, intent catalog parsing, executable
+intent-tool registration/execution) run with the built-in Node test runner:
+
+```bash
+cd openclaw-context/plugins/companionintelligence && node --test
 ```
 
 ### Verify in a running container

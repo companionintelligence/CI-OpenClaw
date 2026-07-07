@@ -1,4 +1,9 @@
-import { fetchIntentManifest, describeCatalogForPrompt } from "./intentCatalog.js";
+import {
+  fetchIntentManifest,
+  describeCatalogForPrompt,
+  manifestToToolSpecs,
+  executePathCandidates,
+} from "./intentCatalog.js";
 
 const PLUGIN_ID = "companionintelligence";
 const DEFAULT_TIMEOUT_MS = 10000;
@@ -221,7 +226,9 @@ function readLivePluginConfig(api, cfg) {
 //   CI_MEMORY_RECALL_ENABLED   — L1 recall (/api/memory/recall): memory_search
 //   CI_MEMORY_TURN_ENABLED     — turn-sync (/api/memory/turn): agent_end + before_compaction
 //   CI_MEMORY_WRITE_ENABLED    — durable notes (/api/memory/write): memory_store
-//   CI_INTENTS_ENABLED         — intent catalog (/api/intents): ci_list_intents
+//   CI_INTENTS_ENABLED         — intent catalog (/api/intents): ci_list_intents + intent tools
+//   CI_INTENT_TOOLS_ENABLED    — executable intent tools (POST /api/intents/:name/execute);
+//                                sub-switch of CI_INTENTS_ENABLED (both default on)
 const FEATURE_FALSY = new Set(["0", "false", "no", "off"]);
 function featureEnabled(envName, defaultOn = true) {
   const raw = process.env[envName];
@@ -622,7 +629,7 @@ function createMemoryGetTool(api) {
   };
 }
 
-function createListIntentsTool(api) {
+function createListIntentsTool(api, intentToolsState) {
   return {
     name: "ci_list_intents",
     label: "List CI Intents",
@@ -635,13 +642,126 @@ function createListIntentsTool(api) {
       if (!manifest) {
         return jsonResult({ available: false, error: "CI Intent catalog unavailable" });
       }
+      // When executable intent tools were actually registered this session, tell
+      // the agent the catalog is directly callable (this rendered catalog is the
+      // one place describeCatalogForPrompt output reaches the model).
+      const registered = intentToolsState?.registered ?? [];
+      let catalog = describeCatalogForPrompt(manifest);
+      if (registered.length > 0) {
+        catalog +=
+          "\n\nThe non-destructive, non-external intents above are registered as directly callable tools in this session — call them by tool name with their JSON parameters.";
+      }
       return jsonResult({
         available: true,
         domains: Array.isArray(manifest.domains) ? manifest.domains.map((d) => d.key) : [],
-        catalog: describeCatalogForPrompt(manifest),
+        ...(registered.length > 0 ? { executableTools: registered } : {}),
+        catalog,
       });
     },
   };
+}
+
+// Tool names this plugin already owns; a manifest intent whose executable tool
+// name collides with one of these is skipped rather than shadowing it.
+const RESERVED_TOOL_NAMES = new Set([
+  "memory_search",
+  "memory_get",
+  "memory_store",
+  "ci_list_intents",
+]);
+
+// POST the tool input to the intent's REST execute path. Tries the canonical
+// agent path first and falls back to the legacy alias when the route is missing
+// (HTTP 404), mirroring fetchIntentManifest's CATALOG_PATHS fallback. Rethrows
+// the last error for non-route failures (auth, 5xx, timeout) — the tool's
+// execute handler converts it into a structured error result.
+async function executeIntentViaRest(config, intentName, input) {
+  let lastError;
+  for (const path of executePathCandidates(intentName)) {
+    try {
+      return await requestJson(config, path, { method: "POST", body: input ?? {} });
+    } catch (error) {
+      lastError = error;
+      if (!String(error?.message || error).includes("HTTP 404")) break;
+    }
+  }
+  throw lastError;
+}
+
+// An executable OpenClaw tool for one curated CI intent. Mirrors the memory
+// tools: authenticated requestJson transport, jsonResult payloads, and a
+// structured error result (never a throw) when CI-Server rejects or is down.
+function createIntentTool(api, spec) {
+  return {
+    name: spec.name,
+    label: spec.title || spec.name,
+    description: spec.description,
+    parameters: spec.parameters,
+    execute: async (_toolCallId, params) => {
+      const client = createClient(api);
+      try {
+        const payload = await executeIntentViaRest(
+          client.config,
+          spec.intent || spec.name,
+          params ?? {},
+        );
+        return jsonResult(payload);
+      } catch (error) {
+        return jsonResult({
+          success: false,
+          intent: spec.intent || spec.name,
+          tool: spec.name,
+          error: String(error?.message || error),
+        });
+      }
+    },
+  };
+}
+
+// Register one executable OpenClaw tool per curated CI intent, driven by the
+// same manifest ci_list_intents renders. Client-side filter keeps only
+// non-destructive, non-external intents (belt-and-braces: the server's generic
+// executor 403s destructive/external anyway). Never throws — an unreachable or
+// manifest-less CI-Server degrades to zero registrations, matching
+// fetchIntentManifest's discipline. Returns the registered tool names.
+async function registerIntentTools(api, cfg) {
+  const registered = [];
+  try {
+    const client = createClient(api, cfg);
+    if (!client.config.url || !client.config.token) return registered;
+    const manifest = await fetchIntentManifest((path) => requestJson(client.config, path));
+    if (!manifest) return registered;
+
+    const skipped = [];
+    const seen = new Set(RESERVED_TOOL_NAMES);
+    for (const spec of manifestToToolSpecs(manifest)) {
+      if (!spec.name || typeof spec.name !== "string") continue;
+      // Privacy filter: only read/write appliance-local intents become tools.
+      if (!spec.privacy || spec.privacy.destructive || spec.privacy.external) continue;
+      // Collision filter: never shadow this plugin's own tools or an earlier intent.
+      if (seen.has(spec.name)) {
+        skipped.push(spec.name);
+        continue;
+      }
+      seen.add(spec.name);
+      try {
+        api.registerTool(() => createIntentTool(api, spec), { name: spec.name });
+        registered.push(spec.name);
+      } catch {
+        skipped.push(spec.name);
+      }
+    }
+    if (skipped.length > 0) {
+      api.log?.warn?.(
+        `companionintelligence: skipped intent tools with colliding/unregisterable names: ${skipped.join(", ")}`,
+      );
+    }
+  } catch (error) {
+    api.log?.debug?.(
+      `companionintelligence: intent tool registration unavailable: ${String(error?.message || error)}`,
+    );
+  }
+  return registered;
 }
 
 function createMemoryStoreTool(api) {
@@ -729,9 +849,26 @@ export default {
     // privacy-labelled vocabulary CI-Server publishes (one shared catalog instead
     // of bespoke per-harness glue) and prefer those intents over raw CRUD.
     if (featureEnabled("CI_INTENTS_ENABLED")) {
-      api.registerTool(() => createListIntentsTool(api), {
+      // Which executable intent tools actually got registered this session, so
+      // ci_list_intents can tell the agent the catalog is directly callable.
+      const intentToolsState = { registered: [] };
+
+      api.registerTool(() => createListIntentsTool(api, intentToolsState), {
         name: "ci_list_intents",
       });
+
+      // Executable intent tools — one OpenClaw tool per non-destructive,
+      // non-external manifest intent, executing via CI-Server's REST intent
+      // executor (POST /api/intents/:name/execute). Async fire-and-forget so an
+      // unreachable CI-Server never blocks or breaks plugin registration; it
+      // just degrades to discovery-only (ci_list_intents keeps working).
+      if (featureEnabled("CI_INTENT_TOOLS_ENABLED")) {
+        registerIntentTools(api)
+          .then((names) => {
+            intentToolsState.registered = names;
+          })
+          .catch(() => {});
+      }
     }
 
     api.registerHook?.("agent:bootstrap", (event) => applyBootstrapMemoryGuidance(event, api), {
@@ -803,4 +940,4 @@ export default {
 };
 
 // Exported for unit tests (does not affect the default-export plugin entrypoint).
-export { featureEnabled, normalizeBaseUrl };
+export { featureEnabled, normalizeBaseUrl, registerIntentTools };
