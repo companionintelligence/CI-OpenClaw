@@ -1326,10 +1326,11 @@ function hasMemoryDeferCookie(req) {
   return cookie.split(";").some((c) => c.trim().startsWith(`${MEMORY_DEFER_COOKIE}=`));
 }
 
-/** Constant-time-ish check of the anti-CSWSH token carried by the gate's actions. */
+/** Constant-time check of the anti-CSWSH token carried by the gate's actions. */
 function memoryActionTokenOk(req) {
-  const provided = new URL(req.url, "http://localhost").searchParams.get("t") || "";
-  return !!SETUP_TOKEN && provided === SETUP_TOKEN;
+  const provided = new URL(req.url || "/", "http://localhost").searchParams.get("t") || "";
+  if (!SETUP_TOKEN || provided.length !== SETUP_TOKEN.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(SETUP_TOKEN));
 }
 
 /** Escape a value for safe interpolation into an HTML attribute. */
@@ -1393,9 +1394,12 @@ async function maybeServeMemoryGate(req, res) {
   if (pathname !== "/") return false;
   if (!String(req.headers.accept || "").includes("text/html")) return false;
 
-  // Container env (Hub-injected) wins over the on-disk .env, matching how the
-  // gateway plugin resolves creds.
-  const env = { ...readEnv(), ...process.env };
+  // Resolve creds exactly as the spawned gateway does: .env is the base, and only
+  // NON-EMPTY Hub-authoritative container vars override it. A plain
+  // `{ ...readEnv(), ...process.env }` merge would let an unsubstituted compose
+  // `${CI_SERVER_TOKEN}` (resolved to "") blank a real .env token and wrongly
+  // re-show the interstitial to an already-configured app.
+  const env = buildChildEnv();
   if (hasCiServerCredentials(env)) return false; // connected or manually configured
   if (hasMemoryDeferCookie(req)) return false; // dismissed for this session
 
@@ -1443,7 +1447,7 @@ async function handleMemoryAction(req, res) {
   }
 
   // Skip forever — relay to the Hub (only this container can reach it internally).
-  const env = { ...readEnv(), ...process.env };
+  const env = buildChildEnv();
   const appUrn = (env.CI_APP_URN || "").trim();
   const hubBase = hubInternalBase(env);
   if (appUrn && hubBase) {
