@@ -1314,6 +1314,12 @@ function hubInternalBase(env) {
   return (env.CI_HUB_URL || env.HUB_URL || "").trim().replace(/\/+$/, "");
 }
 
+/** Auth header for wrapper->Hub memory-connect calls: this app's own managed key. */
+function mcpAuthHeaders(env) {
+  const key = (env.HUB_MCP_API_KEY || "").trim();
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}
+
 /** Whether the request carries the session-scoped "deferred" cookie. */
 function hasMemoryDeferCookie(req) {
   const cookie = req.headers.cookie || "";
@@ -1399,6 +1405,7 @@ async function maybeServeMemoryGate(req, res) {
 
   try {
     const resp = await fetch(`${hubBase}/api/memory-connect/apps/${encodeURIComponent(appUrn)}/state`, {
+      headers: mcpAuthHeaders(env),
       signal: AbortSignal.timeout(4000),
     });
     if (!resp.ok) return false;
@@ -1443,6 +1450,7 @@ async function handleMemoryAction(req, res) {
     try {
       await fetch(`${hubBase}/api/memory-connect/apps/${encodeURIComponent(appUrn)}/skip`, {
         method: "POST",
+        headers: mcpAuthHeaders(env),
         signal: AbortSignal.timeout(4000),
       });
     } catch {
