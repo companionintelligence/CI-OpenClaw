@@ -1300,7 +1300,138 @@ function handleUpgrade(req, socket, head) {
   });
 }
 
-const server = http.createServer((req, res) => {
+// ── Companion Memory connect interstitial ───────────────────────────────────
+// Shown before the app UI when memory is not yet connected, so the user can
+// connect (or dismiss) rather than silently running without long-term memory.
+// The Hub owns the OAuth-style flow; this wrapper only renders the gate and
+// relays the "skip"/"defer" choices. Paths are namespaced under /__ci_memory/.
+const MEMORY_DEFER_COOKIE = "ci_memory_deferred";
+const MEMORY_DEFER_PATH = "/__ci_memory/defer";
+const MEMORY_SKIP_PATH = "/__ci_memory/skip";
+
+/** The Hub's internal base URL (reachable from this container on the app network). */
+function hubInternalBase(env) {
+  return (env.CI_HUB_URL || env.HUB_URL || "").trim().replace(/\/+$/, "");
+}
+
+/** Whether the request carries the session-scoped "deferred" cookie. */
+function hasMemoryDeferCookie(req) {
+  const cookie = req.headers.cookie || "";
+  return cookie.split(";").some((c) => c.trim().startsWith(`${MEMORY_DEFER_COOKIE}=`));
+}
+
+/** Constant-time-ish check of the anti-CSWSH token carried by the gate's actions. */
+function memoryActionTokenOk(req) {
+  const provided = new URL(req.url, "http://localhost").searchParams.get("t") || "";
+  return !!SETUP_TOKEN && provided === SETUP_TOKEN;
+}
+
+/** Minimal, self-contained interstitial page (mirrors the setup.html aesthetic). */
+function renderMemoryGateHtml(connectUrl) {
+  const t = encodeURIComponent(SETUP_TOKEN);
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Connect to Companion Memory</title>
+<style>
+  :root{color-scheme:light dark}
+  body{font-family:system-ui,-apple-system,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b1220;color:#e6edf3}
+  .card{max-width:30rem;margin:1.5rem;padding:2rem;border-radius:1rem;background:#111a2e;box-shadow:0 10px 40px rgba(0,0,0,.35)}
+  h1{font-size:1.35rem;margin:0 0 .75rem}p{line-height:1.5;color:#b6c2d4}
+  .actions{display:flex;flex-direction:column;gap:.6rem;margin-top:1.5rem}
+  a.btn,button{padding:.75rem 1rem;border-radius:.6rem;border:0;font-size:1rem;font-weight:600;cursor:pointer;text-align:center;text-decoration:none}
+  .primary{background:#2f9e8f;color:#fff}.secondary{background:transparent;color:#b6c2d4;border:1px solid #33415c}
+  form{margin:0}
+</style></head>
+<body><main class="card">
+  <h1>Give this agent long-term memory</h1>
+  <p>Connect to your Companion Memory so this agent remembers your context across
+     sessions. You'll sign in with Companion Intelligence and approve access; you
+     can disconnect any time.</p>
+  <div class="actions">
+    <a class="btn primary" href="${connectUrl}">Sign in with Companion Intelligence</a>
+    <form method="POST" action="${MEMORY_DEFER_PATH}?t=${t}"><button class="secondary" type="submit">Continue without memory</button></form>
+    <form method="POST" action="${MEMORY_SKIP_PATH}?t=${t}"><button class="secondary" type="submit">Don't ask again</button></form>
+  </div>
+</main></body></html>`;
+}
+
+/**
+ * If memory is not yet connected and the user hasn't dismissed the prompt,
+ * serve the connect interstitial and return true. Only gates the top-level HTML
+ * page load; fails open (returns false → proxy through) on any uncertainty so a
+ * Hub hiccup never blocks the app.
+ */
+async function maybeServeMemoryGate(req, res) {
+  if (req.method !== "GET") return false;
+  const pathname = (req.url || "/").split("?")[0];
+  if (pathname !== "/") return false;
+  if (!String(req.headers.accept || "").includes("text/html")) return false;
+
+  // Container env (Hub-injected) wins over the on-disk .env, matching how the
+  // gateway plugin resolves creds.
+  const env = { ...readEnv(), ...process.env };
+  if (hasCiServerCredentials(env)) return false; // connected or manually configured
+  if (hasMemoryDeferCookie(req)) return false; // dismissed for this session
+
+  const appUrn = (env.CI_APP_URN || "").trim();
+  const hubBase = hubInternalBase(env);
+  if (!appUrn || !hubBase) return false; // can't resolve — fail open
+
+  try {
+    const resp = await fetch(`${hubBase}/api/memory-connect/apps/${encodeURIComponent(appUrn)}/state`, {
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!resp.ok) return false;
+    const { state, connectUrl } = await resp.json();
+    // Only prompt when the user hasn't decided yet; skipped/manual/connected pass through.
+    if ((state !== "unconfigured" && state !== "deferred") || !connectUrl) return false;
+
+    res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
+    res.end(renderMemoryGateHtml(connectUrl));
+    return true;
+  } catch {
+    return false; // Hub unreachable → fail open
+  }
+}
+
+/** Handle the interstitial's local defer/skip actions. Returns true if handled. */
+async function handleMemoryAction(req, res) {
+  const pathname = (req.url || "/").split("?")[0];
+  if (pathname !== MEMORY_DEFER_PATH && pathname !== MEMORY_SKIP_PATH) return false;
+
+  if (req.method !== "POST" || !memoryActionTokenOk(req)) {
+    res.writeHead(403, { "Content-Type": "text/plain" });
+    res.end("Forbidden");
+    return true;
+  }
+
+  if (pathname === MEMORY_DEFER_PATH) {
+    // Session cookie — reappears next browser session, per the "deferred" design.
+    res.writeHead(302, { Location: "/", "Set-Cookie": `${MEMORY_DEFER_COOKIE}=1; Path=/; HttpOnly; SameSite=Lax` });
+    res.end();
+    return true;
+  }
+
+  // Skip forever — relay to the Hub (only this container can reach it internally).
+  const env = { ...readEnv(), ...process.env };
+  const appUrn = (env.CI_APP_URN || "").trim();
+  const hubBase = hubInternalBase(env);
+  if (appUrn && hubBase) {
+    try {
+      await fetch(`${hubBase}/api/memory-connect/apps/${encodeURIComponent(appUrn)}/skip`, {
+        method: "POST",
+        signal: AbortSignal.timeout(4000),
+      });
+    } catch {
+      // best-effort; the gate simply reappears if this didn't land
+    }
+  }
+  res.writeHead(302, { Location: "/" });
+  res.end();
+  return true;
+}
+
+const server = http.createServer(async (req, res) => {
   // Serve static assets for setup UI
   if (req.url === "/logo.webp") {
     res.writeHead(200, {
@@ -1333,6 +1464,15 @@ const server = http.createServer((req, res) => {
     }
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end(SETUP_HTML.replace("__SETUP_TOKEN__", SETUP_TOKEN));
+    return;
+  }
+
+  // Companion Memory connect interstitial (post-onboarding, pre-app). Handle its
+  // local defer/skip actions first, then offer the gate on the top-level load.
+  if (await handleMemoryAction(req, res)) {
+    return;
+  }
+  if (await maybeServeMemoryGate(req, res)) {
     return;
   }
 
