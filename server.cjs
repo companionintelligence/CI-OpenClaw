@@ -1329,8 +1329,14 @@ function hasMemoryDeferCookie(req) {
 /** Constant-time check of the anti-CSWSH token carried by the gate's actions. */
 function memoryActionTokenOk(req) {
   const provided = new URL(req.url || "/", "http://localhost").searchParams.get("t") || "";
-  if (!SETUP_TOKEN || provided.length !== SETUP_TOKEN.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(SETUP_TOKEN));
+  if (!SETUP_TOKEN) return false;
+  // Compare BYTE lengths (not JS string length): timingSafeEqual throws
+  // RangeError on unequal-length buffers, and a multi-byte `t` can match the
+  // string length while differing in bytes — that throw would crash the async
+  // request handler. Mirrors the WebSocket-upgrade token check below.
+  const providedBuffer = Buffer.from(provided);
+  const tokenBuffer = Buffer.from(SETUP_TOKEN);
+  return providedBuffer.length === tokenBuffer.length && crypto.timingSafeEqual(providedBuffer, tokenBuffer);
 }
 
 /** Escape a value for safe interpolation into an HTML attribute. */
