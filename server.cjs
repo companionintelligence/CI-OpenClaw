@@ -1426,7 +1426,14 @@ async function maybeServeMemoryGate(req, res) {
     const safeConnectUrl = safeHttpUrl(connectUrl);
     if (!safeConnectUrl) return false;
 
-    res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
+    res.writeHead(200, {
+      "Content-Type": "text/html",
+      "Cache-Control": "no-store",
+      // Anti-clickjacking: the gate has consent-suppression buttons (skip/defer),
+      // so it must never be framed (matches the CI-Server consent page).
+      "X-Frame-Options": "DENY",
+      "Content-Security-Policy": "frame-ancestors 'none'",
+    });
     res.end(renderMemoryGateHtml(safeConnectUrl));
     return true;
   } catch {
