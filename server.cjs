@@ -1362,8 +1362,8 @@ function safeHttpUrl(url) {
 /**
  * Minimal, self-contained interstitial page. Matches the Companion Memory
  * (CI-Import-Tools) sign-in aesthetic: navy background, elevated card, the
- * Companion Memory mark, and a teal brand-gradient pill. Colors mirror the
- * import-tools dark theme tokens (with a light-scheme fallback).
+ * app's own logo (served at /logo.webp), and a teal brand-gradient pill. Colors
+ * mirror the import-tools dark theme tokens (with a light-scheme fallback).
  */
 function renderMemoryGateHtml(connectUrl) {
   const t = encodeURIComponent(SETUP_TOKEN);
@@ -1376,7 +1376,7 @@ function renderMemoryGateHtml(connectUrl) {
   *{box-sizing:border-box}
   body{font-family:"Montserrat",system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);padding:40px 20px}
   .card{width:100%;max-width:420px;text-align:center;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:36px 28px;box-shadow:var(--shadow)}
-  .logo{width:56px;height:56px;margin:0 auto 20px;display:block}
+  .logo{width:64px;height:64px;margin:0 auto 20px;display:block;object-fit:contain;background:#fff;border-radius:14px;padding:8px;box-shadow:0 2px 10px rgba(0,0,0,.28)}
   h1{font-size:20px;font-weight:700;margin:0 0 8px}
   p{line-height:1.5;color:var(--fg-dim);font-size:14px;margin:0 0 22px}
   .actions{display:flex;flex-direction:column;gap:10px}
@@ -1388,27 +1388,7 @@ function renderMemoryGateHtml(connectUrl) {
   .secondary:hover{color:var(--fg);border-color:var(--fg-dim)}
 </style></head>
 <body><main class="card">
-  <svg class="logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Companion Memory">
-    <defs><radialGradient id="g" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#fde047" stop-opacity="0.9"/><stop offset="55%" stop-color="#fde047" stop-opacity="0.2"/><stop offset="100%" stop-color="#fde047" stop-opacity="0"/></radialGradient></defs>
-    <path d="M32 22 Q21 20 12 14" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
-    <path d="M32 22 Q41 16 52 14" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
-    <path d="M23 40 Q16 45 8 46" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
-    <path d="M23 40 Q22 50 16 58" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
-    <path d="M41 40 Q49 41 56 46" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
-    <path d="M41 40 Q47 48 48 58" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
-    <path d="M32 22 L23 40" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
-    <path d="M23 40 L41 40" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
-    <path d="M41 40 L32 22" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
-    <path d="M32 22 L32 34" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
-    <path d="M23 40 L32 34" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
-    <path d="M41 40 L32 34" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
-    <circle cx="32" cy="34" r="16" fill="url(#g)"/>
-    <circle cx="12" cy="14" r="4.2" fill="#22d3ee"/><circle cx="52" cy="14" r="4.2" fill="#22d3ee"/>
-    <circle cx="8" cy="46" r="4.2" fill="#22d3ee"/><circle cx="16" cy="58" r="4.2" fill="#22d3ee"/>
-    <circle cx="56" cy="46" r="4.2" fill="#22d3ee"/><circle cx="48" cy="58" r="4.2" fill="#22d3ee"/>
-    <circle cx="32" cy="22" r="4.4" fill="#ec4899"/><circle cx="23" cy="40" r="4.4" fill="#ec4899"/>
-    <circle cx="41" cy="40" r="4.4" fill="#ec4899"/><circle cx="32" cy="34" r="5.2" fill="#fde047"/>
-  </svg>
+  <img class="logo" src="/logo.webp" alt="OpenClaw" width="56" height="56" />
   <h1>Give OpenClaw long-term memory</h1>
   <p>Connect to your Companion Memory so OpenClaw remembers your context across
      sessions. You'll sign in with Companion Intelligence and approve access; you
