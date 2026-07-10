@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+<defs><radialGradient id="g" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#fde047" stop-opacity="0.9"/><stop offset="55%" stop-color="#fde047" stop-opacity="0.2"/><stop offset="100%" stop-color="#fde047" stop-opacity="0"/></radialGradient></defs>
+<path d="M32 22 Q21 20 12 14" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+<path d="M32 22 Q41 16 52 14" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+<path d="M23 40 Q16 45 8 46" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+<path d="M23 40 Q22 50 16 58" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+<path d="M41 40 Q49 41 56 46" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+<path d="M41 40 Q47 48 48 58" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+<path d="M32 22 L23 40" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
+<path d="M23 40 L41 40" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
+<path d="M41 40 L32 22" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
+<path d="M32 22 L32 34" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
+<path d="M23 40 L32 34" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
+<path d="M41 40 L32 34" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="32" cy="34" r="16" fill="url(#g)"/>
+<circle cx="12" cy="14" r="4.2" fill="#22d3ee"/>
+<circle cx="52" cy="14" r="4.2" fill="#22d3ee"/>
+<circle cx="8" cy="46" r="4.2" fill="#22d3ee"/>
+<circle cx="16" cy="58" r="4.2" fill="#22d3ee"/>
+<circle cx="56" cy="46" r="4.2" fill="#22d3ee"/>
+<circle cx="48" cy="58" r="4.2" fill="#22d3ee"/>
+<circle cx="32" cy="22" r="4.4" fill="#ec4899"/>
+<circle cx="23" cy="40" r="4.4" fill="#ec4899"/>
+<circle cx="41" cy="40" r="4.4" fill="#ec4899"/>
+<circle cx="32" cy="34" r="5.2" fill="#fde047"/>
+</svg>

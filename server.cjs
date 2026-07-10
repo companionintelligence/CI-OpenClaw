@@ -1120,6 +1120,15 @@ function startOpenclaw({ repair = true } = {}) {
 // Read static files at startup
 const SETUP_HTML = fs.readFileSync(path.join(__dirname, "setup.html"), "utf8");
 const LOGO = fs.readFileSync(path.join(__dirname, "logo.webp"));
+// Companion Memory mark, shown next to the app logo on the connect interstitial
+// (served at MEMORY_MARK_PATH). Read once, guarded: a missing asset degrades the
+// interstitial to just the app logo rather than crashing the wrapper on boot.
+let CI_MARK = null;
+try {
+  CI_MARK = fs.readFileSync(path.join(__dirname, "assets", "ci-mark.svg"));
+} catch (err) {
+  console.warn(`[ci-memory] ci-mark.svg missing, interstitial will omit it: ${err.message}`);
+}
 // Loading page shown while the gateway is starting up. Keep the refresh in JS:
 // Chrome skips meta-refresh when the URL contains a hash fragment, and our
 // token redirect lands at /?token=...#token=....
@@ -1308,6 +1317,7 @@ function handleUpgrade(req, socket, head) {
 const MEMORY_DEFER_COOKIE = "ci_memory_deferred";
 const MEMORY_DEFER_PATH = "/__ci_memory/defer";
 const MEMORY_SKIP_PATH = "/__ci_memory/skip";
+const MEMORY_MARK_PATH = "/__ci_memory/ci-mark.svg";
 
 /** The Hub's internal base URL (reachable from this container on the app network). */
 function hubInternalBase(env) {
@@ -1362,11 +1372,18 @@ function safeHttpUrl(url) {
 /**
  * Minimal, self-contained interstitial page. Matches the Companion Memory
  * (CI-Import-Tools) sign-in aesthetic: navy background, elevated card, the
- * app's own logo (served at /logo.webp), and a teal brand-gradient pill. Colors
- * mirror the import-tools dark theme tokens (with a light-scheme fallback).
+ * app's own logo paired with the Companion Memory mark ("app -> memory"), and a
+ * teal brand-gradient pill. The app logo is served at /logo.webp and the mark at
+ * MEMORY_MARK_PATH. Colors mirror the import-tools dark theme tokens (with a
+ * light-scheme fallback).
  */
 function renderMemoryGateHtml(connectUrl) {
   const t = encodeURIComponent(SETUP_TOKEN);
+  // Connector + Companion Memory mark, appended after the app logo. Omitted
+  // entirely (no dangling arrow) when the mark asset is unavailable.
+  const cmGlyph = CI_MARK
+    ? `<svg class="link" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="12" x2="18" y2="12" /><polyline points="12 6 18 12 12 18" /></svg><img class="cm" src="${MEMORY_MARK_PATH}" alt="Companion Memory" />`
+    : "";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Connect to Companion Memory</title>
@@ -1376,7 +1393,10 @@ function renderMemoryGateHtml(connectUrl) {
   *{box-sizing:border-box}
   body{font-family:"Montserrat",system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);padding:40px 20px}
   .card{width:100%;max-width:420px;text-align:center;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:36px 28px;box-shadow:var(--shadow)}
-  .logo{width:64px;height:64px;margin:0 auto 20px;display:block;object-fit:contain;background:#fff;border-radius:14px;padding:8px;box-shadow:0 2px 10px rgba(0,0,0,.28)}
+  .brand{display:flex;align-items:center;justify-content:center;gap:14px;margin:0 auto 22px}
+  .applogo{width:56px;height:56px;object-fit:contain;background:#fff;border-radius:14px;padding:8px;box-shadow:0 2px 10px rgba(0,0,0,.28)}
+  .brand .link{color:var(--fg-dim);display:flex;align-items:center}
+  .cm{width:40px;height:40px;display:block}
   h1{font-size:20px;font-weight:700;margin:0 0 8px}
   p{line-height:1.5;color:var(--fg-dim);font-size:14px;margin:0 0 22px}
   .actions{display:flex;flex-direction:column;gap:10px}
@@ -1388,7 +1408,9 @@ function renderMemoryGateHtml(connectUrl) {
   .secondary:hover{color:var(--fg);border-color:var(--fg-dim)}
 </style></head>
 <body><main class="card">
-  <img class="logo" src="/logo.webp" alt="OpenClaw" width="56" height="56" />
+  <div class="brand">
+    <img class="applogo" src="/logo.webp" alt="OpenClaw" />${cmGlyph}
+  </div>
   <h1>Give OpenClaw long-term memory</h1>
   <p>Connect to your Companion Memory so OpenClaw remembers your context across
      sessions. You'll sign in with Companion Intelligence and approve access; you
@@ -1500,6 +1522,16 @@ const server = http.createServer(async (req, res) => {
       "Cache-Control": "public, max-age=86400",
     });
     res.end(LOGO);
+    return;
+  }
+
+  // Companion Memory mark for the connect interstitial (served from assets/).
+  if (CI_MARK && req.url === MEMORY_MARK_PATH) {
+    res.writeHead(200, {
+      "Content-Type": "image/svg+xml",
+      "Cache-Control": "public, max-age=86400",
+    });
+    res.end(CI_MARK);
     return;
   }
 
