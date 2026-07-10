@@ -1359,31 +1359,64 @@ function safeHttpUrl(url) {
   }
 }
 
-/** Minimal, self-contained interstitial page (mirrors the setup.html aesthetic). */
+/**
+ * Minimal, self-contained interstitial page. Matches the Companion Memory
+ * (CI-Import-Tools) sign-in aesthetic: navy background, elevated card, the
+ * Companion Memory mark, and a teal brand-gradient pill. Colors mirror the
+ * import-tools dark theme tokens (with a light-scheme fallback).
+ */
 function renderMemoryGateHtml(connectUrl) {
   const t = encodeURIComponent(SETUP_TOKEN);
   return `<!doctype html><html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Connect to Companion Memory</title>
 <style>
-  :root{color-scheme:light dark}
-  body{font-family:system-ui,-apple-system,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b1220;color:#e6edf3}
-  .card{max-width:30rem;margin:1.5rem;padding:2rem;border-radius:1rem;background:#111a2e;box-shadow:0 10px 40px rgba(0,0,0,.35)}
-  h1{font-size:1.35rem;margin:0 0 .75rem}p{line-height:1.5;color:#b6c2d4}
-  .actions{display:flex;flex-direction:column;gap:.6rem;margin-top:1.5rem}
-  a.btn,button{padding:.75rem 1rem;border-radius:.6rem;border:0;font-size:1rem;font-weight:600;cursor:pointer;text-align:center;text-decoration:none}
-  .primary{background:#2f9e8f;color:#fff}.secondary{background:transparent;color:#b6c2d4;border:1px solid #33415c}
-  form{margin:0}
+  :root{color-scheme:dark;--bg:#041620;--card:#0a222e;--border:#1f4a55;--fg:#f5f8fa;--fg-dim:#9bb2b7;--brand-grad:linear-gradient(135deg,#0b6e74 0%,#079d99 100%);--on-accent:#fff;--shadow:0 6px 24px rgba(4,22,32,.22)}
+  @media (prefers-color-scheme:light){:root{color-scheme:light;--bg:#f3f3f3;--card:#f7f7f9;--border:#d3dddf;--fg:#010f16;--fg-dim:#4f6168;--shadow:0 6px 24px rgba(4,22,32,.12)}}
+  *{box-sizing:border-box}
+  body{font-family:"Montserrat",system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);padding:40px 20px}
+  .card{width:100%;max-width:420px;text-align:center;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:36px 28px;box-shadow:var(--shadow)}
+  .logo{width:56px;height:56px;margin:0 auto 20px;display:block}
+  h1{font-size:20px;font-weight:700;margin:0 0 8px}
+  p{line-height:1.5;color:var(--fg-dim);font-size:14px;margin:0 0 22px}
+  .actions{display:flex;flex-direction:column;gap:10px}
+  .actions form{margin:0}
+  .btn{display:block;width:100%;padding:11px 20px;border-radius:999px;border:0;font-size:15px;font-weight:600;line-height:1.2;cursor:pointer;text-align:center;text-decoration:none;font-family:inherit}
+  .primary{background:var(--brand-grad);color:var(--on-accent)}
+  .primary:hover{filter:brightness(1.06)}
+  .secondary{background:transparent;color:var(--fg-dim);border:1px solid var(--border)}
+  .secondary:hover{color:var(--fg);border-color:var(--fg-dim)}
 </style></head>
 <body><main class="card">
-  <h1>Give this agent long-term memory</h1>
-  <p>Connect to your Companion Memory so this agent remembers your context across
+  <svg class="logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Companion Memory">
+    <defs><radialGradient id="g" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#fde047" stop-opacity="0.9"/><stop offset="55%" stop-color="#fde047" stop-opacity="0.2"/><stop offset="100%" stop-color="#fde047" stop-opacity="0"/></radialGradient></defs>
+    <path d="M32 22 Q21 20 12 14" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+    <path d="M32 22 Q41 16 52 14" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+    <path d="M23 40 Q16 45 8 46" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+    <path d="M23 40 Q22 50 16 58" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+    <path d="M41 40 Q49 41 56 46" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+    <path d="M41 40 Q47 48 48 58" stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85"/>
+    <path d="M32 22 L23 40" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
+    <path d="M23 40 L41 40" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
+    <path d="M41 40 L32 22" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
+    <path d="M32 22 L32 34" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
+    <path d="M23 40 L32 34" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
+    <path d="M41 40 L32 34" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round"/>
+    <circle cx="32" cy="34" r="16" fill="url(#g)"/>
+    <circle cx="12" cy="14" r="4.2" fill="#22d3ee"/><circle cx="52" cy="14" r="4.2" fill="#22d3ee"/>
+    <circle cx="8" cy="46" r="4.2" fill="#22d3ee"/><circle cx="16" cy="58" r="4.2" fill="#22d3ee"/>
+    <circle cx="56" cy="46" r="4.2" fill="#22d3ee"/><circle cx="48" cy="58" r="4.2" fill="#22d3ee"/>
+    <circle cx="32" cy="22" r="4.4" fill="#ec4899"/><circle cx="23" cy="40" r="4.4" fill="#ec4899"/>
+    <circle cx="41" cy="40" r="4.4" fill="#ec4899"/><circle cx="32" cy="34" r="5.2" fill="#fde047"/>
+  </svg>
+  <h1>Give OpenClaw long-term memory</h1>
+  <p>Connect to your Companion Memory so OpenClaw remembers your context across
      sessions. You'll sign in with Companion Intelligence and approve access; you
      can disconnect any time.</p>
   <div class="actions">
     <a class="btn primary" href="${escapeHtmlAttr(connectUrl)}">Sign in with Companion Intelligence</a>
-    <form method="POST" action="${MEMORY_DEFER_PATH}?t=${t}"><button class="secondary" type="submit">Continue without memory</button></form>
-    <form method="POST" action="${MEMORY_SKIP_PATH}?t=${t}"><button class="secondary" type="submit">Don't ask again</button></form>
+    <form method="POST" action="${MEMORY_DEFER_PATH}?t=${t}"><button class="btn secondary" type="submit">Continue without memory</button></form>
+    <form method="POST" action="${MEMORY_SKIP_PATH}?t=${t}"><button class="btn secondary" type="submit">Don't ask again</button></form>
   </div>
 </main></body></html>`;
 }
