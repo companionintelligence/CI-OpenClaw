@@ -1120,6 +1120,15 @@ function startOpenclaw({ repair = true } = {}) {
 // Read static files at startup
 const SETUP_HTML = fs.readFileSync(path.join(__dirname, "setup.html"), "utf8");
 const LOGO = fs.readFileSync(path.join(__dirname, "logo.webp"));
+// Companion Memory logo, shown next to the app logo on the connect interstitial
+// (served at MEMORY_LOGO_PATH). Read once, guarded: a missing asset degrades the
+// interstitial to just the app logo rather than crashing the wrapper on boot.
+let MEMORY_LOGO = null;
+try {
+  MEMORY_LOGO = fs.readFileSync(path.join(__dirname, "assets", "ci-memory-logo.webp"));
+} catch (err) {
+  console.warn(`[ci-memory] ci-memory-logo.webp missing, interstitial will omit it: ${err.message}`);
+}
 // Loading page shown while the gateway is starting up. Keep the refresh in JS:
 // Chrome skips meta-refresh when the URL contains a hash fragment, and our
 // token redirect lands at /?token=...#token=....
@@ -1300,7 +1309,229 @@ function handleUpgrade(req, socket, head) {
   });
 }
 
-const server = http.createServer((req, res) => {
+// ── Companion Memory connect interstitial ───────────────────────────────────
+// Shown before the app UI when memory is not yet connected, so the user can
+// connect (or dismiss) rather than silently running without long-term memory.
+// The Hub owns the OAuth-style flow; this wrapper only renders the gate and
+// relays the "skip"/"defer" choices. Paths are namespaced under /__ci_memory/.
+const MEMORY_DEFER_COOKIE = "ci_memory_deferred";
+// Grace window (seconds) for the "Maybe later" (defer) choice. Long enough to
+// carry the post-dismiss redirect, short enough that the next fresh launch/reload
+// re-prompts. Deliberately NOT a session cookie — that survived tab-close +
+// relaunch, making "defer" feel as permanent as "Don't ask again".
+const MEMORY_DEFER_GRACE_SECONDS = 30;
+const MEMORY_DEFER_PATH = "/__ci_memory/defer";
+const MEMORY_SKIP_PATH = "/__ci_memory/skip";
+const MEMORY_LOGO_PATH = "/__ci_memory/ci-memory-logo.webp";
+
+/** The Hub's internal base URL (reachable from this container on the app network). */
+function hubInternalBase(env) {
+  return (env.CI_HUB_URL || env.HUB_URL || "").trim().replace(/\/+$/, "");
+}
+
+/** Auth header for wrapper->Hub memory-connect calls: this app's own managed key. */
+function mcpAuthHeaders(env) {
+  const key = (env.HUB_MCP_API_KEY || "").trim();
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}
+
+/** Whether the request carries the short-lived "deferred" cookie (grace window). */
+function hasMemoryDeferCookie(req) {
+  const cookie = req.headers.cookie || "";
+  return cookie.split(";").some((c) => c.trim().startsWith(`${MEMORY_DEFER_COOKIE}=`));
+}
+
+/** Constant-time check of the anti-CSWSH token carried by the gate's actions. */
+function memoryActionTokenOk(req) {
+  const provided = new URL(req.url || "/", "http://localhost").searchParams.get("t") || "";
+  if (!SETUP_TOKEN) return false;
+  // Compare BYTE lengths (not JS string length): timingSafeEqual throws
+  // RangeError on unequal-length buffers, and a multi-byte `t` can match the
+  // string length while differing in bytes — that throw would crash the async
+  // request handler. Mirrors the WebSocket-upgrade token check below.
+  const providedBuffer = Buffer.from(provided);
+  const tokenBuffer = Buffer.from(SETUP_TOKEN);
+  return providedBuffer.length === tokenBuffer.length && crypto.timingSafeEqual(providedBuffer, tokenBuffer);
+}
+
+/** Escape a value for safe interpolation into an HTML attribute. */
+function escapeHtmlAttr(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** Return `url` only if it is an http(s) URL; otherwise null (reject javascript:, data:, etc.). */
+function safeHttpUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" || u.protocol === "http:" ? u.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Minimal, self-contained interstitial page. Matches the Companion Memory
+ * (CI-Import-Tools) sign-in aesthetic: navy background, elevated card, the
+ * app's own logo paired with the Companion Memory logo ("app -> memory"), and a
+ * teal brand-gradient pill. The app logo is served at /logo.webp and the memory
+ * logo at MEMORY_LOGO_PATH. Colors mirror the import-tools dark theme tokens
+ * (with a light-scheme fallback).
+ */
+function renderMemoryGateHtml(connectUrl) {
+  const t = encodeURIComponent(SETUP_TOKEN);
+  // Connector + Companion Memory mark, appended after the app logo. Omitted
+  // entirely (no dangling arrow) when the mark asset is unavailable.
+  const cmGlyph = MEMORY_LOGO
+    ? `<svg class="link" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="12" x2="18" y2="12" /><polyline points="12 6 18 12 12 18" /></svg><img class="cm" src="${MEMORY_LOGO_PATH}" alt="Companion Memory" />`
+    : "";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Connect to Companion Memory</title>
+<style>
+  :root{color-scheme:dark;--bg:#041620;--card:#0a222e;--border:#1f4a55;--fg:#f5f8fa;--fg-dim:#9bb2b7;--brand-grad:linear-gradient(135deg,#0b6e74 0%,#079d99 100%);--on-accent:#fff;--shadow:0 6px 24px rgba(4,22,32,.22)}
+  @media (prefers-color-scheme:light){:root{color-scheme:light;--bg:#f3f3f3;--card:#f7f7f9;--border:#d3dddf;--fg:#010f16;--fg-dim:#4f6168;--shadow:0 6px 24px rgba(4,22,32,.12)}}
+  *{box-sizing:border-box}
+  body{font-family:"Montserrat",system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);padding:40px 20px}
+  .card{width:100%;max-width:420px;text-align:center;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:36px 28px;box-shadow:var(--shadow)}
+  .brand{display:flex;align-items:center;justify-content:center;gap:14px;margin:0 auto 22px}
+  .applogo{width:56px;height:56px;object-fit:contain;background:#fff;border-radius:14px;padding:8px;box-shadow:0 2px 10px rgba(0,0,0,.28)}
+  .brand .link{color:var(--fg-dim);display:flex;align-items:center}
+  .cm{width:56px;height:56px;object-fit:contain;border-radius:14px;background:#000;box-shadow:0 2px 10px rgba(0,0,0,.28)}
+  h1{font-size:20px;font-weight:700;margin:0 0 8px}
+  p{line-height:1.5;color:var(--fg-dim);font-size:14px;margin:0 0 22px}
+  .actions{display:flex;flex-direction:column;gap:10px}
+  .actions form{margin:0}
+  .btn{display:block;width:100%;padding:11px 20px;border-radius:999px;border:0;font-size:15px;font-weight:600;line-height:1.2;cursor:pointer;text-align:center;text-decoration:none;font-family:inherit}
+  .primary{background:var(--brand-grad);color:var(--on-accent)}
+  .primary:hover{filter:brightness(1.06)}
+  .secondary{background:transparent;color:var(--fg-dim);border:1px solid var(--border)}
+  .secondary:hover{color:var(--fg);border-color:var(--fg-dim)}
+</style></head>
+<body><main class="card">
+  <div class="brand">
+    <img class="applogo" src="/logo.webp" alt="OpenClaw" />${cmGlyph}
+  </div>
+  <h1>Give OpenClaw long-term memory</h1>
+  <p>Connect to your Companion Memory so OpenClaw remembers your context across
+     sessions. You'll sign in with Companion Intelligence and approve access; you
+     can disconnect any time.</p>
+  <div class="actions">
+    <a class="btn primary" href="${escapeHtmlAttr(connectUrl)}">Sign in with Companion Intelligence</a>
+    <form method="POST" action="${MEMORY_DEFER_PATH}?t=${t}"><button class="btn secondary" type="submit">Maybe later</button></form>
+    <form method="POST" action="${MEMORY_SKIP_PATH}?t=${t}"><button class="btn secondary" type="submit">Don't ask again</button></form>
+  </div>
+</main></body></html>`;
+}
+
+/**
+ * If memory is not yet connected and the user hasn't dismissed the prompt,
+ * serve the connect interstitial and return true. Only gates the top-level HTML
+ * page load; fails open (returns false → proxy through) on any uncertainty so a
+ * Hub hiccup never blocks the app.
+ */
+async function maybeServeMemoryGate(req, res) {
+  if (req.method !== "GET") return false;
+  const pathname = (req.url || "/").split("?")[0];
+  // Gate EVERY top-level HTML navigation, regardless of which SPA route the user
+  // opens or refreshes (/, /chat, …) — not just the root — so a disconnected app
+  // re-prompts everywhere. Never gate the wrapper's own /__ci_memory/* paths
+  // (defer/skip/logo), nor non-navigation requests: API/XHR, static assets, and
+  // WebSocket upgrades don't carry `Sec-Fetch-Dest: document` (and don't Accept
+  // text/html on older browsers), so returning the interstitial HTML for them
+  // would break the app.
+  if (pathname.startsWith("/__ci_memory")) return false;
+  const secFetchDest = String(req.headers["sec-fetch-dest"] || "");
+  const isNavigation = secFetchDest ? secFetchDest === "document" : String(req.headers.accept || "").includes("text/html");
+  if (!isNavigation) return false;
+
+  // Resolve creds exactly as the spawned gateway does: .env is the base, and only
+  // NON-EMPTY Hub-authoritative container vars override it. A plain
+  // `{ ...readEnv(), ...process.env }` merge would let an unsubstituted compose
+  // `${CI_SERVER_TOKEN}` (resolved to "") blank a real .env token and wrongly
+  // re-show the interstitial to an already-configured app.
+  const env = buildChildEnv();
+  if (hasCiServerCredentials(env)) return false; // connected or manually configured
+  if (hasMemoryDeferCookie(req)) return false; // dismissed for this session
+
+  const appUrn = (env.CI_APP_URN || "").trim();
+  const hubBase = hubInternalBase(env);
+  if (!appUrn || !hubBase) return false; // can't resolve — fail open
+
+  try {
+    const resp = await fetch(`${hubBase}/api/memory-connect/apps/${encodeURIComponent(appUrn)}/state`, {
+      headers: mcpAuthHeaders(env),
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!resp.ok) return false;
+    const { state, connectUrl } = await resp.json();
+    // Only prompt when the user hasn't decided yet; skipped/manual/connected pass through.
+    if (state !== "unconfigured" && state !== "deferred") return false;
+    // Only ever link to an http(s) Hub URL — never a javascript:/data: scheme.
+    const safeConnectUrl = safeHttpUrl(connectUrl);
+    if (!safeConnectUrl) return false;
+
+    res.writeHead(200, {
+      "Content-Type": "text/html",
+      "Cache-Control": "no-store",
+      // Anti-clickjacking: the gate has consent-suppression buttons (skip/defer),
+      // so it must never be framed (matches the CI-Server consent page).
+      "X-Frame-Options": "DENY",
+      "Content-Security-Policy": "frame-ancestors 'none'",
+    });
+    res.end(renderMemoryGateHtml(safeConnectUrl));
+    return true;
+  } catch {
+    return false; // Hub unreachable → fail open
+  }
+}
+
+/** Handle the interstitial's local defer/skip actions. Returns true if handled. */
+async function handleMemoryAction(req, res) {
+  const pathname = (req.url || "/").split("?")[0];
+  if (pathname !== MEMORY_DEFER_PATH && pathname !== MEMORY_SKIP_PATH) return false;
+
+  if (req.method !== "POST" || !memoryActionTokenOk(req)) {
+    res.writeHead(403, { "Content-Type": "text/plain" });
+    res.end("Forbidden");
+    return true;
+  }
+
+  if (pathname === MEMORY_DEFER_PATH) {
+    // Session cookie — reappears next browser session, per the "deferred" design.
+    res.writeHead(302, {
+      Location: "/",
+      "Set-Cookie": `${MEMORY_DEFER_COOKIE}=1; Path=/; Max-Age=${MEMORY_DEFER_GRACE_SECONDS}; HttpOnly; SameSite=Lax`,
+    });
+    res.end();
+    return true;
+  }
+
+  // Skip forever — relay to the Hub (only this container can reach it internally).
+  const env = buildChildEnv();
+  const appUrn = (env.CI_APP_URN || "").trim();
+  const hubBase = hubInternalBase(env);
+  if (appUrn && hubBase) {
+    try {
+      await fetch(`${hubBase}/api/memory-connect/apps/${encodeURIComponent(appUrn)}/skip`, {
+        method: "POST",
+        headers: mcpAuthHeaders(env),
+        signal: AbortSignal.timeout(4000),
+      });
+    } catch {
+      // best-effort; the gate simply reappears if this didn't land
+    }
+  }
+  res.writeHead(302, { Location: "/" });
+  res.end();
+  return true;
+}
+
+const server = http.createServer(async (req, res) => {
   // Serve static assets for setup UI
   if (req.url === "/logo.webp") {
     res.writeHead(200, {
@@ -1308,6 +1539,16 @@ const server = http.createServer((req, res) => {
       "Cache-Control": "public, max-age=86400",
     });
     res.end(LOGO);
+    return;
+  }
+
+  // Companion Memory logo for the connect interstitial (served from assets/).
+  if (MEMORY_LOGO && req.url === MEMORY_LOGO_PATH) {
+    res.writeHead(200, {
+      "Content-Type": "image/webp",
+      "Cache-Control": "public, max-age=86400",
+    });
+    res.end(MEMORY_LOGO);
     return;
   }
 
@@ -1333,6 +1574,15 @@ const server = http.createServer((req, res) => {
     }
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end(SETUP_HTML.replace("__SETUP_TOKEN__", SETUP_TOKEN));
+    return;
+  }
+
+  // Companion Memory connect interstitial (post-onboarding, pre-app). Handle its
+  // local defer/skip actions first, then offer the gate on the top-level load.
+  if (await handleMemoryAction(req, res)) {
+    return;
+  }
+  if (await maybeServeMemoryGate(req, res)) {
     return;
   }
 

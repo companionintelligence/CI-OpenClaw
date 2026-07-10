@@ -52,6 +52,7 @@ RUN printf '#!/bin/bash\necho "Error: apt is not available. Please use brew inst
 COPY --chown=node:node server.cjs /app/setup-server.cjs
 COPY --chown=node:node setup.html /app/setup.html
 COPY --chown=node:node logo.webp /app/logo.webp
+COPY --chown=node:node assets /app/assets
 COPY --chown=node:node bootstrap-from-hub.sh bootstrap-ci-memory.sh bootstrap-ci-hub-mcp.sh entrypoint.sh /app/
 COPY openclaw-context /app/openclaw-context
 RUN sudo chmod +x /app/bootstrap-from-hub.sh /app/bootstrap-ci-memory.sh /app/bootstrap-ci-hub-mcp.sh /app/entrypoint.sh
