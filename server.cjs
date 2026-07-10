@@ -1437,8 +1437,17 @@ function renderMemoryGateHtml(connectUrl) {
 async function maybeServeMemoryGate(req, res) {
   if (req.method !== "GET") return false;
   const pathname = (req.url || "/").split("?")[0];
-  if (pathname !== "/") return false;
-  if (!String(req.headers.accept || "").includes("text/html")) return false;
+  // Gate EVERY top-level HTML navigation, regardless of which SPA route the user
+  // opens or refreshes (/, /chat, …) — not just the root — so a disconnected app
+  // re-prompts everywhere. Never gate the wrapper's own /__ci_memory/* paths
+  // (defer/skip/logo), nor non-navigation requests: API/XHR, static assets, and
+  // WebSocket upgrades don't carry `Sec-Fetch-Dest: document` (and don't Accept
+  // text/html on older browsers), so returning the interstitial HTML for them
+  // would break the app.
+  if (pathname.startsWith("/__ci_memory")) return false;
+  const secFetchDest = String(req.headers["sec-fetch-dest"] || "");
+  const isNavigation = secFetchDest ? secFetchDest === "document" : String(req.headers.accept || "").includes("text/html");
+  if (!isNavigation) return false;
 
   // Resolve creds exactly as the spawned gateway does: .env is the base, and only
   // NON-EMPTY Hub-authoritative container vars override it. A plain
