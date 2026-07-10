@@ -1120,14 +1120,14 @@ function startOpenclaw({ repair = true } = {}) {
 // Read static files at startup
 const SETUP_HTML = fs.readFileSync(path.join(__dirname, "setup.html"), "utf8");
 const LOGO = fs.readFileSync(path.join(__dirname, "logo.webp"));
-// Companion Memory mark, shown next to the app logo on the connect interstitial
-// (served at MEMORY_MARK_PATH). Read once, guarded: a missing asset degrades the
+// Companion Memory logo, shown next to the app logo on the connect interstitial
+// (served at MEMORY_LOGO_PATH). Read once, guarded: a missing asset degrades the
 // interstitial to just the app logo rather than crashing the wrapper on boot.
-let CI_MARK = null;
+let MEMORY_LOGO = null;
 try {
-  CI_MARK = fs.readFileSync(path.join(__dirname, "assets", "ci-mark.svg"));
+  MEMORY_LOGO = fs.readFileSync(path.join(__dirname, "assets", "ci-memory-logo.webp"));
 } catch (err) {
-  console.warn(`[ci-memory] ci-mark.svg missing, interstitial will omit it: ${err.message}`);
+  console.warn(`[ci-memory] ci-memory-logo.webp missing, interstitial will omit it: ${err.message}`);
 }
 // Loading page shown while the gateway is starting up. Keep the refresh in JS:
 // Chrome skips meta-refresh when the URL contains a hash fragment, and our
@@ -1317,7 +1317,7 @@ function handleUpgrade(req, socket, head) {
 const MEMORY_DEFER_COOKIE = "ci_memory_deferred";
 const MEMORY_DEFER_PATH = "/__ci_memory/defer";
 const MEMORY_SKIP_PATH = "/__ci_memory/skip";
-const MEMORY_MARK_PATH = "/__ci_memory/ci-mark.svg";
+const MEMORY_LOGO_PATH = "/__ci_memory/ci-memory-logo.webp";
 
 /** The Hub's internal base URL (reachable from this container on the app network). */
 function hubInternalBase(env) {
@@ -1372,17 +1372,17 @@ function safeHttpUrl(url) {
 /**
  * Minimal, self-contained interstitial page. Matches the Companion Memory
  * (CI-Import-Tools) sign-in aesthetic: navy background, elevated card, the
- * app's own logo paired with the Companion Memory mark ("app -> memory"), and a
- * teal brand-gradient pill. The app logo is served at /logo.webp and the mark at
- * MEMORY_MARK_PATH. Colors mirror the import-tools dark theme tokens (with a
- * light-scheme fallback).
+ * app's own logo paired with the Companion Memory logo ("app -> memory"), and a
+ * teal brand-gradient pill. The app logo is served at /logo.webp and the memory
+ * logo at MEMORY_LOGO_PATH. Colors mirror the import-tools dark theme tokens
+ * (with a light-scheme fallback).
  */
 function renderMemoryGateHtml(connectUrl) {
   const t = encodeURIComponent(SETUP_TOKEN);
   // Connector + Companion Memory mark, appended after the app logo. Omitted
   // entirely (no dangling arrow) when the mark asset is unavailable.
-  const cmGlyph = CI_MARK
-    ? `<svg class="link" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="12" x2="18" y2="12" /><polyline points="12 6 18 12 12 18" /></svg><img class="cm" src="${MEMORY_MARK_PATH}" alt="Companion Memory" />`
+  const cmGlyph = MEMORY_LOGO
+    ? `<svg class="link" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="12" x2="18" y2="12" /><polyline points="12 6 18 12 12 18" /></svg><img class="cm" src="${MEMORY_LOGO_PATH}" alt="Companion Memory" />`
     : "";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -1396,7 +1396,7 @@ function renderMemoryGateHtml(connectUrl) {
   .brand{display:flex;align-items:center;justify-content:center;gap:14px;margin:0 auto 22px}
   .applogo{width:56px;height:56px;object-fit:contain;background:#fff;border-radius:14px;padding:8px;box-shadow:0 2px 10px rgba(0,0,0,.28)}
   .brand .link{color:var(--fg-dim);display:flex;align-items:center}
-  .cm{width:40px;height:40px;display:block}
+  .cm{width:56px;height:56px;object-fit:contain;border-radius:14px;background:#000;box-shadow:0 2px 10px rgba(0,0,0,.28)}
   h1{font-size:20px;font-weight:700;margin:0 0 8px}
   p{line-height:1.5;color:var(--fg-dim);font-size:14px;margin:0 0 22px}
   .actions{display:flex;flex-direction:column;gap:10px}
@@ -1525,13 +1525,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Companion Memory mark for the connect interstitial (served from assets/).
-  if (CI_MARK && req.url === MEMORY_MARK_PATH) {
+  // Companion Memory logo for the connect interstitial (served from assets/).
+  if (MEMORY_LOGO && req.url === MEMORY_LOGO_PATH) {
     res.writeHead(200, {
-      "Content-Type": "image/svg+xml",
+      "Content-Type": "image/webp",
       "Cache-Control": "public, max-age=86400",
     });
-    res.end(CI_MARK);
+    res.end(MEMORY_LOGO);
     return;
   }
 
