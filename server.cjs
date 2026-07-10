@@ -1315,7 +1315,7 @@ function handleUpgrade(req, socket, head) {
 // The Hub owns the OAuth-style flow; this wrapper only renders the gate and
 // relays the "skip"/"defer" choices. Paths are namespaced under /__ci_memory/.
 const MEMORY_DEFER_COOKIE = "ci_memory_deferred";
-// Grace window (seconds) for the "Continue without memory" choice. Long enough to
+// Grace window (seconds) for the "Maybe later" (defer) choice. Long enough to
 // carry the post-dismiss redirect, short enough that the next fresh launch/reload
 // re-prompts. Deliberately NOT a session cookie — that survived tab-close +
 // relaunch, making "defer" feel as permanent as "Don't ask again".
@@ -1422,7 +1422,7 @@ function renderMemoryGateHtml(connectUrl) {
      can disconnect any time.</p>
   <div class="actions">
     <a class="btn primary" href="${escapeHtmlAttr(connectUrl)}">Sign in with Companion Intelligence</a>
-    <form method="POST" action="${MEMORY_DEFER_PATH}?t=${t}"><button class="btn secondary" type="submit">Continue without memory</button></form>
+    <form method="POST" action="${MEMORY_DEFER_PATH}?t=${t}"><button class="btn secondary" type="submit">Maybe later</button></form>
     <form method="POST" action="${MEMORY_SKIP_PATH}?t=${t}"><button class="btn secondary" type="submit">Don't ask again</button></form>
   </div>
 </main></body></html>`;
