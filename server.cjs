@@ -30,6 +30,28 @@ const CI_HUB_PLUGIN_PATH = "/app/openclaw-context/plugins/ci-hub";
 // same-origin policy prevents cross-origin pages from reading it.
 const SETUP_TOKEN = process.env.APP_SEED || "";
 
+// Dedicated per-process token for the local memory-gate dismiss actions
+// (/__ci_memory/defer + /skip). Deliberately NOT SETUP_TOKEN (=APP_SEED, the
+// RCE-grade terminal secret): those actions are low-value (dismiss a prompt), so
+// they must not reuse — nor risk leaking — the terminal secret. Minted fresh per
+// boot and carried in the POST body (never the URL) so it can't leak via proxy
+// logs / Referer / history.
+const MEMORY_ACTION_TOKEN = crypto.randomBytes(32).toString("hex");
+
+/**
+ * Constant-time token compare that is safe for arbitrary (incl. multi-byte)
+ * input: compares BYTE lengths first, because crypto.timingSafeEqual throws a
+ * RangeError on unequal-length buffers — and an attacker-supplied value can match
+ * the JS string length while differing in bytes. Used by both the memory-gate
+ * actions and the /api/terminal WebSocket upgrade.
+ */
+function tokensMatch(provided, expected) {
+  if (!expected) return false;
+  const a = Buffer.from(String(provided ?? ""));
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 let openclawProcess = null;
 let openclawStarting = false;
 let ptyProcess = null;
@@ -1341,17 +1363,38 @@ function hasMemoryDeferCookie(req) {
   return cookie.split(";").some((c) => c.trim().startsWith(`${MEMORY_DEFER_COOKIE}=`));
 }
 
-/** Constant-time check of the anti-CSWSH token carried by the gate's actions. */
-function memoryActionTokenOk(req) {
-  const provided = new URL(req.url || "/", "http://localhost").searchParams.get("t") || "";
-  if (!SETUP_TOKEN) return false;
-  // Compare BYTE lengths (not JS string length): timingSafeEqual throws
-  // RangeError on unequal-length buffers, and a multi-byte `t` can match the
-  // string length while differing in bytes — that throw would crash the async
-  // request handler. Mirrors the WebSocket-upgrade token check below.
-  const providedBuffer = Buffer.from(provided);
-  const tokenBuffer = Buffer.from(SETUP_TOKEN);
-  return providedBuffer.length === tokenBuffer.length && crypto.timingSafeEqual(providedBuffer, tokenBuffer);
+/**
+ * Read a small urlencoded request body (bounded), resolving to parsed params.
+ * The memory-gate action token travels in the POST body (not the URL), so a
+ * cross-site page still cannot forge it (same-origin policy) while it no longer
+ * leaks through request logs / Referer / history.
+ */
+function readFormBody(req, limit = 8192) {
+  return new Promise((resolve) => {
+    let data = "";
+    let done = false;
+    const finish = (value) => {
+      if (!done) {
+        done = true;
+        resolve(new URLSearchParams(value));
+      }
+    };
+    req.on("data", (chunk) => {
+      if (done) return;
+      data += chunk;
+      // Over the (generous) cap → treat as no token. Stop accumulating (via the
+      // `done` guard) but do NOT destroy the socket here, so the awaiting handler
+      // still delivers its 403 on a live connection.
+      if (data.length > limit) {
+        finish("");
+      }
+    });
+    req.on("end", () => finish(data));
+    req.on("error", () => finish(""));
+    // Resolve on close/abort too, so a client that stalls without a clean
+    // end/error can never leave this promise (and the awaiting handler) pending.
+    req.on("close", () => finish(""));
+  });
 }
 
 /** Escape a value for safe interpolation into an HTML attribute. */
@@ -1383,7 +1426,6 @@ function safeHttpUrl(url) {
  * (with a light-scheme fallback).
  */
 function renderMemoryGateHtml(connectUrl) {
-  const t = encodeURIComponent(SETUP_TOKEN);
   // Connector + Companion Memory mark, appended after the app logo. Omitted
   // entirely (no dangling arrow) when the mark asset is unavailable.
   const cmGlyph = MEMORY_LOGO
@@ -1422,8 +1464,8 @@ function renderMemoryGateHtml(connectUrl) {
      can disconnect any time.</p>
   <div class="actions">
     <a class="btn primary" href="${escapeHtmlAttr(connectUrl)}">Sign in with Companion Intelligence</a>
-    <form method="POST" action="${MEMORY_DEFER_PATH}?t=${t}"><button class="btn secondary" type="submit">Maybe later</button></form>
-    <form method="POST" action="${MEMORY_SKIP_PATH}?t=${t}"><button class="btn secondary" type="submit">Don't ask again</button></form>
+    <form method="POST" action="${MEMORY_DEFER_PATH}"><input type="hidden" name="t" value="${MEMORY_ACTION_TOKEN}" /><button class="btn secondary" type="submit">Maybe later</button></form>
+    <form method="POST" action="${MEMORY_SKIP_PATH}"><input type="hidden" name="t" value="${MEMORY_ACTION_TOKEN}" /><button class="btn secondary" type="submit">Don't ask again</button></form>
   </div>
 </main></body></html>`;
 }
@@ -1495,7 +1537,9 @@ async function handleMemoryAction(req, res) {
   const pathname = (req.url || "/").split("?")[0];
   if (pathname !== MEMORY_DEFER_PATH && pathname !== MEMORY_SKIP_PATH) return false;
 
-  if (req.method !== "POST" || !memoryActionTokenOk(req)) {
+  // POST-only + anti-CSWSH token carried in the body (byte-safe compare).
+  const body = req.method === "POST" ? await readFormBody(req) : new URLSearchParams();
+  if (req.method !== "POST" || !tokensMatch(body.get("t"), MEMORY_ACTION_TOKEN)) {
     res.writeHead(403, { "Content-Type": "text/plain" });
     res.end("Forbidden");
     return true;
@@ -1715,42 +1759,51 @@ wss.on("connection", (ws) => {
 
 // Handle WebSocket upgrades
 server.on("upgrade", (req, socket, head) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  try {
+    const url = new URL(req.url, `http://${req.headers.host}`);
 
-  // Route /api/terminal to the PTY WebSocket server
-  if (url.pathname === "/api/terminal") {
-    // Validate anti-CSWSH token (see SETUP_TOKEN comment above)
-    const provided = url.searchParams.get("token") || "";
-    if (
-      !SETUP_TOKEN ||
-      provided.length !== SETUP_TOKEN.length ||
-      !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(SETUP_TOKEN))
-    ) {
-      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
-      socket.destroy();
+    // Route /api/terminal to the PTY WebSocket server
+    if (url.pathname === "/api/terminal") {
+      // Validate anti-CSWSH token with a byte-safe compare: a multi-byte `token`
+      // must reject cleanly rather than make crypto.timingSafeEqual throw a
+      // RangeError (which, uncaught here, would crash the wrapper).
+      const provided = url.searchParams.get("token") || "";
+      if (!tokensMatch(provided, SETUP_TOKEN)) {
+        socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit("connection", ws, req);
+      });
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      wss.emit("connection", ws, req);
-    });
-    return;
-  }
 
-  if (!isConfigured()) {
-    socket.end("HTTP/1.1 503 Service Unavailable\r\n\r\n");
-    return;
-  }
+    if (!isConfigured()) {
+      socket.end("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+      return;
+    }
 
-  if (ptyProcess) {
-    socket.end("HTTP/1.1 503 Service Unavailable\r\n\r\n");
-    return;
-  }
+    if (ptyProcess) {
+      socket.end("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+      return;
+    }
 
-  if (!openclawProcess) {
-    startOpenclaw();
-  }
+    if (!openclawProcess) {
+      startOpenclaw();
+    }
 
-  handleUpgrade(req, socket, head);
+    handleUpgrade(req, socket, head);
+  } catch (err) {
+    // Defense in depth: never let an upgrade-handler throw escape as an uncaught
+    // exception (which would crash the wrapper). Reject the socket and move on.
+    console.error("[ci-memory] upgrade handler error:", err && err.message ? err.message : err);
+    try {
+      socket.destroy();
+    } catch {
+      /* socket already gone */
+    }
+  }
 });
 
 // Initialize home directory from skeleton
@@ -1768,6 +1821,16 @@ if (isConfigured()) {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Setup server listening on port ${PORT}`);
+});
+
+// Last-resort backstop: keep a stray throw/rejection (e.g. from an event
+// handler outside a request's try/catch) from hard-crashing the wrapper and
+// dropping the whole app. Log and keep serving.
+process.on("uncaughtException", (err) => {
+  console.error("[ci-memory] uncaughtException:", err && err.stack ? err.stack : err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[ci-memory] unhandledRejection:", reason);
 });
 
 // Graceful shutdown: Docker sends SIGTERM on stop/restart/update.
