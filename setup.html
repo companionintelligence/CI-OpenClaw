@@ -82,6 +82,51 @@
       font-style: normal;
     }
 
+    .companion-apps {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: rgba(255, 90, 45, 0.06);
+      border: 1px solid rgba(255, 90, 45, 0.22);
+      border-radius: 8px;
+      color: #A89F99;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .companion-apps strong { color: #F0EDE8; }
+
+    .companion-links {
+      display: flex;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 6px;
+    }
+
+    .companion-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 6px 10px;
+      border: 1px solid #3A3A3A;
+      border-radius: 7px;
+      color: #F0EDE8;
+      font-size: 12px;
+      font-weight: 600;
+      text-decoration: none;
+      transition: border-color 0.15s, color 0.15s, background 0.15s;
+    }
+
+    .companion-link:hover {
+      border-color: #FF5A2D;
+      background: rgba(255, 90, 45, 0.1);
+      color: #FF5A2D;
+    }
+
     .mobile-note {
       display: none;
       background: #1F1F1F;
@@ -353,6 +398,8 @@
       h1 { font-size: 22px; }
       .subtitle { line-height: 1.4; }
       .pro-tip { display: none; }
+      .companion-apps-copy { display: none; }
+      .companion-apps { justify-content: flex-end; margin-top: 8px; padding: 6px; }
       .terminal-wrapper { padding: 10px 24px 14px; }
       .titlebar { height: 32px; }
       .terminal-info {
@@ -385,6 +432,10 @@
       .subtitle { font-size: 13px; margin-bottom: 4px; }
       .mobile-note { font-size: 12px; padding: 8px 12px; margin-top: 4px; }
       .pro-tip { display: none; }
+      .companion-apps-copy { display: none; }
+      .companion-apps { width: 100%; margin-top: 0; padding: 5px; }
+      .companion-links { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .companion-link { justify-content: center; padding: 5px 4px; font-size: 11px; }
       .terminal-info { display: none; }
       .terminal-wrapper { flex: 1; min-height: 0; padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
       .terminal-card { flex: 1; min-height: 0; max-height: none; }
@@ -412,6 +463,14 @@
     </div>
     <div class="pro-tip">
       <strong>Tip:</strong> Want to switch providers, add models, or set up Telegram? Just ask OpenClaw in chat — no settings menus needed.
+    </div>
+    <div class="companion-apps">
+      <span class="companion-apps-copy"><strong>Continue on your devices.</strong> Pair an official mobile app after your gateway is ready.</span>
+      <span class="companion-links">
+        <a class="companion-link" href="https://apps.apple.com/us/app/openclaw-ai-that-does-things/id6780396132" target="_blank" rel="noopener noreferrer">iOS <span aria-hidden="true">↗</span></a>
+        <a class="companion-link" href="https://play.google.com/store/apps/details?id=ai.openclaw.app" target="_blank" rel="noopener noreferrer">Android <span aria-hidden="true">↗</span></a>
+        <a class="companion-link" href="https://github.com/openclaw/openclaw/releases" target="_blank" rel="noopener noreferrer">Downloads <span aria-hidden="true">↗</span></a>
+      </span>
     </div>
     <div class="mobile-note">
       Use the controls below to type, navigate, and select options.
