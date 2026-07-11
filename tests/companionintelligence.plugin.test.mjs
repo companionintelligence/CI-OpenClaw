@@ -33,6 +33,9 @@ const plugin = (await import(PLUGIN)).default;
 
 function makeApi(env = {}, pluginConfig = {}) {
   for (const k of Object.keys(process.env)) if (k.startsWith("CI_SERVER")) delete process.env[k];
+  // Executable intent tools fetch the catalog inside register(); keep them off
+  // by default so each test's captured-request assertions stay deterministic.
+  process.env.CI_INTENT_TOOLS_ENABLED = "false";
   Object.assign(process.env, env);
   const hooks = {};
   const regHooks = {};
@@ -144,6 +147,77 @@ await test("unpaired assistant (no preceding user) posts nothing", () =>
     plugin.register(api);
     await hooks.agent_end({ success: true, messages: [{ role: "assistant", content: "proactive ping" }] }, {});
     assert.equal(cap.length, 0);
+  }));
+
+const INTENT_MANIFEST = {
+  version: "1.0.0",
+  domains: [
+    { key: "predictions", title: "Predictions", description: "x" },
+    { key: "memory", title: "Memory", description: "x" },
+  ],
+  entities: [],
+  intents: [
+    {
+      name: "predictions.forecast",
+      tool: "predictions_forecast",
+      domain: "predictions",
+      title: "Forecast activities",
+      description: "Forecast the user's likely activities.",
+      parameters: { type: "object", properties: { horizon: { type: "string" } } },
+      privacy: { access: "read", sensitivity: "personal", destructive: false, external: false },
+      consumes: [], produces: [], phrases: [],
+    },
+    {
+      name: "memory.forget",
+      tool: "memory_forget",
+      domain: "memory",
+      title: "Forget knowledge",
+      description: "Archive or delete knowledge.",
+      parameters: { type: "object" },
+      privacy: { access: "delete", sensitivity: "personal", destructive: true, external: false },
+      consumes: [], produces: [], phrases: [],
+    },
+  ],
+};
+
+// Mirrors a current CI-Server build: catalog served from the legacy /api/intents
+// path only, and the generic execute endpoint likewise under /api/intents.
+const intentServer = (req, res) => {
+  const json = (code, body) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
+  if (req.method === "GET" && req.url === "/api/intents") return json(200, INTENT_MANIFEST);
+  if (req.method === "POST" && req.url === "/api/intents/predictions.forecast/execute") {
+    return json(200, { success: true, data: { available: true }, executionTimeMs: 2 });
+  }
+  json(404, {});
+};
+
+await test("intent tools register from the catalog and execute via POST /api/intents/:name/execute", () =>
+  withCiServer(intentServer, async (port, cap) => {
+    const { api } = makeApi({
+      CI_SERVER_URL: `http://127.0.0.1:${port}`,
+      CI_SERVER_TOKEN: "ki",
+      CI_INTENT_TOOLS_ENABLED: "true",
+    });
+    const factories = {};
+    api.registerTool = (factory, opts) => { factories[opts.name] = factory; };
+    plugin.register(api);
+    // Registration is fire-and-forget over real HTTP; poll briefly.
+    for (let i = 0; i < 200 && !factories["predictions_forecast"]; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.ok(factories["predictions_forecast"], "intent tool registered from the catalog");
+    assert.ok(!factories["memory_forget"], "destructive intent must not register");
+    const result = await factories["predictions_forecast"]().execute("t1", { horizon: "24h" });
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.success, true);
+    assert.deepEqual(payload.data, { available: true });
+    const exec = cap.find((c) => c.url === "/api/intents/predictions.forecast/execute");
+    assert.ok(exec, "execute POST reached the server");
+    assert.equal(exec.method, "POST");
+    assert.equal(exec.key, "ki");
+    assert.deepEqual(exec.body, { horizon: "24h" });
+    // The canonical agent execute path was tried first and fell back on 404.
+    assert.ok(cap.some((c) => c.url === "/api/agent/intents/predictions.forecast/execute"));
   }));
 
 const contextServer = (block) => (req, res) => {
