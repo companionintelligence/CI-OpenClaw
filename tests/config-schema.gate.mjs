@@ -129,7 +129,15 @@ const MEM = {
   CI_SERVER_TOKEN: "mem-token",
   EMBEDDINGS_MODEL: "nomic-embed-text",
 };
-const HUB = { HUB_URL: "https://hub.example", HUB_MCP_API_KEY: "hub-key" };
+// The Hub mints these three together (app.helpers.ts) and injects them as one set, so the
+// fixture carries all three. HUB_WAKE_SECRET is what turns on the native wake hook
+// (hooks.enabled + hooks.token) — keeping it here is what puts those keys in front of
+// OpenClaw's schema rather than trusting the type defs. CI-Hub#897.
+const HUB = {
+  HUB_URL: "https://hub.example",
+  HUB_MCP_API_KEY: "hub-key",
+  HUB_WAKE_SECRET: "hub-wake-secret",
+};
 const SMALL_MODEL = { "llava:7b": { capabilities: ["vision"], contextLength: 4096 } };
 
 // A config an older build would have left behind, to prove an upgrade in place stays

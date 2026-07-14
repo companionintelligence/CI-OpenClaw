@@ -356,6 +356,98 @@ describe("ensureHubMcpServer", () => {
 // ---------------------------------------------------------------------------
 // ensureMemorySearchEmbeddings — including the stale-credential drop.
 // ---------------------------------------------------------------------------
+// The Hub pushes app crashes and system alerts to OpenClaw's NATIVE wake hook
+// (POST /hooks/wake). It stays dark unless hooks.enabled is true AND hooks.token is set,
+// so the two must always be written together — and never separately. See CI-Hub#897.
+describe("ensureHooksWake", () => {
+  const WAKE = { HUB_WAKE_SECRET: "wake-secret-abc" };
+  let ctx;
+  beforeEach(() => {
+    dataDir = makeDataDir();
+    ctx = makeReconciler(dataDir);
+  });
+
+  test("enables the hook and points the token at the env reference", () => {
+    const config = {};
+    assert.strictEqual(ctx.cfg.ensureHooksWake(config, WAKE), true);
+    assert.strictEqual(config.hooks.enabled, true);
+    assert.strictEqual(config.hooks.token, "${HUB_WAKE_SECRET}");
+  });
+
+  // Same rule as the MCP Bearer: openclaw.json is readable inside the app, so the secret
+  // itself must never land there. OpenClaw resolves ${VAR} across the whole config on load.
+  test("never persists the raw wake secret, only the env template", () => {
+    const config = {};
+    ctx.cfg.ensureHooksWake(config, WAKE);
+    assert.ok(
+      !JSON.stringify(config).includes("wake-secret-abc"),
+      "the raw HUB_WAKE_SECRET must not be serialized into openclaw.json",
+    );
+  });
+
+  // enabled-without-token makes OpenClaw THROW at config resolve ("hooks.enabled requires
+  // hooks.token"), which takes down the whole gateway rather than just the wake. So with
+  // no secret we must leave the hook off entirely, not half-on.
+  test("does not enable the hook when HUB_WAKE_SECRET is absent", () => {
+    const config = {};
+    assert.strictEqual(ctx.cfg.ensureHooksWake(config, {}), false);
+    assert.strictEqual(config.hooks?.enabled, undefined);
+    assert.strictEqual(config.hooks?.token, undefined);
+  });
+
+  test("retracts a hook it previously wrote once the secret goes away", () => {
+    const config = {};
+    ctx.cfg.ensureHooksWake(config, WAKE);
+    assert.strictEqual(ctx.cfg.ensureHooksWake(config, {}), true);
+    assert.strictEqual(config.hooks.enabled, undefined);
+    assert.strictEqual(config.hooks.token, undefined);
+  });
+
+  // Only retract what WE wrote. An operator's own hooks integration is theirs to keep.
+  test("leaves an operator-authored token alone when the secret is absent", () => {
+    const config = { hooks: { enabled: true, token: "operators-own-token" } };
+    assert.strictEqual(ctx.cfg.ensureHooksWake(config, {}), false);
+    assert.strictEqual(config.hooks.enabled, true);
+    assert.strictEqual(config.hooks.token, "operators-own-token");
+  });
+
+  // `openclaw doctor` ROTATES hooks.token if it ever collides with the gateway
+  // shared-secret auth. That would silently desync the Hub and 401 every wake, so the
+  // reconcile must re-assert the env reference on the next boot.
+  test("re-asserts the token after doctor rotates it", () => {
+    const config = { hooks: { enabled: true, token: "rotated-by-doctor" } };
+    assert.strictEqual(ctx.cfg.ensureHooksWake(config, WAKE), true);
+    assert.strictEqual(config.hooks.token, "${HUB_WAKE_SECRET}");
+  });
+
+  test("is idempotent", () => {
+    const config = {};
+    assert.strictEqual(ctx.cfg.ensureHooksWake(config, WAKE), true);
+    assert.strictEqual(ctx.cfg.ensureHooksWake(config, WAKE), false);
+  });
+
+  // The bundled session-memory hook lives under the same `hooks` node. Enabling the wake
+  // must not clobber it (and vice versa) — they are written by different helpers.
+  test("coexists with the bundled session-memory hook", () => {
+    const config = {};
+    ctx.cfg.disableBundledSessionMemoryHook(config);
+    ctx.cfg.ensureHooksWake(config, WAKE);
+    assert.strictEqual(config.hooks.enabled, true);
+    assert.strictEqual(config.hooks.token, "${HUB_WAKE_SECRET}");
+    assert.strictEqual(config.hooks.internal.entries["session-memory"].enabled, false);
+  });
+
+  // A hand-edited scalar at `hooks` would otherwise be spread into {"0":"o","1":"n",...}
+  // and invalidate the entire config. ensureRecordPathTracked coerces it; assert we report
+  // that coercion as a change, and that nothing index-keyed survives.
+  test("coerces a malformed scalar hooks node", () => {
+    const config = { hooks: "on" };
+    assert.strictEqual(ctx.cfg.ensureHooksWake(config, WAKE), true);
+    assert.strictEqual(config.hooks.enabled, true);
+    assertNoIndexKeys(config);
+  });
+});
+
 describe("ensureMemorySearchEmbeddings", () => {
   let ctx;
   beforeEach(() => {
@@ -1024,6 +1116,29 @@ describe("reconcileConfig (end to end)", () => {
       assert.strictEqual(config.update.checkOnStart, false);
       assert.strictEqual(config.models.mode, "merge");
       assert.strictEqual(config.models.providers["ci-hub"].api, "ollama");
+      // No wake secret in this fixture, so the wake hook must stay off — and must not
+      // leave a half-enabled `hooks.enabled` behind, which makes OpenClaw throw at resolve.
+      assert.strictEqual(config.hooks?.enabled, undefined);
+    });
+  });
+
+  // The Hub's agent-notify POSTs app crashes and system alerts to OpenClaw's native wake
+  // hook. It only listens once reconcile has written BOTH keys. CI-Hub#897.
+  test("enables the native wake hook when the Hub injects HUB_WAKE_SECRET", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({ config: {}, env: { OLLAMA_HOST: baseUrl } });
+      const { cfg } = makeReconciler(dataDir, {
+        containerEnv: { HUB_WAKE_SECRET: "wake-secret-abc" },
+      });
+      await cfg.reconcileConfig();
+
+      const config = readCfg(dataDir);
+      assert.strictEqual(config.hooks.enabled, true);
+      assert.strictEqual(config.hooks.token, "${HUB_WAKE_SECRET}");
+      assert.ok(
+        !JSON.stringify(config).includes("wake-secret-abc"),
+        "the raw wake secret must never be written to openclaw.json",
+      );
     });
   });
 

@@ -45,6 +45,11 @@ const DEFAULT_PLUGIN_PATHS = {
 // serves) and, unlike the bundled remote providers, requires no API key.
 const MEMORY_EMBEDDING_PROVIDER = "openai-compatible";
 
+// hooks.token is stored as an env reference, not the secret itself: OpenClaw resolves
+// `${VAR}` across the whole config at load, so the Hub's wake secret never lands in
+// openclaw.json. Same pattern as the ci-hub MCP server's `Bearer ${HUB_MCP_API_KEY}`.
+const HOOKS_WAKE_TOKEN_ENV_REF = "${HUB_WAKE_SECRET}";
+
 // Keys the Hub injects into the container environment as the source of truth.
 // These must never be shadowed by a stale value persisted in .env — e.g. a
 // token left behind by a prior install whose data dir survived an incomplete
@@ -508,6 +513,69 @@ function createConfigReconciler({
       log.log(
         "Patched config: disabled bundled session-memory hook for CI memory",
       );
+    }
+    return changed;
+  }
+
+  /**
+   * Enable OpenClaw's native wake hook, so the Hub can push events to the agent.
+   *
+   * The Hub POSTs app crashes, backup results and system alerts to `POST /hooks/wake`
+   * with `{ text, mode: "now" }`. OpenClaw answers by queueing a system event and
+   * requesting an immediate heartbeat, which runs an agent turn. That is the whole
+   * feature — no plugin code is involved. (The ci-hub plugin used to hand-roll its own
+   * wake route; it never worked, and this replaces it. See CI-Hub#897.)
+   *
+   * `enabled` and `token` must be written together: OpenClaw's resolveHooksConfig returns
+   * null unless `enabled === true`, and THROWS ("hooks.enabled requires hooks.token") when
+   * enabled without a token — which would take the whole gateway down, not just the wake.
+   * So with no HUB_WAKE_SECRET we leave the hook off entirely.
+   *
+   * The token is written as the literal env-template `${HUB_WAKE_SECRET}`, which OpenClaw
+   * resolves at load (resolveConfigEnvVars walks the entire config). The raw secret is
+   * never persisted to openclaw.json — same design as the ci-hub MCP server entry above.
+   *
+   * Re-asserted on every boot on purpose: `openclaw doctor` ROTATES hooks.token if it ever
+   * collides with the gateway shared-secret auth, which would silently desync the Hub and
+   * 401 every wake thereafter. Reconciling each boot heals that.
+   */
+  function ensureHooksWake(config, env) {
+    const hasSecret = Boolean((env.HUB_WAKE_SECRET || "").trim());
+
+    if (!hasSecret) {
+      // Read `hooks` rather than ensure it: with nothing to write, conjuring an empty node
+      // onto a config that never had one would churn the file on every boot.
+      //
+      // Only retract a hook WE wrote. An operator-authored hooks.token (any other value)
+      // is theirs to keep; clearing it would break their integration.
+      const existing = config.hooks;
+      if (
+        isPlainObject(existing) &&
+        existing.enabled === true &&
+        existing.token === HOOKS_WAKE_TOKEN_ENV_REF
+      ) {
+        delete existing.enabled;
+        delete existing.token;
+        log.warn(
+          "Patched config: disabled the wake hook — HUB_WAKE_SECRET is not set",
+        );
+        return true;
+      }
+      return false;
+    }
+
+    const { node: hooks, replaced } = ensureRecordPathTracked(config, ["hooks"]);
+    let changed = replaced;
+
+    if (hooks.enabled !== true) {
+      hooks.enabled = true;
+      changed = true;
+      log.log("Patched config: enabled OpenClaw's native wake hook (POST /hooks/wake)");
+    }
+    if (hooks.token !== HOOKS_WAKE_TOKEN_ENV_REF) {
+      hooks.token = HOOKS_WAKE_TOKEN_ENV_REF;
+      changed = true;
+      log.log("Patched config: pointed hooks.token at the HUB_WAKE_SECRET env reference");
     }
     return changed;
   }
@@ -1108,6 +1176,12 @@ function createConfigReconciler({
     // mcp.servers.ci-hub), gated on Hub MCP credentials.
     changed = ensureHubMcpServer(config, env) || changed;
 
+    // Let the Hub push events to the agent through OpenClaw's own wake hook
+    // (POST /hooks/wake), gated on HUB_WAKE_SECRET. This is the transport the Hub's
+    // agent-notify module targets; the ci-hub plugin's hand-rolled wake route never
+    // worked and is being retired (CI-Hub#897).
+    changed = ensureHooksWake(config, env) || changed;
+
     // Enable the CI-Hub companion plugin (wake endpoint, app-event SSE) when Hub
     // injects MCP credentials. Tool access itself comes from the native
     // mcp.servers.ci-hub entry above, not this plugin.
@@ -1348,6 +1422,7 @@ function createConfigReconciler({
     applyHubAuthoritativeEnv,
     // writers
     ensureHubMcpServer,
+    ensureHooksWake,
     disableBundledSessionMemoryHook,
     ensureMemoryConversationAccess,
     ensureMemoryStoreToolAllowed,
@@ -1377,6 +1452,7 @@ module.exports = {
   CI_PLUGIN_ID,
   CI_MEMORY_PLUGIN_ID,
   CI_HUB_PLUGIN_ID,
+  HOOKS_WAKE_TOKEN_ENV_REF,
   // Stateless helpers: no I/O, no logging, no injected state.
   isPlainObject,
   ensureRecordPath,
