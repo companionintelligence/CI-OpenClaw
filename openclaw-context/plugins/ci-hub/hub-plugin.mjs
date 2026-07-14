@@ -472,7 +472,8 @@ function unwrapToolResult(result) {
     return null;
   }
 }
-async function register(api, config) {
+function register(rawApi, config) {
+  const api = withSafeLogger(rawApi);
   const hubUrl = config.hubUrl || process.env.HUB_URL;
   const hubApiKey = config.hubApiKey || process.env.HUB_API_KEY;
   const mcpApiKey = config.mcpApiKey || process.env.HUB_MCP_API_KEY || hubApiKey;
@@ -482,185 +483,239 @@ async function register(api, config) {
     return;
   }
   api.log.info(`CI-Hub plugin initializing (hub: ${hubUrl})`);
+  if (wakeSecret) {
+    api.registerHttpRoute({
+      method: "POST",
+      path: "/hooks/hub-wake",
+      handler: createWakeEndpointHandler(api, wakeSecret, config.wakeFilter)
+    });
+    api.log.info("Registered wake endpoint: POST /hooks/hub-wake");
+  } else {
+    api.log.warn("HUB_WAKE_SECRET not set \u2014 wake endpoint disabled (would be unauthenticated otherwise)");
+  }
+  const mcpClient = new McpClient(hubUrl, mcpApiKey, api.log);
+  const mcpReady = mcpClient.connect().catch((error) => {
+    api.log.warn(`Hub MCP client failed to connect: ${describeError(error)}`);
+  });
+  if (process.env.HUB_MCP_LEGACY_CLIENT === "true") {
+    api.log.error(
+      "HUB_MCP_LEGACY_CLIENT=true is no longer supported: OpenClaw requires plugin register() to be synchronous, so tools cannot be registered after awaiting tools/list. Hub tools are served by the native mcp.servers.ci-hub entry in openclaw.json."
+    );
+  } else {
+    api.log.info("Hub MCP tools served via native OpenClaw mcp.servers.ci-hub config; in-plugin client used only for inference discovery");
+  }
+  void probeHubHealth(api, hubUrl);
+  if (config.sseEnabled) {
+    const sseListener = new SseListenerService(hubUrl, mcpApiKey, api, config.wakeFilter);
+    void sseListener.start().catch((error) => {
+      api.log.warn(`SSE listener failed to start: ${describeError(error)}`);
+    });
+  }
+  if (process.env.CI_HUB_PLUGIN_INFERENCE === "1") {
+    registerInference({ api, hubUrl, apiKey: mcpApiKey, mcpClient, mcpReady });
+  } else {
+    api.log.info("Inference auto-config disabled (set CI_HUB_PLUGIN_INFERENCE=1 to enable); the ci-hub provider comes from openclaw.json");
+  }
+}
+function describeError(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+function withSafeLogger(api) {
+  const host = api.log;
+  const fallbacks = {
+    info: (message) => console.info(`[ci-hub] ${message}`),
+    warn: (message) => console.warn(`[ci-hub] ${message}`),
+    error: (message) => console.error(`[ci-hub] ${message}`),
+    debug: (message) => console.info(`[ci-hub] ${message}`)
+  };
+  const emit = (level) => (message) => {
+    const hostFn = host?.[level];
+    if (typeof hostFn === "function") {
+      hostFn.call(host, message);
+      return;
+    }
+    fallbacks[level](message);
+  };
+  const log = {
+    info: emit("info"),
+    warn: emit("warn"),
+    error: emit("error"),
+    debug: emit("debug")
+  };
+  return new Proxy(api, {
+    get: (target, prop, receiver) => prop === "log" ? log : Reflect.get(target, prop, receiver)
+  });
+}
+async function probeHubHealth(api, hubUrl) {
   try {
     const healthResponse = await fetchWithTimeout(`${hubUrl.replace(/\/$/, "")}/api/health`, {});
     if (!healthResponse.ok) {
       api.log.warn(`Hub health check failed: ${healthResponse.status}`);
     }
   } catch (error) {
-    api.log.warn(`Hub unreachable at ${hubUrl}: ${error instanceof Error ? error.message : String(error)}`);
+    api.log.warn(`Hub unreachable at ${hubUrl}: ${describeError(error)}`);
   }
-  const mcpClient = new McpClient(hubUrl, mcpApiKey, api.log);
-  await mcpClient.connect();
-  if (mcpClient.isConnected() && process.env.HUB_MCP_LEGACY_CLIENT === "true") {
-    api.log.warn("HUB_MCP_LEGACY_CLIENT=true \u2014 also registering Hub tools via the in-plugin client (native mcp.servers.ci-hub is the default path)");
-    try {
-      const tools = await mcpClient.listTools();
-      for (const tool of tools) {
-        api.registerTool({
-          name: tool.name,
-          description: tool.description,
-          inputSchema: tool.inputSchema,
-          handler: async (args) => mcpClient.callTool(tool.name, args)
-        });
-      }
-      api.log.info(`Registered ${tools.length} Hub MCP tools (legacy client)`);
-    } catch (error) {
-      api.log.error(`Failed to register Hub tools: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  } else {
-    api.log.info("Hub MCP tools served via native OpenClaw mcp.servers.ci-hub config; in-plugin client used only for inference discovery");
-  }
-  if (wakeSecret) {
-    const wakeHandler = createWakeEndpointHandler(api, wakeSecret, config.wakeFilter);
-    api.registerHttpRoute({
-      method: "POST",
-      path: "/hooks/hub-wake",
-      handler: wakeHandler
-    });
-    api.log.info("Registered wake endpoint: POST /hooks/hub-wake");
-  } else {
-    api.log.warn("HUB_WAKE_SECRET not set \u2014 wake endpoint disabled (would be unauthenticated otherwise)");
-  }
-  if (config.sseEnabled) {
-    const sseListener = new SseListenerService(hubUrl, mcpApiKey, api, config.wakeFilter);
-    await sseListener.start();
-  }
-  await autoConfigureInference(api, hubUrl, mcpApiKey, mcpClient);
 }
-async function autoConfigureInference(api, hubUrl, apiKey, mcpClient) {
-  try {
-    let inferenceStatus = null;
-    if (mcpClient.isConnected()) {
-      try {
-        inferenceStatus = unwrapToolResult(await mcpClient.callTool("hub_get_inference_status", {}));
-      } catch {
-        api.log.debug("hub_get_inference_status not yet available \u2014 trying REST fallback");
+function registerInference(deps) {
+  const { api, hubUrl, apiKey, mcpClient, mcpReady } = deps;
+  const ollamaNativeUrl = (process.env.OLLAMA_HOST ?? "http://ci-hub-ollama:11434").replace(/\/$/, "");
+  let statusPromise = null;
+  const getInferenceStatus = () => {
+    statusPromise ??= fetchInferenceStatus(api, hubUrl, mcpClient, mcpReady);
+    return statusPromise;
+  };
+  const tts = { ready: false, modelId: "kokoro-v1" };
+  if (api.registerProvider) {
+    api.registerProvider({
+      id: "ci-hub",
+      label: "CI Hub (Local)",
+      resolveSyntheticAuth: () => ({
+        available: true,
+        apiKey
+      }),
+      catalog: {
+        order: "simple",
+        run: async () => ({
+          provider: {
+            baseUrl: ollamaNativeUrl,
+            apiKey: "ollama",
+            api: "ollama",
+            models: await discoverLocalModels(api, ollamaNativeUrl, getInferenceStatus)
+          }
+        })
       }
-    }
-    if (!inferenceStatus) {
-      try {
-        const response = await fetchWithTimeout(`${hubUrl.replace(/\/$/, "")}/api/inference/status`, {});
-        if (response.ok) {
-          inferenceStatus = await response.json();
+    });
+  }
+  if (api.registerSpeechProvider) {
+    const inferenceBaseUrl = `${ollamaNativeUrl}/v1`;
+    api.registerSpeechProvider({
+      id: "ci-hub",
+      label: "CI Hub TTS (Local)",
+      // Reports false until the probe below confirms Lemonade has a loaded TTS model,
+      // so OpenClaw will not select this provider before it can actually serve.
+      isConfigured: () => tts.ready,
+      synthesize: async (req) => {
+        const response = await fetch(`${inferenceBaseUrl}/audio/speech`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model: tts.modelId,
+            input: req.text,
+            voice: req.voice ?? "default"
+          })
+        });
+        if (!response.ok) {
+          const errorText = await response.text().catch(() => "Unknown error");
+          api.log.error(`CI Hub TTS request failed (${response.status}): ${errorText.slice(0, 500)}`);
+          throw new Error(`CI Hub TTS request failed: ${response.status} ${response.statusText}`);
         }
-      } catch {
-        api.log.debug("Inference REST endpoint not available");
+        const audioBuffer = Buffer.from(await response.arrayBuffer());
+        return {
+          audioBuffer,
+          outputFormat: "mp3",
+          fileExtension: ".mp3",
+          voiceCompatible: true
+        };
       }
-    }
-    if (!inferenceStatus) {
-      api.log.info("Hub inference not available \u2014 skipping auto-configuration");
-      return;
-    }
-    api.log.info(`Hub inference detected: tier=${inferenceStatus.hardwareTier}, models=${inferenceStatus.models.length}`);
-    if (inferenceStatus.hardwareTier === "insufficient") {
-      api.log.warn(
-        "Hub hardware does not support local inference. Configure a cloud provider in Hub Settings \u2192 AI \u2192 Cloud Providers. GitHub Copilot is recommended (includes Claude, GPT, and Gemini under one subscription)."
-      );
-    }
-    const ollamaNativeUrl = (process.env.OLLAMA_HOST ?? "http://ci-hub-ollama:11434").replace(/\/$/, "");
-    const isEmbeddingModel = (id) => /embed/i.test(id);
-    let localModels = [];
+    });
+  }
+  void probeTtsAvailability(api, getInferenceStatus, tts);
+}
+async function fetchInferenceStatus(api, hubUrl, mcpClient, mcpReady) {
+  await mcpReady;
+  let inferenceStatus = null;
+  if (mcpClient.isConnected()) {
     try {
-      const response = await fetchWithTimeout(`${ollamaNativeUrl}/api/tags`, {});
+      inferenceStatus = unwrapToolResult(await mcpClient.callTool("hub_get_inference_status", {}));
+    } catch {
+      api.log.debug("hub_get_inference_status not yet available \u2014 trying REST fallback");
+    }
+  }
+  if (!inferenceStatus) {
+    try {
+      const response = await fetchWithTimeout(`${hubUrl.replace(/\/$/, "")}/api/inference/status`, {});
       if (response.ok) {
-        const payload = await response.json();
-        localModels = (payload.models ?? []).filter((model) => typeof model.name === "string" && model.name.length > 0 && !isEmbeddingModel(model.name)).map((model) => ({
-          id: model.name
-        }));
+        inferenceStatus = await response.json();
       }
     } catch {
-      api.log.debug("Direct Ollama model discovery unavailable \u2014 falling back to Hub inference status");
+      api.log.debug("Inference REST endpoint not available");
     }
-    if (localModels.length === 0) {
-      localModels = inferenceStatus.models.filter((m) => m.local && m.modality.includes("text") && (m.state === "pulled" || m.state === "loaded" || m.state === "pinned")).map((m) => ({
-        id: m.id,
-        context_window: m.context_window,
-        max_tokens: m.max_tokens
-      })).filter((m) => m.id.includes(":"));
+  }
+  if (!inferenceStatus) {
+    api.log.info("Hub inference not available \u2014 skipping auto-configuration");
+    return null;
+  }
+  api.log.info(`Hub inference detected: tier=${inferenceStatus.hardwareTier}, models=${inferenceStatus.models.length}`);
+  if (inferenceStatus.hardwareTier === "insufficient") {
+    api.log.warn(
+      "Hub hardware does not support local inference. Configure a cloud provider in Hub Settings \u2192 AI \u2192 Cloud Providers. GitHub Copilot is recommended (includes Claude, GPT, and Gemini under one subscription)."
+    );
+  }
+  const configuredCloud = inferenceStatus.cloudProviders.filter((p) => p.configured);
+  if (configuredCloud.length > 0) {
+    api.log.info(`Hub has ${configuredCloud.length} cloud provider(s) configured as fallback`);
+  }
+  return inferenceStatus;
+}
+async function discoverLocalModels(api, ollamaNativeUrl, getInferenceStatus) {
+  const isEmbeddingModel = (id) => /embed/i.test(id);
+  let localModels = [];
+  try {
+    const response = await fetchWithTimeout(`${ollamaNativeUrl}/api/tags`, {});
+    if (response.ok) {
+      const payload = await response.json();
+      localModels = (payload.models ?? []).filter((model) => typeof model.name === "string" && model.name.length > 0 && !isEmbeddingModel(model.name)).map((model) => ({
+        id: model.name
+      }));
     }
-    const hubNumCtx = Number.parseInt(process.env.CI_LLM_NUM_CTX ?? "", 10);
-    const numCtx = Number.isFinite(hubNumCtx) && hubNumCtx > 0 ? hubNumCtx : void 0;
-    if (localModels.length > 0 && api.registerProvider) {
-      api.registerProvider({
-        id: "ci-hub",
-        label: "CI Hub (Local)",
-        resolveSyntheticAuth: () => ({
-          available: true,
-          apiKey
-        }),
-        catalog: {
-          order: "simple",
-          run: async () => ({
-            provider: {
-              baseUrl: ollamaNativeUrl,
-              apiKey: "ollama",
-              api: "ollama",
-              models: localModels.map((m) => {
-                const DEFAULT_CTX = 32768;
-                const effCtx = numCtx ? Math.min(numCtx, m.context_window ?? DEFAULT_CTX) : void 0;
-                const contextWindow = effCtx ?? Math.min(DEFAULT_CTX, m.context_window ?? DEFAULT_CTX);
-                return {
-                  id: m.id,
-                  name: m.id,
-                  reasoning: false,
-                  input: ["text"],
-                  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                  contextWindow,
-                  // Output budget can't exceed the total context window.
-                  maxTokens: Math.min(m.max_tokens ?? 8192, contextWindow),
-                  ...effCtx ? { params: { num_ctx: effCtx } } : {}
-                };
-              })
-            }
-          })
-        }
-      });
-      api.log.info(`Registered CI Hub as OpenClaw provider with ${localModels.length} local model(s)`);
-    }
+  } catch {
+    api.log.debug("Direct Ollama model discovery unavailable \u2014 falling back to Hub inference status");
+  }
+  if (localModels.length === 0) {
+    const inferenceStatus = await getInferenceStatus();
+    localModels = (inferenceStatus?.models ?? []).filter((m) => m.local && m.modality.includes("text") && (m.state === "pulled" || m.state === "loaded" || m.state === "pinned")).map((m) => ({
+      id: m.id,
+      context_window: m.context_window,
+      max_tokens: m.max_tokens
+    })).filter((m) => m.id.includes(":"));
+  }
+  const hubNumCtx = Number.parseInt(process.env.CI_LLM_NUM_CTX ?? "", 10);
+  const numCtx = Number.isFinite(hubNumCtx) && hubNumCtx > 0 ? hubNumCtx : void 0;
+  const models = localModels.map((m) => {
+    const DEFAULT_CTX = 32768;
+    const effCtx = numCtx ? Math.min(numCtx, m.context_window ?? DEFAULT_CTX) : void 0;
+    const contextWindow = effCtx ?? Math.min(DEFAULT_CTX, m.context_window ?? DEFAULT_CTX);
+    return {
+      id: m.id,
+      name: m.id,
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow,
+      // Output budget can't exceed the total context window.
+      maxTokens: Math.min(m.max_tokens ?? 8192, contextWindow),
+      ...effCtx ? { params: { num_ctx: effCtx } } : {}
+    };
+  });
+  api.log.info(`CI Hub provider catalog resolved ${models.length} local model(s)`);
+  return models;
+}
+async function probeTtsAvailability(api, getInferenceStatus, tts) {
+  try {
+    const inferenceStatus = await getInferenceStatus();
+    if (!inferenceStatus) return;
     const ttsModels = inferenceStatus.models.filter((m) => m.local && m.modality.includes("tts") && (m.state === "loaded" || m.state === "pinned"));
     const lemonadeBackend = inferenceStatus.backends.find((b) => b.type === "lemonade");
-    if (ttsModels.length > 0 && lemonadeBackend?.running && api.registerSpeechProvider) {
-      const inferenceBaseUrl = `${(process.env.OLLAMA_HOST ?? "http://ci-hub-ollama:11434").replace(/\/$/, "")}/v1`;
-      api.registerSpeechProvider({
-        id: "ci-hub",
-        label: "CI Hub TTS (Local)",
-        isConfigured: () => true,
-        synthesize: async (req) => {
-          const response = await fetch(`${inferenceBaseUrl}/audio/speech`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${apiKey}`,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              model: ttsModels[0]?.id ?? "kokoro-v1",
-              input: req.text,
-              voice: req.voice ?? "default"
-            })
-          });
-          if (!response.ok) {
-            const errorText = await response.text().catch(() => "Unknown error");
-            api.log.error(`CI Hub TTS request failed (${response.status}): ${errorText.slice(0, 500)}`);
-            throw new Error(`CI Hub TTS request failed: ${response.status} ${response.statusText}`);
-          }
-          const audioBuffer = Buffer.from(await response.arrayBuffer());
-          return {
-            audioBuffer,
-            outputFormat: "mp3",
-            fileExtension: ".mp3",
-            voiceCompatible: true
-          };
-        }
-      });
-      api.log.info("Registered CI Hub TTS as OpenClaw speech provider");
-    }
-    const configuredCloud = inferenceStatus.cloudProviders.filter((p) => p.configured);
-    if (configuredCloud.length > 0) {
-      api.log.info(`Hub has ${configuredCloud.length} cloud provider(s) configured as fallback`);
+    if (ttsModels.length > 0 && lemonadeBackend?.running) {
+      tts.modelId = ttsModels[0]?.id ?? tts.modelId;
+      tts.ready = true;
+      api.log.info("CI Hub TTS available via OpenClaw speech provider");
     }
   } catch (error) {
-    api.log.warn(`Auto-configuration failed: ${error instanceof Error ? error.message : String(error)}`);
+    api.log.warn(`TTS availability probe failed: ${describeError(error)}`);
   }
 }
 export {
