@@ -73,15 +73,37 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-// Walk to a nested config record, replacing any node that is not a usable record
-// along the way, and return the leaf. Record counterpart to ensureArrayPath.
-function ensureRecordPath(root, keys) {
+/**
+ * Walk to a nested config record, replacing any node on the way that is not a usable
+ * record, and report whether anything had to be replaced.
+ *
+ * `replaced` is true iff at least one node on the path was not a record and was
+ * overwritten — i.e. the config genuinely changed and openclaw.json must be rewritten.
+ * Callers that maintain a `changed` flag MUST or-in `replaced`; getting this wrong is
+ * invisible in the resulting config object and shows up only as a file that does (or
+ * does not) get written, so the reporting is explicit rather than left to be
+ * re-derived at each of the ~15 call sites.
+ *
+ * @returns {{ node: object, replaced: boolean }}
+ */
+function ensureRecordPathTracked(root, keys) {
   let current = root;
+  let replaced = false;
   for (const key of keys) {
-    if (!isPlainObject(current[key])) current[key] = {};
+    if (!isPlainObject(current[key])) {
+      current[key] = {};
+      replaced = true;
+    }
     current = current[key];
   }
-  return current;
+  return { node: current, replaced };
+}
+
+// Walk to a nested config record, replacing any node that is not a usable record
+// along the way, and return the leaf. Record counterpart to ensureArrayPath. Use
+// ensureRecordPathTracked instead where a `changed` flag has to be maintained.
+function ensureRecordPath(root, keys) {
+  return ensureRecordPathTracked(root, keys).node;
 }
 
 /**
@@ -89,23 +111,12 @@ function ensureRecordPath(root, keys) {
  * usable type. Array counterpart to ensureRecordPath; returns the leaf array.
  */
 function ensureArrayPath(root, keys) {
-  let current = root;
-  for (const key of keys.slice(0, -1)) {
-    if (
-      !current[key] ||
-      typeof current[key] !== "object" ||
-      Array.isArray(current[key])
-    ) {
-      current[key] = {};
-    }
-    current = current[key];
-  }
-
+  const parent = ensureRecordPath(root, keys.slice(0, -1));
   const leaf = keys[keys.length - 1];
-  if (!Array.isArray(current[leaf])) {
-    current[leaf] = [];
+  if (!Array.isArray(parent[leaf])) {
+    parent[leaf] = [];
   }
-  return current[leaf];
+  return parent[leaf];
 }
 
 /**
@@ -444,12 +455,7 @@ function createConfigReconciler({
       return false;
     }
 
-    if (!config.mcp || typeof config.mcp !== "object" || Array.isArray(config.mcp)) {
-      config.mcp = {};
-    }
-    if (!config.mcp.servers || typeof config.mcp.servers !== "object" || Array.isArray(config.mcp.servers)) {
-      config.mcp.servers = {};
-    }
+    const { node: servers } = ensureRecordPathTracked(config, ["mcp", "servers"]);
 
     const desired = {
       url,
@@ -459,12 +465,12 @@ function createConfigReconciler({
       connectTimeout: 60,
     };
 
-    const current = config.mcp.servers["ci-hub"];
+    const current = servers["ci-hub"];
     // Deep-equal on the small, fixed shape keeps reconcile idempotent.
     if (JSON.stringify(current) === JSON.stringify(desired)) {
       return false;
     }
-    config.mcp.servers["ci-hub"] = desired;
+    servers["ci-hub"] = desired;
     log.log(`Patched config: registered ci-hub MCP server (Streamable HTTP, ${url})`);
     return true;
   }
@@ -475,39 +481,16 @@ function createConfigReconciler({
    * must stand down.
    */
   function disableBundledSessionMemoryHook(config) {
-    let changed = false;
-    if (
-      !config.hooks ||
-      typeof config.hooks !== "object" ||
-      Array.isArray(config.hooks)
-    ) {
-      config.hooks = {};
-      changed = true;
-    }
-    if (
-      !config.hooks.internal ||
-      typeof config.hooks.internal !== "object" ||
-      Array.isArray(config.hooks.internal)
-    ) {
-      config.hooks.internal = {};
-      changed = true;
-    }
-    if (
-      !config.hooks.internal.entries ||
-      typeof config.hooks.internal.entries !== "object" ||
-      Array.isArray(config.hooks.internal.entries)
-    ) {
-      config.hooks.internal.entries = {};
-      changed = true;
-    }
+    const { node: entries, replaced } = ensureRecordPathTracked(config, [
+      "hooks",
+      "internal",
+      "entries",
+    ]);
+    let changed = replaced;
 
-    const entries = config.hooks.internal.entries;
-    const entry =
-      entries["session-memory"] &&
-      typeof entries["session-memory"] === "object" &&
-      !Array.isArray(entries["session-memory"])
-        ? entries["session-memory"]
-        : {};
+    const entry = isPlainObject(entries["session-memory"])
+      ? entries["session-memory"]
+      : {};
     if (entry.enabled !== false) {
       entry.enabled = false;
       entries["session-memory"] = entry;
@@ -523,28 +506,20 @@ function createConfigReconciler({
     // The CI memory plugin's agent_end turn-sync is a conversation hook; a
     // path-loaded (non-bundled) plugin only receives it when its entry opts in
     // via hooks.allowConversationAccess.
-    let changed = false;
-    if (
-      !config.plugins.entries ||
-      typeof config.plugins.entries !== "object" ||
-      Array.isArray(config.plugins.entries)
-    ) {
-      config.plugins.entries = {};
-      changed = true;
-    }
-    const existingEntry = config.plugins.entries[CI_MEMORY_PLUGIN_ID];
-    const entry =
-      existingEntry && typeof existingEntry === "object" && !Array.isArray(existingEntry)
-        ? existingEntry
-        : {};
-    const hooks =
-      entry.hooks && typeof entry.hooks === "object" && !Array.isArray(entry.hooks)
-        ? entry.hooks
-        : {};
+    const { node: entries, replaced } = ensureRecordPathTracked(config, [
+      "plugins",
+      "entries",
+    ]);
+    let changed = replaced;
+
+    const entry = isPlainObject(entries[CI_MEMORY_PLUGIN_ID])
+      ? entries[CI_MEMORY_PLUGIN_ID]
+      : {};
+    const hooks = isPlainObject(entry.hooks) ? entry.hooks : {};
     if (hooks.allowConversationAccess !== true) {
       hooks.allowConversationAccess = true;
       entry.hooks = hooks;
-      config.plugins.entries[CI_MEMORY_PLUGIN_ID] = entry;
+      entries[CI_MEMORY_PLUGIN_ID] = entry;
       changed = true;
       log.log(
         "Patched config: enabled conversation access for CI memory turn-sync",
@@ -561,29 +536,20 @@ function createConfigReconciler({
    * one, because creating it here would silently deny every tool not named in it.
    */
   function ensureMemoryStoreToolAllowed(config) {
-    let changed = false;
-    if (
-      !config.tools ||
-      typeof config.tools !== "object" ||
-      Array.isArray(config.tools)
-    ) {
-      config.tools = {};
+    const { node: tools, replaced } = ensureRecordPathTracked(config, ["tools"]);
+    let changed = replaced;
+
+    if (!Array.isArray(tools.alsoAllow)) {
+      tools.alsoAllow = [];
       changed = true;
     }
-    if (!Array.isArray(config.tools.alsoAllow)) {
-      config.tools.alsoAllow = [];
-      changed = true;
-    }
-    if (!config.tools.alsoAllow.includes("memory_store")) {
-      config.tools.alsoAllow.push("memory_store");
+    if (!tools.alsoAllow.includes("memory_store")) {
+      tools.alsoAllow.push("memory_store");
       changed = true;
       log.log("Patched config: allowed Companion Intelligence memory_store tool");
     }
-    if (
-      Array.isArray(config.tools.allow) &&
-      !config.tools.allow.includes("memory_store")
-    ) {
-      config.tools.allow.push("memory_store");
+    if (Array.isArray(tools.allow) && !tools.allow.includes("memory_store")) {
+      tools.allow.push("memory_store");
       changed = true;
       log.log("Patched config: added memory_store to explicit tool allowlist");
     }
@@ -667,16 +633,11 @@ function createConfigReconciler({
       return false;
     }
 
-    let changed = false;
-    if (
-      !config.plugins ||
-      typeof config.plugins !== "object" ||
-      Array.isArray(config.plugins)
-    ) {
-      config.plugins = {};
-    }
-    if (config.plugins.enabled !== true) {
-      config.plugins.enabled = true;
+    const { node: plugins, replaced } = ensureRecordPathTracked(config, ["plugins"]);
+    let changed = replaced;
+
+    if (plugins.enabled !== true) {
+      plugins.enabled = true;
       changed = true;
       log.log("Patched config: enabled plugins");
     }
@@ -689,15 +650,12 @@ function createConfigReconciler({
     }
 
     if (enableEntry) {
-      if (
-        Array.isArray(config.plugins.deny) &&
-        removeArrayItem(config.plugins.deny, pluginId)
-      ) {
+      if (Array.isArray(plugins.deny) && removeArrayItem(plugins.deny, pluginId)) {
         changed = true;
         log.log(`Patched config: removed ${label} plugin from deny list`);
       }
 
-      const allowedPlugins = config.plugins.allow;
+      const allowedPlugins = plugins.allow;
       if (
         Array.isArray(allowedPlugins) &&
         allowedPlugins.length > 0 &&
@@ -709,18 +667,21 @@ function createConfigReconciler({
       }
     }
 
-    if (
-      !config.plugins.entries ||
-      typeof config.plugins.entries !== "object" ||
-      Array.isArray(config.plugins.entries)
-    ) {
-      config.plugins.entries = {};
-    }
-    const entry = config.plugins.entries[pluginId] || {};
+    const { node: entries, replaced: entriesReplaced } = ensureRecordPathTracked(
+      config,
+      ["plugins", "entries"],
+    );
+    changed = entriesReplaced || changed;
+
+    // Guard the entry itself, not just its parent. A hand-edited scalar here is truthy,
+    // so `entries[pluginId] || {}` would keep the string; assigning .enabled to it
+    // no-ops in sloppy mode, the string is written back unchanged, and `changed` is set
+    // on EVERY boot — an invalid config rewritten in an endless loop.
+    const entry = isPlainObject(entries[pluginId]) ? entries[pluginId] : {};
     const nextEnabled = enableEntry;
     if (entry.enabled !== nextEnabled) {
       entry.enabled = nextEnabled;
-      config.plugins.entries[pluginId] = entry;
+      entries[pluginId] = entry;
       changed = true;
       log.log(
         `Patched config: ${nextEnabled ? "enabled" : "disabled"} ${label} plugin`,
@@ -1033,26 +994,31 @@ function createConfigReconciler({
 
     let changed = false;
 
-    // Ensure allowInsecureAuth is set (needed for the CI app proxy)
-    if (!config.gateway) config.gateway = {};
-    if (!config.gateway.controlUi) config.gateway.controlUi = {};
-    if (!config.gateway.controlUi.allowInsecureAuth) {
-      config.gateway.controlUi.allowInsecureAuth = true;
+    // Ensure allowInsecureAuth is set (needed for the CI app proxy).
+    // Record-guard rather than truthiness-guard: a hand-edited `"gateway": "local"` is
+    // truthy, so `if (!config.gateway)` passes it through, the next assignment no-ops on
+    // the primitive in sloppy mode, and reading .allowInsecureAuth off undefined throws.
+    // reconcileConfig's caller swallows that rejection, so the gateway would start with
+    // no auth token at all — the exact failure the token block below exists to prevent.
+    const controlUi = ensureRecordPathTracked(config, ["gateway", "controlUi"]);
+    changed = controlUi.replaced || changed;
+    if (!controlUi.node.allowInsecureAuth) {
+      controlUi.node.allowInsecureAuth = true;
       changed = true;
       log.log("Patched config: enabled allowInsecureAuth");
     }
 
     // Disable device auth (would break access in some CI proxy configurations)
-    if (!config.gateway.controlUi.dangerouslyDisableDeviceAuth) {
-      config.gateway.controlUi.dangerouslyDisableDeviceAuth = true;
+    if (!controlUi.node.dangerouslyDisableDeviceAuth) {
+      controlUi.node.dangerouslyDisableDeviceAuth = true;
       changed = true;
       log.log("Patched config: disabled device auth");
     }
 
     // The CI setup proxy rewrites Host/Origin to the local gateway origin.
     // Make sure that rewritten origin is explicitly trusted by the Control UI.
-    if (!Array.isArray(config.gateway.controlUi.allowedOrigins)) {
-      config.gateway.controlUi.allowedOrigins = [];
+    if (!Array.isArray(controlUi.node.allowedOrigins)) {
+      controlUi.node.allowedOrigins = [];
       changed = true;
     }
     const requiredOrigins = [
@@ -1060,17 +1026,18 @@ function createConfigReconciler({
       `http://localhost:${gatewayPort}`,
     ];
     for (const origin of requiredOrigins) {
-      if (!config.gateway.controlUi.allowedOrigins.includes(origin)) {
-        config.gateway.controlUi.allowedOrigins.push(origin);
+      if (!controlUi.node.allowedOrigins.includes(origin)) {
+        controlUi.node.allowedOrigins.push(origin);
         changed = true;
         log.log(`Patched config: added allowed origin ${origin}`);
       }
     }
 
     // Disable update checks (updates are managed by the CI marketplace via Docker image bumps)
-    if (!config.update) config.update = {};
-    if (config.update.checkOnStart !== false) {
-      config.update.checkOnStart = false;
+    const update = ensureRecordPathTracked(config, ["update"]);
+    changed = update.replaced || changed;
+    if (update.node.checkOnStart !== false) {
+      update.node.checkOnStart = false;
       changed = true;
       log.log("Patched config: disabled update check on start");
     }
@@ -1085,13 +1052,9 @@ function createConfigReconciler({
     // Install the Companion Intelligence memory plugin as a selectable active
     // memory backend. Keep the entry disabled until selected so OpenClaw does not
     // load two active memory runtimes.
-    const currentMemorySlot =
-      config.plugins &&
-      config.plugins.slots &&
-      typeof config.plugins.slots === "object" &&
-      !Array.isArray(config.plugins.slots)
-        ? config.plugins.slots.memory
-        : undefined;
+    const currentMemorySlot = isPlainObject(config.plugins?.slots)
+      ? config.plugins.slots.memory
+      : undefined;
     const shouldSelectCiMemory =
       (hasCiServerCredentials(env) || currentMemorySlot === CI_MEMORY_PLUGIN_ID) &&
       (currentMemorySlot === undefined ||
@@ -1108,15 +1071,10 @@ function createConfigReconciler({
       ) || changed;
     if (fs.existsSync(CI_MEMORY_PLUGIN_PATH)) {
       if (shouldSelectCiMemory) {
-        if (
-          !config.plugins.slots ||
-          typeof config.plugins.slots !== "object" ||
-          Array.isArray(config.plugins.slots)
-        ) {
-          config.plugins.slots = {};
-        }
-        if (config.plugins.slots.memory !== CI_MEMORY_PLUGIN_ID) {
-          config.plugins.slots.memory = CI_MEMORY_PLUGIN_ID;
+        const slots = ensureRecordPathTracked(config, ["plugins", "slots"]);
+        changed = slots.replaced || changed;
+        if (slots.node.memory !== CI_MEMORY_PLUGIN_ID) {
+          slots.node.memory = CI_MEMORY_PLUGIN_ID;
           changed = true;
           log.log(
             "Patched config: selected Companion Intelligence memory plugin",
@@ -1149,17 +1107,18 @@ function createConfigReconciler({
 
     // Ensure a gateway auth token exists — the onboard CLI does not generate one,
     // so without this the Control UI WebSocket fails with "token_missing".
-    if (!config.gateway.auth) config.gateway.auth = {};
-    if (!config.gateway.auth.token) {
-      config.gateway.auth.token = crypto.randomBytes(24).toString("hex");
+    const auth = ensureRecordPathTracked(config, ["gateway", "auth"]);
+    changed = auth.replaced || changed;
+    if (!auth.node.token) {
+      auth.node.token = crypto.randomBytes(24).toString("hex");
       changed = true;
       log.log("Patched config: generated gateway auth token");
     }
 
     // Required since openclaw 2026.3.7 when auth is configured.
     // Always forced to "token" — the proxy only speaks Bearer token auth.
-    if (config.gateway.auth.mode !== "token") {
-      config.gateway.auth.mode = "token";
+    if (auth.node.mode !== "token") {
+      auth.node.mode = "token";
       changed = true;
       log.log("Patched config: set gateway auth mode to token");
     }
@@ -1180,29 +1139,23 @@ function createConfigReconciler({
     const inferenceApiKey = resolveInferenceApiKey(env);
     const defaultModel = env.DEFAULT_MODEL || containerEnv.DEFAULT_MODEL || "";
 
-    if (
-      !config.models ||
-      typeof config.models !== "object" ||
-      Array.isArray(config.models)
-    ) {
-      config.models = {};
-      changed = true;
-    }
-    if (config.models.mode !== "merge") {
-      config.models.mode = "merge";
+    const models = ensureRecordPathTracked(config, ["models"]);
+    changed = models.replaced || changed;
+    if (models.node.mode !== "merge") {
+      models.node.mode = "merge";
       changed = true;
       log.log("Patched config: set model catalog mode to merge");
     }
-    if (
-      !config.models.providers ||
-      typeof config.models.providers !== "object" ||
-      Array.isArray(config.models.providers)
-    ) {
-      config.models.providers = {};
-      changed = true;
-    }
+    const providers = ensureRecordPathTracked(config, ["models", "providers"]);
+    changed = providers.replaced || changed;
 
-    const currentHubProvider = config.models.providers["ci-hub"] || {};
+    // Guard the provider entry itself before spreading it. A hand-edited string here
+    // ("ci-hub": "http://host:11434") is truthy, so `|| {}` keeps it, and `{...string}`
+    // spreads into {"0":"h","1":"t",...} — index-keyed junk that is schema-invalid and
+    // gets the ENTIRE openclaw.json quarantined on the next boot.
+    const currentHubProvider = isPlainObject(providers.node["ci-hub"])
+      ? providers.node["ci-hub"]
+      : {};
     const nextHubProvider = {
       ...currentHubProvider,
       baseUrl: ollamaBaseUrl,
@@ -1218,7 +1171,7 @@ function createConfigReconciler({
       currentHubProvider.api !== nextHubProvider.api ||
       !Array.isArray(currentHubProvider.models)
     ) {
-      config.models.providers["ci-hub"] = nextHubProvider;
+      providers.node["ci-hub"] = nextHubProvider;
       changed = true;
       log.log(
         `Patched config: synced ci-hub Ollama provider (${ollamaBaseUrl})`,
@@ -1237,7 +1190,7 @@ function createConfigReconciler({
           JSON.stringify(currentHubProvider.models || []) !==
           JSON.stringify(discoveredModels)
         ) {
-          config.models.providers["ci-hub"] = {
+          providers.node["ci-hub"] = {
             ...nextHubProvider,
             models: discoveredModels,
           };
@@ -1247,9 +1200,14 @@ function createConfigReconciler({
           );
         }
 
-        config.agents = config.agents || {};
-        config.agents.defaults = config.agents.defaults || {};
-        const existingModels = config.agents.defaults.models || {};
+        const defaults = ensureRecordPathTracked(config, ["agents", "defaults"]);
+        changed = defaults.replaced || changed;
+
+        // Guard before enumerating: Object.entries("abc") yields index keys, which
+        // would survive the ci-hub/ filter straight into the merged record.
+        const existingModels = isPlainObject(defaults.node.models)
+          ? defaults.node.models
+          : {};
         const mergedModels = Object.fromEntries(
           Object.entries(existingModels).filter(
             ([key]) => !key.startsWith("ci-hub/"),
@@ -1260,15 +1218,16 @@ function createConfigReconciler({
           mergedModels[key] = existingModels[key] || {};
         }
         if (
-          JSON.stringify(config.agents.defaults.models || {}) !==
-          JSON.stringify(mergedModels)
+          JSON.stringify(defaults.node.models || {}) !== JSON.stringify(mergedModels)
         ) {
-          config.agents.defaults.models = mergedModels;
+          defaults.node.models = mergedModels;
           changed = true;
           log.log("Patched config: merged ci-hub model options");
         }
 
-        const existingPrimary = config.agents.defaults.model?.primary;
+        const existingPrimary = isPlainObject(defaults.node.model)
+          ? defaults.node.model.primary
+          : undefined;
         let primaryId = null;
         if (
           typeof existingPrimary === "string" &&
@@ -1283,10 +1242,13 @@ function createConfigReconciler({
           primaryId = defaultModelAvailable || firstModelId;
         }
         if (primaryId) {
-          config.agents.defaults.model = config.agents.defaults.model || {};
+          // Record-guard the node we assign .primary into: on a scalar the assignment
+          // silently no-ops, so `changed` would be set on every boot forever.
+          const model = ensureRecordPathTracked(config, ["agents", "defaults", "model"]);
+          changed = model.replaced || changed;
           const nextPrimaryModel = `ci-hub/${primaryId}`;
-          if (config.agents.defaults.model.primary !== nextPrimaryModel) {
-            config.agents.defaults.model.primary = nextPrimaryModel;
+          if (model.node.primary !== nextPrimaryModel) {
+            model.node.primary = nextPrimaryModel;
             changed = true;
             log.log(
               `Patched config: set default agent model to ${nextPrimaryModel}`,
@@ -1307,12 +1269,11 @@ function createConfigReconciler({
     }
 
     if (defaultModel && !config.agents?.defaults?.model?.primary) {
-      config.agents = config.agents || {};
-      config.agents.defaults = config.agents.defaults || {};
-      config.agents.defaults.model = config.agents.defaults.model || {};
+      const model = ensureRecordPathTracked(config, ["agents", "defaults", "model"]);
+      changed = model.replaced || changed;
       const nextPrimaryModel = `ci-hub/${defaultModel}`;
-      if (config.agents.defaults.model.primary !== nextPrimaryModel) {
-        config.agents.defaults.model.primary = nextPrimaryModel;
+      if (model.node.primary !== nextPrimaryModel) {
+        model.node.primary = nextPrimaryModel;
         changed = true;
         log.log(`Patched config: set default agent model to ${nextPrimaryModel}`);
       }
@@ -1323,7 +1284,7 @@ function createConfigReconciler({
     }
 
     // Sync gateway token to .env so the proxy always has it
-    const token = config.gateway.auth.token;
+    const token = auth.node.token;
     if (env.OPENCLAW_GATEWAY_TOKEN !== token) {
       env.OPENCLAW_GATEWAY_TOKEN = token;
       writeEnv(env);
@@ -1379,6 +1340,7 @@ module.exports = {
   // Stateless helpers: no I/O, no logging, no injected state.
   isPlainObject,
   ensureRecordPath,
+  ensureRecordPathTracked,
   ensureArrayPath,
   removeArrayItem,
   hasCiServerCredentials,

@@ -21,6 +21,7 @@ import {
   isEmbeddingModel,
   isPlainObject,
   ensureRecordPath,
+  ensureRecordPathTracked,
   ensureArrayPath,
   removeArrayItem,
   normalizeEmbeddingsBaseUrl,
@@ -42,6 +43,11 @@ afterEach(() => {
   rmDir(dataDir);
   dataDir = undefined;
 });
+
+/** CI-Server memory credentials, as the Hub injects them. */
+const MEM = { CI_SERVER_URL: "http://ci-server:3030", CI_SERVER_TOKEN: "t" };
+/** Hub MCP credentials. */
+const HUB = { HUB_URL: "https://hub.example", HUB_MCP_API_KEY: "hub-key" };
 
 // ---------------------------------------------------------------------------
 // buildOllamaModelEntry — the model-entry shape and the context clamp.
@@ -990,9 +996,6 @@ describe("warnIfConfigClobbered", () => {
 // reconcileConfig — end to end, against a real stub Ollama.
 // ---------------------------------------------------------------------------
 describe("reconcileConfig (end to end)", () => {
-  const MEM = { CI_SERVER_URL: "http://ci-server:3030", CI_SERVER_TOKEN: "t" };
-  const HUB = { HUB_URL: "https://hub.example", HUB_MCP_API_KEY: "hub-key" };
-
   test("no-ops when openclaw.json does not exist, and creates nothing", async () => {
     dataDir = makeDataDir({ config: null });
     const { cfg } = makeReconciler(dataDir);
@@ -1317,5 +1320,120 @@ describe("reconcileConfig (end to end)", () => {
       await cfg.reconcileConfig();
       assertNoIndexKeys(readCfg(dataDir));
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Malformed nodes + convergence.
+//
+// openclaw.json is a file operators hand-edit. Every one of these seeds put a scalar
+// or an array where the reconciler expects a record, and each used to fail in one of
+// three ways:
+//
+//   THROWS         — `gateway: "local"` is truthy, so the old `if (!config.gateway)`
+//                    passed it through; assigning to a primitive no-ops in sloppy mode
+//                    and the next read threw. reconcileConfig's caller swallows the
+//                    rejection, so the gateway came up with NO auth token.
+//   INDEX-JUNK     — `{...\"http://x\"}` spreads to {"0":"h","1":"t",...}. That is
+//                    schema-invalid, so OpenClaw quarantines the ENTIRE file and
+//                    reverts everything written in the same pass.
+//   NON-CONVERGENT — the assignment silently no-ops, `changed` is set anyway, and the
+//                    file is rewritten on EVERY boot, forever.
+//
+// Convergence is the invariant that generalizes: a config the reconciler rewrites on
+// every boot is, by definition, one it is failing to normalize.
+// ---------------------------------------------------------------------------
+describe("malformed nodes + convergence", () => {
+  const HOSTILE = [
+    ["gateway is a scalar", { gateway: "local" }],
+    ["gateway is an array", { gateway: [] }],
+    ["gateway.auth is a scalar", { gateway: { auth: "token" } }],
+    ["update is a scalar", { update: 1 }],
+    ["models is an array", { models: [] }],
+    ["models.providers['ci-hub'] is a string", { models: { providers: { "ci-hub": "http://hand-edited:11434" } } }],
+    ["plugins.entries[id] is a scalar", { plugins: { entries: { "ci-runtime": "x" } } }],
+    ["plugins.slots is an array", { plugins: { slots: [] } }],
+    ["agents is a scalar", { agents: "x" }],
+    ["agents.defaults.models is a string", { agents: { defaults: { models: "abc" } } }],
+    ["agents.defaults.model is a string", { agents: { defaults: { model: "x" } } }],
+    ["agents.defaults.memorySearch is a scalar", { agents: { defaults: { memorySearch: "openai" } } }],
+    ["tools.alsoAllow is a string", { tools: { alsoAllow: "memory_store" } }],
+    ["hooks is a scalar", { hooks: 1 }],
+    ["mcp is a scalar", { mcp: "nope" }],
+  ];
+
+  for (const [name, seed] of HOSTILE) {
+    test(`${name}: reconciles, normalizes and converges`, async () => {
+      await withOllama(CATALOG, async (baseUrl) => {
+        dataDir = makeDataDir({
+          config: seed,
+          env: {
+            OLLAMA_HOST: baseUrl,
+            EMBEDDINGS_MODEL: "nomic-embed-text",
+            ...MEM,
+            ...HUB,
+          },
+        });
+        const ctx = makeReconciler(dataDir);
+
+        // 1. It must not throw. A throw here means no gateway token gets written.
+        await ctx.cfg.reconcileConfig();
+
+        // 2. The malformed node must be REPLACED with a record, never decorated.
+        const config = readCfg(dataDir);
+        assertNoIndexKeys(config);
+        assert.strictEqual(config.gateway.mode, "local");
+        assert.match(config.gateway.auth.token, /^[0-9a-f]{48}$/, "the gateway token must still be written");
+
+        // 3. The result must survive a JSON round-trip unchanged (no array-with-props).
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(config)), config);
+
+        // 4. It must CONVERGE: a second pass patches nothing and rewrites nothing.
+        const before = fs.readFileSync(cfgPath(dataDir), "utf8");
+        const epoch = new Date(0);
+        fs.utimesSync(cfgPath(dataDir), epoch, epoch);
+        ctx.logs.length = 0;
+
+        await ctx.cfg.reconcileConfig();
+
+        assert.deepStrictEqual(ctx.patches(), [], "a normalized config must not be re-patched");
+        assert.strictEqual(fs.readFileSync(cfgPath(dataDir), "utf8"), before);
+        assert.strictEqual(
+          fs.statSync(cfgPath(dataDir)).mtimeMs,
+          0,
+          "rewriting on every boot means the config was never normalized",
+        );
+      });
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ensureRecordPathTracked — the change report the `changed` protocol depends on.
+// ---------------------------------------------------------------------------
+describe("ensureRecordPathTracked", () => {
+  test("reports replaced=false when every node on the path is already a record", () => {
+    const root = { a: { b: {} } };
+    const { node, replaced } = ensureRecordPathTracked(root, ["a", "b"]);
+    assert.strictEqual(replaced, false, "no replacement means no reason to rewrite the file");
+    assert.strictEqual(node, root.a.b, "the existing node is returned, not a copy");
+  });
+
+  test("reports replaced=true when a scalar had to be overwritten", () => {
+    const root = { a: "scalar" };
+    const { replaced } = ensureRecordPathTracked(root, ["a", "b"]);
+    assert.strictEqual(replaced, true);
+    assert.deepStrictEqual(root, { a: { b: {} } });
+  });
+
+  test("reports replaced=true for a missing path, and for an array node", () => {
+    assert.strictEqual(ensureRecordPathTracked({}, ["a"]).replaced, true);
+    assert.strictEqual(ensureRecordPathTracked({ a: [] }, ["a"]).replaced, true);
+  });
+
+  test("ensureRecordPath is the value-only view of the same walk", () => {
+    const root = { a: 1 };
+    assert.strictEqual(ensureRecordPath(root, ["a"]), root.a);
+    assert.ok(isPlainObject(root.a));
   });
 });

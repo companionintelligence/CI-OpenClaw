@@ -27,6 +27,7 @@ export const {
   createConfigReconciler,
   isPlainObject,
   ensureRecordPath,
+  ensureRecordPathTracked,
   ensureArrayPath,
   removeArrayItem,
   hasCiServerCredentials,
