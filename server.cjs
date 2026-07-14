@@ -128,10 +128,16 @@ function writeEnv(env) {
   fs.writeFileSync(ENV_FILE, lines.join("\n") + "\n", { mode: 0o600 });
 }
 
+// When we last wrote openclaw.json. warnIfConfigClobbered uses this as the cutoff
+// so it catches a quarantine by ANY openclaw invocation after our write, not just
+// one that happens inside the doctor call.
+let configWrittenAtMs = 0;
+
 function writeConfig(config) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), {
     mode: 0o600,
   });
+  configWrittenAtMs = Date.now();
 }
 
 function ensureConfigDir() {
@@ -260,11 +266,15 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-// Replace a config node with {} unless it is already a usable record, and return
-// it. Mirrors the guard this file repeats around every config path it writes.
-function ensureRecordPath(parent, key) {
-  if (!isPlainObject(parent[key])) parent[key] = {};
-  return parent[key];
+// Walk to a nested config record, replacing any node that is not a usable record
+// along the way, and return the leaf. Record counterpart to ensureArrayPath.
+function ensureRecordPath(root, keys) {
+  let current = root;
+  for (const key of keys) {
+    if (!isPlainObject(current[key])) current[key] = {};
+    current = current[key];
+  }
+  return current;
 }
 
 function ensureArrayPath(root, keys) {
@@ -510,7 +520,7 @@ function ensureMemorySearchEmbeddings(config, env) {
   // Guard every node we spread or assign into: a hand-edited memorySearch that is
   // a scalar or array would otherwise spread into index-keyed junk, producing the
   // very kind of schema-invalid config that gets the whole file clobbered.
-  const defaults = ensureRecordPath(ensureRecordPath(config, "agents"), "defaults");
+  const defaults = ensureRecordPath(config, ["agents", "defaults"]);
   const current = isPlainObject(defaults.memorySearch) ? defaults.memorySearch : {};
   const currentRemote = isPlainObject(current.remote) ? current.remote : {};
   const next = {
@@ -1137,31 +1147,45 @@ async function reconcileConfig() {
   }
 }
 
-// Run before gateway start to catch migration issues or config problems that
-// readConfig()'s backup restore couldn't fix (e.g. schema changes across versions).
-// `doctor --repair` silently quarantines an invalid openclaw.json as
-// <name>.clobbered.<ts> and restores last-known-good — reverting, without any
-// error, everything reconcileConfig just wrote (model catalog, memory wiring,
-// gateway token). A single unrecognized key is enough to trigger it, so surface
-// the quarantine loudly instead of letting the app come up silently misconfigured.
+// OpenClaw silently quarantines an openclaw.json it considers invalid as
+// <name>.clobbered.<ts> and restores last-known-good — reverting, with no error on
+// any channel, everything reconcileConfig just wrote (model catalog, memory wiring,
+// gateway token). A single unrecognized key is enough to trigger it, so surface the
+// quarantine instead of letting the app come up silently misconfigured.
 function warnIfConfigClobbered(since) {
+  let clobbered;
   try {
-    const clobbered = fs
+    clobbered = fs
       .readdirSync(CONFIG_DIR)
       .filter((name) => name.startsWith("openclaw.json.clobbered."))
-      .filter((name) => fs.statSync(path.join(CONFIG_DIR, name)).mtimeMs >= since);
-    if (clobbered.length === 0) return;
-    console.error(
-      `openclaw doctor rejected the config we wrote and restored last-known-good: ${clobbered.join(", ")}. ` +
-        "Settings written this run (model catalog, memory wiring) have been reverted — check the file for an invalid key.",
-    );
-  } catch (e) {
-    // Detection is best-effort; never let it break startup.
+      // OpenClaw rotates (unlinks) old snapshots once its cap is reached, so a name
+      // can vanish between readdir and stat. Drop those rather than let one ENOENT
+      // suppress the whole warning — the cap is hit precisely when clobbering is
+      // most frequent, which is exactly when we must not go quiet.
+      .filter((name) => {
+        try {
+          return fs.statSync(path.join(CONFIG_DIR, name)).mtimeMs >= since;
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return; // Detection is best-effort; never let it break startup.
   }
+  if (clobbered.length === 0) return;
+  console.error(
+    `openclaw rejected openclaw.json and restored last-known-good: ${clobbered.join(", ")}. ` +
+      "Config written this run (model catalog, memory wiring) has been reverted — " +
+      "inspect the quarantined file for an unrecognized key.",
+  );
 }
 
+// Run before gateway start to catch migration issues or config problems that
+// readConfig()'s backup restore couldn't fix (e.g. schema changes across versions).
 async function runDoctor() {
-  const startedAt = Date.now();
+  // Anchor to our last config write when there is one: a quarantine can happen in
+  // any openclaw invocation that reads the file, not only inside this doctor call.
+  const since = configWrittenAtMs || Date.now();
   try {
     await execAsync("openclaw doctor --repair --yes --non-interactive", {
       env: buildChildEnv(),
@@ -1170,7 +1194,7 @@ async function runDoctor() {
   } catch (e) {
     console.error("openclaw doctor failed:", e.message);
   }
-  warnIfConfigClobbered(startedAt);
+  warnIfConfigClobbered(since);
 }
 
 function startOpenclaw({ repair = true } = {}) {
