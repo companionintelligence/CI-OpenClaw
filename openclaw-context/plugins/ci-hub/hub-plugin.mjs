@@ -493,16 +493,12 @@ function register(rawApi, config) {
   } else {
     api.log.warn("HUB_WAKE_SECRET not set \u2014 wake endpoint disabled (would be unauthenticated otherwise)");
   }
-  const mcpClient = new McpClient(hubUrl, mcpApiKey, api.log);
-  const mcpReady = mcpClient.connect().catch((error) => {
-    api.log.warn(`Hub MCP client failed to connect: ${describeError(error)}`);
-  });
   if (process.env.HUB_MCP_LEGACY_CLIENT === "true") {
     api.log.error(
       "HUB_MCP_LEGACY_CLIENT=true is no longer supported: OpenClaw requires plugin register() to be synchronous, so tools cannot be registered after awaiting tools/list. Hub tools are served by the native mcp.servers.ci-hub entry in openclaw.json."
     );
   } else {
-    api.log.info("Hub MCP tools served via native OpenClaw mcp.servers.ci-hub config; in-plugin client used only for inference discovery");
+    api.log.info("Hub MCP tools served via native OpenClaw mcp.servers.ci-hub config");
   }
   void probeHubHealth(api, hubUrl);
   if (config.sseEnabled) {
@@ -512,6 +508,10 @@ function register(rawApi, config) {
     });
   }
   if (process.env.CI_HUB_PLUGIN_INFERENCE === "1") {
+    const mcpClient = new McpClient(hubUrl, mcpApiKey, api.log);
+    const mcpReady = mcpClient.connect().catch((error) => {
+      api.log.warn(`Hub MCP client failed to connect: ${describeError(error)}`);
+    });
     registerInference({ api, hubUrl, apiKey: mcpApiKey, mcpClient, mcpReady });
   } else {
     api.log.info("Inference auto-config disabled (set CI_HUB_PLUGIN_INFERENCE=1 to enable); the ci-hub provider comes from openclaw.json");
@@ -543,7 +543,11 @@ function withSafeLogger(api) {
     debug: emit("debug")
   };
   return new Proxy(api, {
-    get: (target, prop, receiver) => prop === "log" ? log : Reflect.get(target, prop, receiver)
+    get: (target, prop) => {
+      if (prop === "log") return log;
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
   });
 }
 async function probeHubHealth(api, hubUrl) {
@@ -561,7 +565,10 @@ function registerInference(deps) {
   const ollamaNativeUrl = (process.env.OLLAMA_HOST ?? "http://ci-hub-ollama:11434").replace(/\/$/, "");
   let statusPromise = null;
   const getInferenceStatus = () => {
-    statusPromise ??= fetchInferenceStatus(api, hubUrl, mcpClient, mcpReady);
+    statusPromise ??= fetchInferenceStatus(api, hubUrl, mcpClient, mcpReady).then((status) => {
+      if (!status) statusPromise = null;
+      return status;
+    });
     return statusPromise;
   };
   const tts = { ready: false, modelId: "kokoro-v1" };
