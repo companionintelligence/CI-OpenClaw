@@ -253,6 +253,20 @@ function readConfig() {
   return null;
 }
 
+// A config node we can safely read keys from and spread. Arrays and scalars are
+// not usable as config records: spreading a string yields index-keyed junk, and
+// assigning a property to a scalar silently no-ops in sloppy mode.
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// Replace a config node with {} unless it is already a usable record, and return
+// it. Mirrors the guard this file repeats around every config path it writes.
+function ensureRecordPath(parent, key) {
+  if (!isPlainObject(parent[key])) parent[key] = {};
+  return parent[key];
+}
+
 function ensureArrayPath(root, keys) {
   let current = root;
   for (const key of keys.slice(0, -1)) {
@@ -492,18 +506,22 @@ function ensureMemorySearchEmbeddings(config, env) {
   // OLLAMA_HOST that already carries the suffix rather than emitting /v1/v1.
   const ollamaBase = resolveOllamaBaseUrl(env);
   const baseUrl = ollamaBase.endsWith("/v1") ? ollamaBase : `${ollamaBase}/v1`;
-  config.agents = config.agents || {};
-  config.agents.defaults = config.agents.defaults || {};
-  const current = config.agents.defaults.memorySearch || {};
+
+  // Guard every node we spread or assign into: a hand-edited memorySearch that is
+  // a scalar or array would otherwise spread into index-keyed junk, producing the
+  // very kind of schema-invalid config that gets the whole file clobbered.
+  const defaults = ensureRecordPath(ensureRecordPath(config, "agents"), "defaults");
+  const current = isPlainObject(defaults.memorySearch) ? defaults.memorySearch : {};
+  const currentRemote = isPlainObject(current.remote) ? current.remote : {};
   const next = {
     ...current,
     provider: MEMORY_EMBEDDING_PROVIDER,
     model,
-    remote: { ...(current.remote || {}), baseUrl },
+    remote: { ...currentRemote, baseUrl },
   };
-  if (JSON.stringify(current) === JSON.stringify(next)) return false;
+  if (JSON.stringify(defaults.memorySearch) === JSON.stringify(next)) return false;
 
-  config.agents.defaults.memorySearch = next;
+  defaults.memorySearch = next;
   console.log(
     `Patched config: memory search embeddings -> ${model} @ ${baseUrl}`,
   );
@@ -1121,7 +1139,29 @@ async function reconcileConfig() {
 
 // Run before gateway start to catch migration issues or config problems that
 // readConfig()'s backup restore couldn't fix (e.g. schema changes across versions).
+// `doctor --repair` silently quarantines an invalid openclaw.json as
+// <name>.clobbered.<ts> and restores last-known-good — reverting, without any
+// error, everything reconcileConfig just wrote (model catalog, memory wiring,
+// gateway token). A single unrecognized key is enough to trigger it, so surface
+// the quarantine loudly instead of letting the app come up silently misconfigured.
+function warnIfConfigClobbered(since) {
+  try {
+    const clobbered = fs
+      .readdirSync(CONFIG_DIR)
+      .filter((name) => name.startsWith("openclaw.json.clobbered."))
+      .filter((name) => fs.statSync(path.join(CONFIG_DIR, name)).mtimeMs >= since);
+    if (clobbered.length === 0) return;
+    console.error(
+      `openclaw doctor rejected the config we wrote and restored last-known-good: ${clobbered.join(", ")}. ` +
+        "Settings written this run (model catalog, memory wiring) have been reverted — check the file for an invalid key.",
+    );
+  } catch (e) {
+    // Detection is best-effort; never let it break startup.
+  }
+}
+
 async function runDoctor() {
+  const startedAt = Date.now();
   try {
     await execAsync("openclaw doctor --repair --yes --non-interactive", {
       env: buildChildEnv(),
@@ -1130,6 +1170,7 @@ async function runDoctor() {
   } catch (e) {
     console.error("openclaw doctor failed:", e.message);
   }
+  warnIfConfigClobbered(startedAt);
 }
 
 function startOpenclaw({ repair = true } = {}) {
