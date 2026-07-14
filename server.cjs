@@ -132,6 +132,10 @@ function writeEnv(env) {
 // so it catches a quarantine by ANY openclaw invocation after our write, not just
 // one that happens inside the doctor call.
 let configWrittenAtMs = 0;
+// Quarantines already reported. startOpenclaw re-runs on every gateway exit, and a
+// reconcile that changes nothing leaves configWrittenAtMs at the previous write, so
+// without this the same historical snapshot is re-reported on every restart.
+const reportedClobbers = new Set();
 
 function writeConfig(config) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), {
@@ -835,6 +839,12 @@ function isConfigured() {
 }
 
 async function reconcileConfig() {
+  // A quarantine is not confined to the doctor call — the gateway also rejects the
+  // config it reads at spawn, and the fresh-onboarding path skips doctor entirely.
+  // Report anything that appeared since our last write before reconciling again.
+  // No-op on first boot, when we have not written anything to attribute it to.
+  if (configWrittenAtMs) warnIfConfigClobbered(configWrittenAtMs);
+
   const config = readConfig();
   if (!config) return;
   const env = readEnv();
@@ -1162,6 +1172,7 @@ function warnIfConfigClobbered(since) {
       // can vanish between readdir and stat. Drop those rather than let one ENOENT
       // suppress the whole warning — the cap is hit precisely when clobbering is
       // most frequent, which is exactly when we must not go quiet.
+      .filter((name) => !reportedClobbers.has(name))
       .filter((name) => {
         try {
           return fs.statSync(path.join(CONFIG_DIR, name)).mtimeMs >= since;
@@ -1173,9 +1184,10 @@ function warnIfConfigClobbered(since) {
     return; // Detection is best-effort; never let it break startup.
   }
   if (clobbered.length === 0) return;
+  for (const name of clobbered) reportedClobbers.add(name);
   console.error(
     `openclaw rejected openclaw.json and restored last-known-good: ${clobbered.join(", ")}. ` +
-      "Config written this run (model catalog, memory wiring) has been reverted — " +
+      "The config we last wrote (model catalog, memory wiring) has been reverted — " +
       "inspect the quarantined file for an unrecognized key.",
   );
 }
