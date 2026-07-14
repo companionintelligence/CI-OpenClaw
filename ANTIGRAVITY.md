@@ -22,7 +22,8 @@ CI marketplace wrapper for OpenClaw. Provides headless browser setup, API key on
 ```bash
 npm install
 docker compose up --build
-# validate via docker compose up
+npm test   # unit + bootstrap shell suites (no install needed)
+npm run test:schema   # validate openclaw.json against OpenClaw's own schema (needs the openclaw CLI)
 ```
 
 ## Rules

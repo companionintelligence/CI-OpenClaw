@@ -175,20 +175,44 @@ transcript-ingest endpoint used by automatic turn-sync.
 
 ### Unit tests
 
-The plugin's turn-sync behavior (transcript normalization, the `agent_end` and
-`before_compaction` hooks, error tolerance) is covered by a dependency-free Node
-test that drives the real plugin against a mock CI-Server:
+Everything runs with no install step — the suites are dependency-free and use Node's
+built-in test runner (Node 22).
 
 ```bash
-node tests/companionintelligence.plugin.test.mjs
+npm test            # everything below
+npm run test:unit   # config reconciler + CI memory plugin (node --test)
+npm run test:sh     # the bootstrap shell scripts (tests/*.test.sh)
 ```
 
-The plugin's own unit tests (memory tools, intent catalog parsing, executable
-intent-tool registration/execution) run with the built-in Node test runner:
+#### Config reconciliation
+
+`config-reconcile.cjs` owns `openclaw.json`. OpenClaw's config schema is strict:
+**one unrecognized key invalidates the entire file**, after which `openclaw doctor
+--repair` quarantines it and restores last-known-good — silently reverting everything
+written in the same pass (model catalog, memory wiring, gateway token). A one-word typo
+(`options` where the schema says `params`) once disabled CI-Memory on an appliance with
+no error on any channel.
+
+`tests/config-reconcile.test.mjs` drives the real module against a temp
+`OPENCLAW_DATA_DIR` and a real ephemeral Ollama, covering model-entry shape
+(`params.num_ctx`, never `options`), context-window clamping, embeddings repointing and
+credential hygiene, malformed-node hardening, and reconcile convergence.
+
+#### Schema gate
+
+The generalizing check: it validates the config `reconcileConfig()` **actually produces**
+against **OpenClaw's own schema**, using the version pinned in the `Dockerfile`. It
+proves it is really validating by feeding the validator two deliberately corrupted
+canaries and requiring both to be rejected.
 
 ```bash
-cd openclaw-context/plugins/companionintelligence && node --test
+npm i -g "openclaw@$(grep -oE 'openclaw@[0-9.]+' Dockerfile | head -1 | cut -d@ -f2)"
+npm run test:schema
 ```
+
+It runs on every PR (`.github/workflows/ci.yml`) and nightly against `openclaw@latest`
+as an advisory signal. Without the CLI on `PATH` it skips locally, but hard-fails when
+`CI` is set, so CI can never silently pass by not running it.
 
 ### Verify in a running container
 
