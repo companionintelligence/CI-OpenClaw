@@ -536,29 +536,25 @@ function createSafeLogger(api) {
     debug: (message) => console.info(`[ci-hub] ${message}`)
   };
   const emit = (level) => (message) => {
-    const host = api.log;
-    const hostFn = host?.[level];
-    if (typeof hostFn === "function") {
-      hostFn.call(host, message);
-      return;
+    const host = api;
+    for (const candidate of [host.logger, host.log]) {
+      const hostFn = candidate?.[level];
+      if (typeof hostFn === "function") {
+        hostFn.call(candidate, message);
+        return;
+      }
     }
     fallbacks[level](message);
   };
   return { info: emit("info"), warn: emit("warn"), error: emit("error"), debug: emit("debug") };
 }
 function withSafeLogger(api) {
-  const wrapped = {
-    registerTool: (tool) => api.registerTool(tool),
-    registerHttpRoute: (route) => api.registerHttpRoute(route),
-    wake: (message) => api.wake(message),
-    log: createSafeLogger(api)
-  };
-  if (typeof api.registerProvider === "function") {
-    wrapped.registerProvider = (provider) => api.registerProvider?.(provider);
-  }
-  if (typeof api.registerSpeechProvider === "function") {
-    wrapped.registerSpeechProvider = (provider) => api.registerSpeechProvider?.(provider);
-  }
+  const wrapped = Object.create(api);
+  Object.defineProperty(wrapped, "log", {
+    value: createSafeLogger(api),
+    enumerable: true,
+    configurable: true
+  });
   return wrapped;
 }
 async function probeHubHealth(api, hubUrl) {
@@ -740,5 +736,6 @@ async function probeTtsAvailability(api, getInferenceStatus, tts) {
   }
 }
 export {
-  register
+  register,
+  withSafeLogger
 };
