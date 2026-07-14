@@ -338,20 +338,17 @@ function handleUpgrade(req, socket, head) {
     // Rebuild the upgrade request with auth header
     let requestLine = `${req.method} ${req.url} HTTP/1.1\r\n`;
 
-    // Rewrite headers to appear local (same rationale as HTTP proxy above)
+    // Same header rewrite as the HTTP proxy — through the shared builder, so the strip-list and
+    // the /hooks token exception cannot drift between the two paths (they did once). A WS upgrade
+    // never targets /hooks, so the exception is a no-op here; sharing it keeps the invariant in
+    // one place regardless.
     const gatewayHost = `127.0.0.1:${OPENCLAW_PORT}`;
-    const headers = { ...req.headers };
-    headers["host"] = gatewayHost;
-    headers["origin"] = `http://${gatewayHost}`;
-    delete headers["x-forwarded-for"];
-    delete headers["x-forwarded-proto"];
-    delete headers["x-forwarded-host"];
-    delete headers["x-forwarded-port"];
-    delete headers["x-real-ip"];
-    delete headers["forwarded"];
-    if (token) {
-      headers["authorization"] = `Bearer ${token}`;
-    }
+    const headers = buildGatewayHeaders({
+      reqHeaders: req.headers,
+      url: req.url,
+      gatewayHost,
+      token,
+    });
 
     let headerLines = "";
     for (const [key, value] of Object.entries(headers)) {

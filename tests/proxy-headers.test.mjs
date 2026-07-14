@@ -90,6 +90,9 @@ describe("buildGatewayHeaders: ordinary gateway routes", () => {
   test("overwrites a client-supplied Authorization (a stale Control UI token)", () => {
     const headers = build("/api/status", { authorization: "Bearer stale-token" });
     assert.equal(headers.Authorization, `Bearer ${GATEWAY_TOKEN}`);
+    // The stale lowercase key must not survive alongside the injected one — otherwise the
+    // object carries two tokens and which one reaches the gateway is left to case-folding.
+    assert.equal(headers.authorization, undefined);
   });
 
   test("makes the request look local (anti-CSRF host/origin check)", () => {

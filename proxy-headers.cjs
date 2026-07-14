@@ -72,6 +72,12 @@ function buildGatewayHeaders({ reqHeaders, url, gatewayHost, token }) {
   delete headers["forwarded"];
 
   if (token && !isHookPath(url)) {
+    // Node lowercases inbound header names, so the caller's own Authorization arrives as
+    // `authorization`. Drop it before setting the canonical `Authorization`, or the object
+    // carries BOTH and the gateway sees whichever the HTTP layer happens to keep. On the
+    // gateway routes that is the point — the injected token must be the only one — so make the
+    // object say exactly that rather than leaning on downstream case-folding.
+    delete headers["authorization"];
     headers["Authorization"] = `Bearer ${token}`;
   }
 
