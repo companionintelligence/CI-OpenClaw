@@ -23,6 +23,9 @@ const CI_MEMORY_PLUGIN_PATH =
   "/app/openclaw-context/plugins/companionintelligence";
 const CI_HUB_PLUGIN_ID = "ci-hub";
 const CI_HUB_PLUGIN_PATH = "/app/openclaw-context/plugins/ci-hub";
+// Treats the embeddings endpoint as an OpenAI-compatible /v1 server (which Ollama
+// serves) and, unlike the bundled remote providers, requires no API key.
+const MEMORY_EMBEDDING_PROVIDER = "openai-compatible";
 // Anti-CSWSH token for the setup terminal WebSocket. Browsers don't enforce the
 // same-origin policy on WebSocket upgrades, so without this any site could connect
 // to /api/terminal and hijack the onboarding PTY. We embed APP_SEED (per-user
@@ -125,10 +128,20 @@ function writeEnv(env) {
   fs.writeFileSync(ENV_FILE, lines.join("\n") + "\n", { mode: 0o600 });
 }
 
+// When we last wrote openclaw.json. warnIfConfigClobbered uses this as the cutoff
+// so it catches a quarantine by ANY openclaw invocation after our write, not just
+// one that happens inside the doctor call.
+let configWrittenAtMs = 0;
+// Quarantines already reported. startOpenclaw re-runs on every gateway exit, and a
+// reconcile that changes nothing leaves configWrittenAtMs at the previous write, so
+// without this the same historical snapshot is re-reported on every restart.
+const reportedClobbers = new Set();
+
 function writeConfig(config) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), {
     mode: 0o600,
   });
+  configWrittenAtMs = Date.now();
 }
 
 function ensureConfigDir() {
@@ -248,6 +261,24 @@ function readConfig() {
     }
   }
   return null;
+}
+
+// A config node we can safely read keys from and spread. Arrays and scalars are
+// not usable as config records: spreading a string yields index-keyed junk, and
+// assigning a property to a scalar silently no-ops in sloppy mode.
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// Walk to a nested config record, replacing any node that is not a usable record
+// along the way, and return the leaf. Record counterpart to ensureArrayPath.
+function ensureRecordPath(root, keys) {
+  let current = root;
+  for (const key of keys) {
+    if (!isPlainObject(current[key])) current[key] = {};
+    current = current[key];
+  }
+  return current;
 }
 
 function ensureArrayPath(root, keys) {
@@ -474,6 +505,71 @@ function ensureMemoryStoreToolAllowed(config) {
   return changed;
 }
 
+// The Hub injects EMBEDDINGS_MODEL (e.g. nomic-embed-text) as a managed key, but
+// OpenClaw has no env-var path for embeddings — memory search resolves its provider
+// from agents.defaults.memorySearch. Left unset, the provider falls back to its
+// "openai" default and semantic recall silently tries api.openai.com with a key we
+// don't have (memory_search then reports provider=openai model=text-embedding-3-small
+// while quietly returning nothing). "openai-compatible" points it at the appliance's
+// own Ollama /v1 instead, and needs no API key.
+// Trailing slashes are not meaningful in an embeddings base URL — OpenClaw strips
+// them itself (normalizeBaseUrl) — so compare URLs with them removed. Without this,
+// a config that merely spells the SAME endpoint with a trailing slash looks like a
+// different one, and the repoint check below would delete an operator's credential.
+function normalizeEmbeddingsBaseUrl(value) {
+  return typeof value === "string" ? value.trim().replace(/\/+$/, "") : "";
+}
+
+function ensureMemorySearchEmbeddings(config, env) {
+  const model = (env.EMBEDDINGS_MODEL || process.env.EMBEDDINGS_MODEL || "").trim();
+  if (!model) return false;
+
+  // resolveOllamaBaseUrl yields a native Ollama host (no /v1); tolerate an
+  // OLLAMA_HOST that already carries the suffix rather than emitting /v1/v1.
+  const ollamaBase = normalizeEmbeddingsBaseUrl(resolveOllamaBaseUrl(env));
+  const baseUrl = ollamaBase.endsWith("/v1") ? ollamaBase : `${ollamaBase}/v1`;
+
+  // Guard every node we spread or assign into: a hand-edited memorySearch that is
+  // a scalar or array would otherwise spread into index-keyed junk, producing the
+  // very kind of schema-invalid config that gets the whole file clobbered.
+  const defaults = ensureRecordPath(config, ["agents", "defaults"]);
+  const current = isPlainObject(defaults.memorySearch) ? defaults.memorySearch : {};
+  const currentRemote = isPlainObject(current.remote) ? current.remote : {};
+
+  // Are we moving embeddings to a different provider or endpoint than the config
+  // currently names? If so, any apiKey already in the remote block was issued for
+  // the OLD endpoint — remote.apiKey is OpenClaw's canonical secret target — and
+  // carrying it across would send a credential to a host it was never issued for.
+  // Drop it. A key the operator set for the endpoint we already point at is theirs
+  // and is left untouched.
+  const repointing =
+    current.provider !== MEMORY_EMBEDDING_PROVIDER ||
+    normalizeEmbeddingsBaseUrl(currentRemote.baseUrl) !== baseUrl;
+  const nextRemote = { ...currentRemote, baseUrl };
+  const droppedApiKey = repointing && "apiKey" in nextRemote;
+  if (droppedApiKey) delete nextRemote.apiKey;
+
+  const next = {
+    ...current,
+    provider: MEMORY_EMBEDDING_PROVIDER,
+    model,
+    remote: nextRemote,
+  };
+  if (JSON.stringify(defaults.memorySearch) === JSON.stringify(next)) return false;
+
+  defaults.memorySearch = next;
+  console.log(
+    `Patched config: memory search embeddings -> ${model} @ ${baseUrl}`,
+  );
+  if (droppedApiKey) {
+    // Never log the value, only that it is gone.
+    console.log(
+      "Patched config: dropped memory search remote.apiKey — it belonged to the previous embeddings endpoint",
+    );
+  }
+  return true;
+}
+
 function ensureOpenClawPlugin(config, pluginId, pluginPath, label, options = {}) {
   const enableEntry = options.enableEntry !== false;
 
@@ -647,7 +743,12 @@ function buildOllamaModelEntry(modelId, displayName, capabilities) {
     // models internally consistent).
     maxTokens: Math.min(4096, contextWindow),
     compat: { supportsTools: capabilities?.supportsTools === true },
-    ...(effCtx ? { options: { num_ctx: effCtx } } : {}),
+    // `params`, not `options`: OpenClaw's model-entry schema is strict, so an
+    // unrecognized key fails validation for the ENTIRE openclaw.json. Startup
+    // `doctor --repair` then quarantines the file and restores last-known-good,
+    // silently reverting anything else written in the same pass — including the
+    // memory-connect wiring (plugins.slots.memory, companionintelligence).
+    ...(effCtx ? { params: { num_ctx: effCtx } } : {}),
   };
 }
 
@@ -766,6 +867,12 @@ function isConfigured() {
 }
 
 async function reconcileConfig() {
+  // A quarantine is not confined to the doctor call — the gateway also rejects the
+  // config it reads at spawn, and the fresh-onboarding path skips doctor entirely.
+  // Report anything that appeared since our last write before reconciling again.
+  // No-op on first boot, when we have not written anything to attribute it to.
+  if (configWrittenAtMs) warnIfConfigClobbered(configWrittenAtMs);
+
   const config = readConfig();
   if (!config) return;
   const env = readEnv();
@@ -874,6 +981,9 @@ async function reconcileConfig() {
       changed = ensureMemoryStoreToolAllowed(config) || changed;
     }
   }
+
+  // Point semantic memory search at the appliance's local embeddings server.
+  changed = ensureMemorySearchEmbeddings(config, env) || changed;
 
   // Register Hub tools through OpenClaw's built-in MCP client (native
   // mcp.servers.ci-hub), gated on Hub MCP credentials.
@@ -1075,9 +1185,47 @@ async function reconcileConfig() {
   }
 }
 
+// OpenClaw silently quarantines an openclaw.json it considers invalid as
+// <name>.clobbered.<ts> and restores last-known-good — reverting, with no error on
+// any channel, everything reconcileConfig just wrote (model catalog, memory wiring,
+// gateway token). A single unrecognized key is enough to trigger it, so surface the
+// quarantine instead of letting the app come up silently misconfigured.
+function warnIfConfigClobbered(since) {
+  let clobbered;
+  try {
+    clobbered = fs
+      .readdirSync(CONFIG_DIR)
+      .filter((name) => name.startsWith("openclaw.json.clobbered."))
+      // OpenClaw rotates (unlinks) old snapshots once its cap is reached, so a name
+      // can vanish between readdir and stat. Drop those rather than let one ENOENT
+      // suppress the whole warning — the cap is hit precisely when clobbering is
+      // most frequent, which is exactly when we must not go quiet.
+      .filter((name) => !reportedClobbers.has(name))
+      .filter((name) => {
+        try {
+          return fs.statSync(path.join(CONFIG_DIR, name)).mtimeMs >= since;
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return; // Detection is best-effort; never let it break startup.
+  }
+  if (clobbered.length === 0) return;
+  for (const name of clobbered) reportedClobbers.add(name);
+  console.error(
+    `openclaw rejected openclaw.json and restored last-known-good: ${clobbered.join(", ")}. ` +
+      "The config we last wrote (model catalog, memory wiring) has been reverted — " +
+      "inspect the quarantined file for an unrecognized key.",
+  );
+}
+
 // Run before gateway start to catch migration issues or config problems that
 // readConfig()'s backup restore couldn't fix (e.g. schema changes across versions).
 async function runDoctor() {
+  // Anchor to our last config write when there is one: a quarantine can happen in
+  // any openclaw invocation that reads the file, not only inside this doctor call.
+  const since = configWrittenAtMs || Date.now();
   try {
     await execAsync("openclaw doctor --repair --yes --non-interactive", {
       env: buildChildEnv(),
@@ -1086,6 +1234,7 @@ async function runDoctor() {
   } catch (e) {
     console.error("openclaw doctor failed:", e.message);
   }
+  warnIfConfigClobbered(since);
 }
 
 function startOpenclaw({ repair = true } = {}) {

@@ -609,7 +609,7 @@ async function autoConfigureInference(api, hubUrl, apiKey, mcpClient) {
                   contextWindow,
                   // Output budget can't exceed the total context window.
                   maxTokens: Math.min(m.max_tokens ?? 8192, contextWindow),
-                  ...effCtx ? { options: { num_ctx: effCtx } } : {}
+                  ...effCtx ? { params: { num_ctx: effCtx } } : {}
                 };
               })
             }
