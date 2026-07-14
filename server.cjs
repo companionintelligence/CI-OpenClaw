@@ -488,7 +488,10 @@ function ensureMemorySearchEmbeddings(config, env) {
   const model = (env.EMBEDDINGS_MODEL || process.env.EMBEDDINGS_MODEL || "").trim();
   if (!model) return false;
 
-  const baseUrl = `${resolveOllamaBaseUrl(env)}/v1`;
+  // resolveOllamaBaseUrl yields a native Ollama host (no /v1); tolerate an
+  // OLLAMA_HOST that already carries the suffix rather than emitting /v1/v1.
+  const ollamaBase = resolveOllamaBaseUrl(env);
+  const baseUrl = ollamaBase.endsWith("/v1") ? ollamaBase : `${ollamaBase}/v1`;
   config.agents = config.agents || {};
   config.agents.defaults = config.agents.defaults || {};
   const current = config.agents.defaults.memorySearch || {};
