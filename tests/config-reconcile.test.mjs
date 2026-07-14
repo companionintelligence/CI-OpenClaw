@@ -1,0 +1,1321 @@
+// Tests for config-reconcile.cjs — the layer that writes openclaw.json.
+//
+// Why this file exists: OpenClaw's config schema is strict, so ONE unrecognized key
+// invalidates the entire file. `doctor --repair` then quarantines it and restores
+// last-known-good, silently reverting everything written in the same pass. A one-word
+// typo (`options` where the schema says `params`) once disabled CI-Memory on an
+// appliance with no error on any channel. Nothing in this repo could have caught it.
+//
+// Run: node --test    (from the repo root)
+
+import { test, describe, beforeEach, afterEach } from "node:test";
+import assert from "node:assert";
+import fs from "node:fs";
+import path from "node:path";
+
+import {
+  buildOllamaModelEntry,
+  canonicalHubMcpUrl,
+  hasCiServerCredentials,
+  hasHubMcpCredentials,
+  isEmbeddingModel,
+  isPlainObject,
+  ensureRecordPath,
+  ensureArrayPath,
+  removeArrayItem,
+  normalizeEmbeddingsBaseUrl,
+  makeDataDir,
+  makeReconciler,
+  withOllama,
+  assertNoIndexKeys,
+  readCfg,
+  cfgPath,
+  envPath,
+  rmDir,
+  CATALOG,
+  OLLAMA_DOWN,
+  PLUGIN_PATHS,
+} from "./helpers/reconcile-fixture.mjs";
+
+let dataDir;
+afterEach(() => {
+  rmDir(dataDir);
+  dataDir = undefined;
+});
+
+// ---------------------------------------------------------------------------
+// buildOllamaModelEntry — the model-entry shape and the context clamp.
+// ---------------------------------------------------------------------------
+describe("buildOllamaModelEntry", () => {
+  // THE motivating regression. `options: { num_ctx }` is not in OpenClaw's model
+  // schema; the unrecognized key invalidates the ENTIRE openclaw.json, doctor
+  // quarantines the file, and every other patch from the same pass — memory slot,
+  // plugin wiring, gateway token — is silently reverted. This is the tripwire.
+  test("puts num_ctx under params, never options", () => {
+    const entry = buildOllamaModelEntry(
+      "llama3.1:8b",
+      "Llama",
+      { supportsTools: true, contextLimit: 131072 },
+      8192,
+    );
+    assert.deepStrictEqual(entry.params, { num_ctx: 8192 });
+    assert.ok(!("options" in entry), "a model entry must never carry an `options` key");
+  });
+
+  // Generalizes the above: ANY unrecognized top-level key on a model entry is a
+  // whole-file risk, so the key set is pinned as a set. Adding one must be a
+  // deliberate edit here — and the schema gate then proves the new key is legal.
+  test("emits only the keys OpenClaw's model schema recognizes", () => {
+    const entry = buildOllamaModelEntry("m", "M", { contextLimit: 32000 }, 8192);
+    assert.deepStrictEqual(Object.keys(entry).sort(), [
+      "compat",
+      "contextWindow",
+      "cost",
+      "id",
+      "input",
+      "maxTokens",
+      "name",
+      "params",
+      "reasoning",
+    ]);
+  });
+
+  test("caps num_ctx at the model's own context window", () => {
+    // numCtx is sized for the Hub's big chat model; a 4k model would reject it.
+    const entry = buildOllamaModelEntry("llava:7b", "LLaVA", { contextLimit: 4096 }, 131072);
+    assert.strictEqual(entry.params.num_ctx, 4096);
+    assert.strictEqual(entry.contextWindow, 4096);
+  });
+
+  test("uses num_ctx verbatim when it fits inside the model window", () => {
+    const entry = buildOllamaModelEntry("llama3.1:8b", "L", { contextLimit: 131072 }, 16384);
+    assert.strictEqual(entry.params.num_ctx, 16384);
+    assert.strictEqual(entry.contextWindow, 16384);
+  });
+
+  test("falls back to the 32000 default window when the model limit is unknown", () => {
+    const entry = buildOllamaModelEntry("mystery", "M", {}, 131072);
+    assert.strictEqual(entry.params.num_ctx, 32000);
+    assert.strictEqual(entry.contextWindow, 32000);
+  });
+
+  test("omits params entirely when no num_ctx is configured", () => {
+    const entry = buildOllamaModelEntry("llama3.1:8b", "L", { contextLimit: 131072 }, null);
+    assert.ok(!("params" in entry), "no num_ctx means no params key at all");
+    assert.strictEqual(entry.contextWindow, 32000, "historical default");
+  });
+
+  test("clamps contextWindow to a small model window even with no num_ctx", () => {
+    const entry = buildOllamaModelEntry("llava:7b", "L", { contextLimit: 4096 }, null);
+    assert.strictEqual(entry.contextWindow, 4096);
+  });
+
+  test("maxTokens never exceeds contextWindow", () => {
+    const small = buildOllamaModelEntry("tiny", "T", { contextLimit: 1024 }, null);
+    assert.strictEqual(small.maxTokens, 1024);
+    const big = buildOllamaModelEntry("big", "B", { contextLimit: 131072 }, 65536);
+    assert.strictEqual(big.maxTokens, 4096);
+    for (const entry of [small, big]) {
+      assert.ok(entry.maxTokens <= entry.contextWindow);
+    }
+  });
+
+  test("maps ollama capabilities onto the entry", () => {
+    const tools = buildOllamaModelEntry("a", "A", { supportsTools: true }, null);
+    assert.strictEqual(tools.compat.supportsTools, true);
+
+    const thinking = buildOllamaModelEntry("b", "B", { reasoning: true }, null);
+    assert.strictEqual(thinking.reasoning, true);
+
+    const vision = buildOllamaModelEntry("c", "C", { vision: true }, null);
+    assert.deepStrictEqual(vision.input, ["text", "image"]);
+  });
+
+  test("defaults to text-only, tools-off when capabilities are missing entirely", () => {
+    const entry = buildOllamaModelEntry("x", "X", undefined, null);
+    assert.deepStrictEqual(entry.input, ["text"]);
+    assert.strictEqual(entry.compat.supportsTools, false);
+    assert.strictEqual(entry.reasoning, false);
+    assert.strictEqual(entry.name, "X");
+  });
+
+  test("falls back to the model id when no display name is given", () => {
+    assert.strictEqual(buildOllamaModelEntry("only-id", "", {}, null).name, "only-id");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pure helpers
+// ---------------------------------------------------------------------------
+describe("pure helpers", () => {
+  test("isPlainObject rejects arrays, scalars and null", () => {
+    assert.strictEqual(isPlainObject({}), true);
+    assert.strictEqual(isPlainObject([]), false);
+    assert.strictEqual(isPlainObject("s"), false);
+    assert.strictEqual(isPlainObject(0), false);
+    assert.strictEqual(isPlainObject(null), false);
+    assert.strictEqual(isPlainObject(undefined), false);
+  });
+
+  test("ensureRecordPath replaces unusable nodes on the way down", () => {
+    const root = { a: "scalar" };
+    const leaf = ensureRecordPath(root, ["a", "b"]);
+    leaf.x = 1;
+    assert.deepStrictEqual(root, { a: { b: { x: 1 } } });
+  });
+
+  test("ensureRecordPath preserves existing records", () => {
+    const root = { a: { keep: true } };
+    ensureRecordPath(root, ["a", "b"]);
+    assert.strictEqual(root.a.keep, true);
+  });
+
+  test("ensureArrayPath coerces the leaf to an array", () => {
+    const root = { a: { b: "not-an-array" } };
+    const arr = ensureArrayPath(root, ["a", "b"]);
+    arr.push(1);
+    assert.deepStrictEqual(root.a.b, [1]);
+  });
+
+  test("removeArrayItem removes every occurrence and reports whether it did", () => {
+    const items = ["a", "b", "a"];
+    assert.strictEqual(removeArrayItem(items, "a"), true);
+    assert.deepStrictEqual(items, ["b"]);
+    assert.strictEqual(removeArrayItem(items, "zzz"), false);
+  });
+
+  test("isEmbeddingModel matches embedding models, not chat models", () => {
+    assert.strictEqual(isEmbeddingModel("nomic-embed-text"), true);
+    assert.strictEqual(isEmbeddingModel("mxbai-embed-large"), true);
+    assert.strictEqual(isEmbeddingModel("llama3.1:8b"), false);
+    assert.strictEqual(isEmbeddingModel(""), false);
+    assert.strictEqual(isEmbeddingModel(undefined), false);
+  });
+
+  test("normalizeEmbeddingsBaseUrl strips trailing slashes and tolerates non-strings", () => {
+    assert.strictEqual(normalizeEmbeddingsBaseUrl("http://x:1/v1//"), "http://x:1/v1");
+    assert.strictEqual(normalizeEmbeddingsBaseUrl("  http://x:1  "), "http://x:1");
+    assert.strictEqual(normalizeEmbeddingsBaseUrl(undefined), "");
+    assert.strictEqual(normalizeEmbeddingsBaseUrl(42), "");
+  });
+
+  test("hasCiServerCredentials needs url + token, and honours the literal string 'false'", () => {
+    const creds = { CI_SERVER_URL: "http://ci", CI_SERVER_TOKEN: "t" };
+    assert.strictEqual(hasCiServerCredentials(creds), true);
+    assert.strictEqual(hasCiServerCredentials({ ...creds, CI_SERVER_ENABLED: "false" }), false);
+    // These arrive from the environment as strings; only the literal "false" disables.
+    assert.strictEqual(hasCiServerCredentials({ ...creds, CI_SERVER_ENABLED: "true" }), true);
+    assert.strictEqual(hasCiServerCredentials({ CI_SERVER_URL: "http://ci" }), false);
+    assert.strictEqual(hasCiServerCredentials({}), false);
+  });
+
+  test("hasHubMcpCredentials accepts either base url and honours HUB_MCP_ENABLED=false", () => {
+    assert.strictEqual(hasHubMcpCredentials({ HUB_URL: "https://h", HUB_MCP_API_KEY: "k" }), true);
+    assert.strictEqual(hasHubMcpCredentials({ HUB_MCP_URL: "https://h", HUB_MCP_API_KEY: "k" }), true);
+    assert.strictEqual(
+      hasHubMcpCredentials({ HUB_URL: "https://h", HUB_MCP_API_KEY: "k", HUB_MCP_ENABLED: "false" }),
+      false,
+    );
+    assert.strictEqual(hasHubMcpCredentials({ HUB_URL: "https://h" }), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// canonicalHubMcpUrl
+// ---------------------------------------------------------------------------
+describe("canonicalHubMcpUrl", () => {
+  test("derives HUB_URL + /api/mcp", () => {
+    assert.strictEqual(canonicalHubMcpUrl({ HUB_URL: "https://hub.x" }), "https://hub.x/api/mcp");
+  });
+
+  test("prefers HUB_MCP_URL over HUB_URL", () => {
+    assert.strictEqual(
+      canonicalHubMcpUrl({ HUB_URL: "https://a", HUB_MCP_URL: "https://b/api/mcp" }),
+      "https://b/api/mcp",
+    );
+  });
+
+  // CI-Hub removed the /sse route; a legacy injected URL must be normalized DOWN, not
+  // have /api/mcp appended to it.
+  test("normalizes a legacy /api/mcp/sse suffix down to /api/mcp", () => {
+    assert.strictEqual(
+      canonicalHubMcpUrl({ HUB_MCP_URL: "https://hub.x/api/mcp/sse" }),
+      "https://hub.x/api/mcp",
+    );
+  });
+
+  test("does not double an existing /api/mcp suffix", () => {
+    assert.strictEqual(
+      canonicalHubMcpUrl({ HUB_MCP_URL: "https://hub.x/api/mcp" }),
+      "https://hub.x/api/mcp",
+    );
+  });
+
+  test("appends /api/mcp to a bare host", () => {
+    assert.strictEqual(canonicalHubMcpUrl({ HUB_MCP_URL: "https://hub.x" }), "https://hub.x/api/mcp");
+  });
+
+  test("strips trailing slashes before deciding", () => {
+    assert.strictEqual(canonicalHubMcpUrl({ HUB_URL: "https://hub.x///" }), "https://hub.x/api/mcp");
+    assert.strictEqual(
+      canonicalHubMcpUrl({ HUB_MCP_URL: "https://hub.x/api/mcp/" }),
+      "https://hub.x/api/mcp",
+    );
+  });
+
+  test("returns an empty string when no base url is configured", () => {
+    assert.strictEqual(canonicalHubMcpUrl({}), "");
+    assert.strictEqual(canonicalHubMcpUrl({ HUB_URL: "   " }), "");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureHubMcpServer
+// ---------------------------------------------------------------------------
+describe("ensureHubMcpServer", () => {
+  const HUB = { HUB_URL: "https://hub.x", HUB_MCP_API_KEY: "secret-key" };
+  let ctx;
+  beforeEach(() => {
+    dataDir = makeDataDir();
+    ctx = makeReconciler(dataDir);
+  });
+
+  test("registers ci-hub with the streamable-http transport and timeouts", () => {
+    const config = {};
+    assert.strictEqual(ctx.cfg.ensureHubMcpServer(config, HUB), true);
+    assert.deepStrictEqual(config.mcp.servers["ci-hub"], {
+      url: "https://hub.x/api/mcp",
+      transport: "streamable-http",
+      headers: { Authorization: "Bearer ${HUB_MCP_API_KEY}" },
+      timeout: 180,
+      connectTimeout: 60,
+    });
+  });
+
+  // The Bearer value is an env TEMPLATE that OpenClaw resolves at activation. The raw
+  // key must never reach openclaw.json — that file is world-readable inside the app.
+  test("never persists the raw API key, only the env template", () => {
+    const config = {};
+    ctx.cfg.ensureHubMcpServer(config, HUB);
+    assert.ok(
+      !JSON.stringify(config).includes("secret-key"),
+      "the raw HUB_MCP_API_KEY must not be serialized into openclaw.json",
+    );
+  });
+
+  test("is idempotent: a second call reports no change", () => {
+    const config = {};
+    assert.strictEqual(ctx.cfg.ensureHubMcpServer(config, HUB), true);
+    assert.strictEqual(ctx.cfg.ensureHubMcpServer(config, HUB), false);
+  });
+
+  test("rewrites the entry when the Hub URL changes", () => {
+    const config = {};
+    ctx.cfg.ensureHubMcpServer(config, HUB);
+    assert.strictEqual(
+      ctx.cfg.ensureHubMcpServer(config, { ...HUB, HUB_URL: "https://moved.x" }),
+      true,
+    );
+    assert.strictEqual(config.mcp.servers["ci-hub"].url, "https://moved.x/api/mcp");
+  });
+
+  test("removes a stale entry when the credentials disappear", () => {
+    const config = {};
+    ctx.cfg.ensureHubMcpServer(config, HUB);
+    assert.strictEqual(ctx.cfg.ensureHubMcpServer(config, {}), true);
+    assert.strictEqual(config.mcp.servers["ci-hub"], undefined);
+  });
+
+  test("removes the entry when HUB_MCP_ENABLED=false", () => {
+    const config = {};
+    ctx.cfg.ensureHubMcpServer(config, HUB);
+    assert.strictEqual(
+      ctx.cfg.ensureHubMcpServer(config, { ...HUB, HUB_MCP_ENABLED: "false" }),
+      true,
+    );
+    assert.strictEqual(config.mcp.servers["ci-hub"], undefined);
+  });
+
+  test("reports no change when disabled and there was nothing to remove", () => {
+    assert.strictEqual(ctx.cfg.ensureHubMcpServer({}, {}), false);
+  });
+
+  test("preserves other MCP servers", () => {
+    const config = { mcp: { servers: { other: { url: "https://other" } } } };
+    ctx.cfg.ensureHubMcpServer(config, HUB);
+    assert.deepStrictEqual(config.mcp.servers.other, { url: "https://other" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureMemorySearchEmbeddings — including the stale-credential drop.
+// ---------------------------------------------------------------------------
+describe("ensureMemorySearchEmbeddings", () => {
+  let ctx;
+  beforeEach(() => {
+    dataDir = makeDataDir();
+    ctx = makeReconciler(dataDir);
+  });
+
+  test("no-ops and reports no change without EMBEDDINGS_MODEL", () => {
+    const config = {};
+    assert.strictEqual(ctx.cfg.ensureMemorySearchEmbeddings(config, {}), false);
+    assert.deepStrictEqual(config, {}, "nothing may be written without a model");
+  });
+
+  test("points memory search at the local Ollama /v1 endpoint", () => {
+    const config = {};
+    const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OLLAMA_HOST: "http://ollama:11434" };
+    assert.strictEqual(ctx.cfg.ensureMemorySearchEmbeddings(config, env), true);
+    assert.deepStrictEqual(config.agents.defaults.memorySearch, {
+      provider: "openai-compatible",
+      model: "nomic-embed-text",
+      remote: { baseUrl: "http://ollama:11434/v1" },
+    });
+  });
+
+  test("is idempotent: the second call reports no change", () => {
+    const config = {};
+    const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OLLAMA_HOST: "http://ollama:11434" };
+    assert.strictEqual(ctx.cfg.ensureMemorySearchEmbeddings(config, env), true);
+    const snapshot = JSON.stringify(config);
+    assert.strictEqual(ctx.cfg.ensureMemorySearchEmbeddings(config, env), false);
+    assert.strictEqual(JSON.stringify(config), snapshot, "node must be byte-identical");
+  });
+
+  test("does not append a second /v1 when OLLAMA_HOST already carries one", () => {
+    const config = {};
+    const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OLLAMA_HOST: "http://ollama:11434/v1" };
+    ctx.cfg.ensureMemorySearchEmbeddings(config, env);
+    assert.strictEqual(config.agents.defaults.memorySearch.remote.baseUrl, "http://ollama:11434/v1");
+  });
+
+  test("derives the base url from OPENAI_API_BASE when OLLAMA_HOST is unset", () => {
+    const config = {};
+    const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OPENAI_API_BASE: "http://ollama:11434/v1" };
+    ctx.cfg.ensureMemorySearchEmbeddings(config, env);
+    assert.strictEqual(config.agents.defaults.memorySearch.remote.baseUrl, "http://ollama:11434/v1");
+  });
+
+  // An apiKey in the remote block was issued FOR the endpoint the config names. If we
+  // repoint embeddings elsewhere, carrying it across would send a credential to a host
+  // it was never issued for.
+  test("drops a stale remote.apiKey when the baseUrl is repointed", () => {
+    const config = {
+      agents: {
+        defaults: {
+          memorySearch: {
+            provider: "openai-compatible",
+            remote: { baseUrl: "http://old:11434/v1", apiKey: "key-for-the-OLD-host" },
+          },
+        },
+      },
+    };
+    const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OLLAMA_HOST: "http://new:11434" };
+    assert.strictEqual(ctx.cfg.ensureMemorySearchEmbeddings(config, env), true);
+    const remote = config.agents.defaults.memorySearch.remote;
+    assert.strictEqual(remote.baseUrl, "http://new:11434/v1");
+    assert.ok(!("apiKey" in remote), "a credential issued for the old host must not follow it");
+  });
+
+  test("drops a stale remote.apiKey when the provider changes", () => {
+    const config = {
+      agents: {
+        defaults: {
+          memorySearch: {
+            provider: "openai",
+            remote: { baseUrl: "http://ollama:11434/v1", apiKey: "openai-key" },
+          },
+        },
+      },
+    };
+    const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OLLAMA_HOST: "http://ollama:11434" };
+    assert.strictEqual(ctx.cfg.ensureMemorySearchEmbeddings(config, env), true);
+    assert.ok(!("apiKey" in config.agents.defaults.memorySearch.remote));
+  });
+
+  test("preserves remote.apiKey when provider and endpoint are unchanged", () => {
+    const config = {
+      agents: {
+        defaults: {
+          memorySearch: {
+            provider: "openai-compatible",
+            model: "nomic-embed-text",
+            remote: { baseUrl: "http://ollama:11434/v1", apiKey: "operator-key" },
+          },
+        },
+      },
+    };
+    const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OLLAMA_HOST: "http://ollama:11434" };
+    assert.strictEqual(ctx.cfg.ensureMemorySearchEmbeddings(config, env), false);
+    assert.strictEqual(config.agents.defaults.memorySearch.remote.apiKey, "operator-key");
+  });
+
+  // A trailing slash spells the SAME endpoint. Treating it as a repoint would delete an
+  // operator's credential for a host we are not actually moving away from.
+  test("treats a trailing slash as the same endpoint: no rewrite, no key drop", () => {
+    const config = {
+      agents: {
+        defaults: {
+          memorySearch: {
+            provider: "openai-compatible",
+            model: "nomic-embed-text",
+            remote: { baseUrl: "http://ollama:11434/v1", apiKey: "operator-key" },
+          },
+        },
+      },
+    };
+    const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OLLAMA_HOST: "http://ollama:11434/" };
+    assert.strictEqual(ctx.cfg.ensureMemorySearchEmbeddings(config, env), false);
+    assert.strictEqual(config.agents.defaults.memorySearch.remote.apiKey, "operator-key");
+  });
+
+  test("never logs the dropped key's value", () => {
+    const config = {
+      agents: {
+        defaults: {
+          memorySearch: {
+            provider: "openai-compatible",
+            remote: { baseUrl: "http://old:11434/v1", apiKey: "super-secret" },
+          },
+        },
+      },
+    };
+    ctx.cfg.ensureMemorySearchEmbeddings(config, {
+      EMBEDDINGS_MODEL: "nomic-embed-text",
+      OLLAMA_HOST: "http://new:11434",
+    });
+    assert.ok(
+      !ctx.logs.join("\n").includes("super-secret"),
+      "the dropped credential must never be logged",
+    );
+    assert.ok(ctx.logs.some((l) => l.includes("dropped memory search remote.apiKey")));
+  });
+
+  test("preserves unrelated memorySearch keys while repointing", () => {
+    const config = { agents: { defaults: { memorySearch: { topK: 7 } } } };
+    ctx.cfg.ensureMemorySearchEmbeddings(config, {
+      EMBEDDINGS_MODEL: "nomic-embed-text",
+      OLLAMA_HOST: "http://ollama:11434",
+    });
+    assert.strictEqual(config.agents.defaults.memorySearch.topK, 7);
+  });
+
+  test("reads EMBEDDINGS_MODEL from the container env when .env lacks it", () => {
+    const withContainer = makeReconciler(dataDir, {
+      containerEnv: { EMBEDDINGS_MODEL: "nomic-embed-text" },
+    });
+    const config = {};
+    assert.strictEqual(
+      withContainer.cfg.ensureMemorySearchEmbeddings(config, { OLLAMA_HOST: "http://o:1" }),
+      true,
+    );
+    assert.strictEqual(config.agents.defaults.memorySearch.model, "nomic-embed-text");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureOpenClawPlugin
+// ---------------------------------------------------------------------------
+describe("ensureOpenClawPlugin", () => {
+  const RUNTIME = PLUGIN_PATHS.ciRuntime;
+  let ctx;
+  beforeEach(() => {
+    dataDir = makeDataDir();
+    ctx = makeReconciler(dataDir);
+  });
+
+  // Writing a load path for a directory that does not exist would make OpenClaw reject
+  // the whole config — worse than doing nothing.
+  test("warns and mutates nothing when the plugin directory is missing", () => {
+    const config = {};
+    const missing = path.join(dataDir, "does-not-exist");
+    assert.strictEqual(ctx.cfg.ensureOpenClawPlugin(config, "x", missing, "X"), false);
+    assert.deepStrictEqual(config, {});
+    assert.ok(ctx.logs.some((l) => l.includes("not found")));
+  });
+
+  test("enables plugins, registers the load path and enables the entry", () => {
+    const config = {};
+    assert.strictEqual(ctx.cfg.ensureOpenClawPlugin(config, "ci-runtime", RUNTIME, "CI runtime"), true);
+    assert.strictEqual(config.plugins.enabled, true);
+    assert.deepStrictEqual(config.plugins.load.paths, [RUNTIME]);
+    assert.strictEqual(config.plugins.entries["ci-runtime"].enabled, true);
+  });
+
+  test("is idempotent and does not duplicate the load path", () => {
+    const config = {};
+    ctx.cfg.ensureOpenClawPlugin(config, "ci-runtime", RUNTIME, "CI runtime");
+    assert.strictEqual(ctx.cfg.ensureOpenClawPlugin(config, "ci-runtime", RUNTIME, "CI runtime"), false);
+    assert.deepStrictEqual(config.plugins.load.paths, [RUNTIME]);
+  });
+
+  test("removes the plugin from an existing deny list", () => {
+    const config = { plugins: { deny: ["ci-runtime", "other"] } };
+    ctx.cfg.ensureOpenClawPlugin(config, "ci-runtime", RUNTIME, "CI runtime");
+    assert.deepStrictEqual(config.plugins.deny, ["other"]);
+  });
+
+  test("adds the plugin to a NON-EMPTY allow list", () => {
+    const config = { plugins: { allow: ["other"] } };
+    ctx.cfg.ensureOpenClawPlugin(config, "ci-runtime", RUNTIME, "CI runtime");
+    assert.deepStrictEqual(config.plugins.allow, ["other", "ci-runtime"]);
+  });
+
+  // An empty allow list means "allow everything". Appending to it would silently turn it
+  // into an exclusive allowlist of one and deny every other plugin.
+  test("leaves an EMPTY allow list alone", () => {
+    const config = { plugins: { allow: [] } };
+    ctx.cfg.ensureOpenClawPlugin(config, "ci-runtime", RUNTIME, "CI runtime");
+    assert.deepStrictEqual(config.plugins.allow, []);
+  });
+
+  test("with enableEntry:false registers the path but disables the entry", () => {
+    const config = {};
+    ctx.cfg.ensureOpenClawPlugin(config, "ci-runtime", RUNTIME, "CI runtime", { enableEntry: false });
+    assert.deepStrictEqual(config.plugins.load.paths, [RUNTIME]);
+    assert.strictEqual(config.plugins.entries["ci-runtime"].enabled, false);
+  });
+
+  test("with enableEntry:false does not touch deny/allow", () => {
+    const config = { plugins: { deny: ["ci-runtime"], allow: ["other"] } };
+    ctx.cfg.ensureOpenClawPlugin(config, "ci-runtime", RUNTIME, "CI runtime", { enableEntry: false });
+    assert.deepStrictEqual(config.plugins.deny, ["ci-runtime"]);
+    assert.deepStrictEqual(config.plugins.allow, ["other"]);
+  });
+
+  test("preserves unrelated keys on an existing plugin entry", () => {
+    const config = { plugins: { entries: { "ci-runtime": { custom: 1 } } } };
+    ctx.cfg.ensureOpenClawPlugin(config, "ci-runtime", RUNTIME, "CI runtime");
+    assert.strictEqual(config.plugins.entries["ci-runtime"].custom, 1);
+    assert.strictEqual(config.plugins.entries["ci-runtime"].enabled, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Memory wiring
+// ---------------------------------------------------------------------------
+describe("memory wiring", () => {
+  let ctx;
+  beforeEach(() => {
+    dataDir = makeDataDir();
+    ctx = makeReconciler(dataDir);
+  });
+
+  test("disableBundledSessionMemoryHook turns the bundled hook off", () => {
+    const config = {};
+    assert.strictEqual(ctx.cfg.disableBundledSessionMemoryHook(config), true);
+    assert.strictEqual(config.hooks.internal.entries["session-memory"].enabled, false);
+    assert.strictEqual(ctx.cfg.disableBundledSessionMemoryHook(config), false);
+  });
+
+  test("disableBundledSessionMemoryHook preserves other hook entries", () => {
+    const config = { hooks: { internal: { entries: { other: { enabled: true } } } } };
+    ctx.cfg.disableBundledSessionMemoryHook(config);
+    assert.deepStrictEqual(config.hooks.internal.entries.other, { enabled: true });
+  });
+
+  test("ensureMemoryConversationAccess opts the CI entry into conversation hooks", () => {
+    const config = { plugins: { entries: {} } };
+    assert.strictEqual(ctx.cfg.ensureMemoryConversationAccess(config), true);
+    assert.strictEqual(
+      config.plugins.entries.companionintelligence.hooks.allowConversationAccess,
+      true,
+    );
+    assert.strictEqual(ctx.cfg.ensureMemoryConversationAccess(config), false);
+  });
+
+  test("ensureMemoryConversationAccess preserves other keys on the entry", () => {
+    const config = { plugins: { entries: { companionintelligence: { enabled: true } } } };
+    ctx.cfg.ensureMemoryConversationAccess(config);
+    assert.strictEqual(config.plugins.entries.companionintelligence.enabled, true);
+  });
+
+  test("ensureMemoryStoreToolAllowed adds memory_store to alsoAllow", () => {
+    const config = {};
+    assert.strictEqual(ctx.cfg.ensureMemoryStoreToolAllowed(config), true);
+    assert.deepStrictEqual(config.tools.alsoAllow, ["memory_store"]);
+    assert.strictEqual(ctx.cfg.ensureMemoryStoreToolAllowed(config), false);
+  });
+
+  // tools.allow is an EXCLUSIVE allowlist; inventing one would deny every other tool.
+  test("ensureMemoryStoreToolAllowed does not invent a tools.allow list", () => {
+    const config = {};
+    ctx.cfg.ensureMemoryStoreToolAllowed(config);
+    assert.strictEqual(config.tools.allow, undefined);
+  });
+
+  test("ensureMemoryStoreToolAllowed extends an allow list the operator already keeps", () => {
+    const config = { tools: { allow: ["read"] } };
+    ctx.cfg.ensureMemoryStoreToolAllowed(config);
+    assert.deepStrictEqual(config.tools.allow, ["read", "memory_store"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// env + config I/O
+// ---------------------------------------------------------------------------
+describe("env + config IO", () => {
+  test("readEnv/writeEnv round-trip KEY=VALUE pairs", () => {
+    dataDir = makeDataDir();
+    const { cfg } = makeReconciler(dataDir);
+    cfg.writeEnv({ FOO: "bar", NUM: "1" });
+    const env = cfg.readEnv();
+    assert.strictEqual(env.FOO, "bar");
+    assert.strictEqual(env.NUM, "1");
+  });
+
+  test("readEnv ignores comments and blank lines", () => {
+    dataDir = makeDataDir({ env: {} });
+    fs.writeFileSync(envPath(dataDir), "# a comment\n\nFOO=bar\nnot a pair\n");
+    const { cfg } = makeReconciler(dataDir);
+    assert.deepStrictEqual(cfg.readEnv(), { FOO: "bar" });
+  });
+
+  test("readEnv keeps '=' characters inside a value", () => {
+    dataDir = makeDataDir();
+    fs.writeFileSync(envPath(dataDir), "TOKEN=a=b=c\n");
+    assert.strictEqual(makeReconciler(dataDir).cfg.readEnv().TOKEN, "a=b=c");
+  });
+
+  test("readEnv returns {} when .env is absent", () => {
+    dataDir = makeDataDir();
+    assert.deepStrictEqual(makeReconciler(dataDir).cfg.readEnv(), {});
+  });
+
+  test("writeEnv drops empty values and writes 0600", () => {
+    dataDir = makeDataDir();
+    const { cfg } = makeReconciler(dataDir);
+    cfg.writeEnv({ KEEP: "yes", DROP: "" });
+    const raw = fs.readFileSync(envPath(dataDir), "utf8");
+    assert.ok(raw.includes("KEEP=yes"));
+    assert.ok(!raw.includes("DROP"), "an empty value must not be written");
+    assert.strictEqual(fs.statSync(envPath(dataDir)).mode & 0o777, 0o600);
+  });
+
+  test("writeConfig writes pretty JSON at 0600 and stamps the write", () => {
+    dataDir = makeDataDir();
+    const { cfg } = makeReconciler(dataDir);
+    assert.strictEqual(cfg.configWrittenAtMs, 0);
+    cfg.writeConfig({ a: 1 });
+    assert.ok(cfg.configWrittenAtMs > 0, "the write must be stamped for clobber detection");
+    assert.strictEqual(fs.readFileSync(cfgPath(dataDir), "utf8"), '{\n  "a": 1\n}');
+    assert.strictEqual(fs.statSync(cfgPath(dataDir)).mode & 0o777, 0o600);
+  });
+
+  // writeFileSync's `mode` applies only when it CREATES the file. openclaw.json and
+  // .env are normally created before we ever write them (by `openclaw onboard` or the
+  // bootstrap scripts), so without an explicit chmod these files — which hold the
+  // gateway auth token and the provider API keys — keep their creator's mode.
+  test("writeConfig tightens permissions on a file it did not create", () => {
+    dataDir = makeDataDir();
+    fs.writeFileSync(cfgPath(dataDir), "{}", { mode: 0o644 });
+    fs.chmodSync(cfgPath(dataDir), 0o644);
+    makeReconciler(dataDir).cfg.writeConfig({ gateway: { auth: { token: "secret" } } });
+    assert.strictEqual(
+      fs.statSync(cfgPath(dataDir)).mode & 0o777,
+      0o600,
+      "a pre-existing openclaw.json must not stay world-readable — it holds the gateway token",
+    );
+  });
+
+  test("writeEnv tightens permissions on a file it did not create", () => {
+    dataDir = makeDataDir();
+    fs.writeFileSync(envPath(dataDir), "OLD=1\n", { mode: 0o644 });
+    fs.chmodSync(envPath(dataDir), 0o644);
+    makeReconciler(dataDir).cfg.writeEnv({ ANTHROPIC_API_KEY: "secret" });
+    assert.strictEqual(fs.statSync(envPath(dataDir)).mode & 0o777, 0o600);
+  });
+
+  // The clobber cutoff is compared against snapshot mtimeMs, so the stamp must come
+  // from the same clock: Date.now() is whole-millisecond and can round UP, so a
+  // quarantine written just after us could carry a lower fractional mtime and be missed.
+  test("writeConfig stamps from the file's own mtime, not Date.now()", () => {
+    dataDir = makeDataDir();
+    const { cfg } = makeReconciler(dataDir);
+    cfg.writeConfig({ a: 1 });
+    assert.strictEqual(
+      cfg.configWrittenAtMs,
+      fs.statSync(cfgPath(dataDir)).mtimeMs,
+      "the cutoff and the snapshot mtimes it is compared against must share a clock",
+    );
+  });
+
+  test("readConfig restores from the .bak when openclaw.json is corrupt", () => {
+    dataDir = makeDataDir();
+    fs.writeFileSync(cfgPath(dataDir), "{ this is not json");
+    fs.writeFileSync(cfgPath(dataDir) + ".bak", '{"recovered": true}');
+    assert.deepStrictEqual(makeReconciler(dataDir).cfg.readConfig(), { recovered: true });
+  });
+
+  test("readConfig returns null when both the file and the backup are gone", () => {
+    dataDir = makeDataDir({ config: null });
+    assert.strictEqual(makeReconciler(dataDir).cfg.readConfig(), null);
+  });
+
+  test("getGatewayToken prefers .env, then the container env, then the config", () => {
+    dataDir = makeDataDir({
+      config: { gateway: { auth: { token: "from-config" } } },
+      env: { OPENCLAW_GATEWAY_TOKEN: "from-dotenv" },
+    });
+    assert.strictEqual(makeReconciler(dataDir).cfg.getGatewayToken(), "from-dotenv");
+
+    dataDir = makeDataDir({ config: { gateway: { auth: { token: "from-config" } } } });
+    assert.strictEqual(makeReconciler(dataDir).cfg.getGatewayToken(), "from-config");
+    const withContainer = makeReconciler(dataDir, {
+      containerEnv: { OPENCLAW_GATEWAY_TOKEN: "from-container" },
+    });
+    assert.strictEqual(withContainer.cfg.getGatewayToken(), "from-container");
+  });
+
+  test("getGatewayToken returns null when nothing has one", () => {
+    dataDir = makeDataDir();
+    assert.strictEqual(makeReconciler(dataDir).cfg.getGatewayToken(), null);
+  });
+
+  test("isConfigured is true once the wizard has run", () => {
+    dataDir = makeDataDir({ config: { wizard: { done: true } } });
+    assert.strictEqual(makeReconciler(dataDir).cfg.isConfigured(), true);
+  });
+
+  test("isConfigured falls back to a provider key in .env or the container env", () => {
+    dataDir = makeDataDir({ env: { ANTHROPIC_API_KEY: "k" } });
+    assert.strictEqual(makeReconciler(dataDir).cfg.isConfigured(), true);
+
+    dataDir = makeDataDir();
+    assert.strictEqual(makeReconciler(dataDir).cfg.isConfigured(), false);
+    const withContainer = makeReconciler(dataDir, { containerEnv: { OPENROUTER_API_KEY: "k" } });
+    assert.strictEqual(withContainer.cfg.isConfigured(), true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Resolvers — note the env precedence traps.
+// ---------------------------------------------------------------------------
+describe("resolvers", () => {
+  let ctx;
+  beforeEach(() => {
+    dataDir = makeDataDir();
+    ctx = makeReconciler(dataDir);
+  });
+
+  test("resolveOllamaBaseUrl prefers OLLAMA_HOST and strips a trailing slash", () => {
+    assert.strictEqual(ctx.cfg.resolveOllamaBaseUrl({ OLLAMA_HOST: "http://o:11434/" }), "http://o:11434");
+  });
+
+  test("resolveOllamaBaseUrl derives the native host from OPENAI_API_BASE by dropping /v1", () => {
+    assert.strictEqual(
+      ctx.cfg.resolveOllamaBaseUrl({ OPENAI_API_BASE: "http://o:11434/v1" }),
+      "http://o:11434",
+    );
+  });
+
+  test("resolveOllamaBaseUrl falls back to host.docker.internal", () => {
+    assert.strictEqual(ctx.cfg.resolveOllamaBaseUrl({}), "http://host.docker.internal:11434");
+  });
+
+  test("resolveOllamaBaseUrl lets .env win over the container env", () => {
+    const withContainer = makeReconciler(dataDir, {
+      containerEnv: { OLLAMA_HOST: "http://from-container:11434" },
+    });
+    assert.strictEqual(
+      withContainer.cfg.resolveOllamaBaseUrl({ OLLAMA_HOST: "http://from-dotenv:11434" }),
+      "http://from-dotenv:11434",
+    );
+  });
+
+  test("resolveInferenceApiKey prefers OPENAI, then OLLAMA, then the 'ollama' placeholder", () => {
+    assert.strictEqual(ctx.cfg.resolveInferenceApiKey({ OPENAI_API_KEY: "a", OLLAMA_API_KEY: "b" }), "a");
+    assert.strictEqual(ctx.cfg.resolveInferenceApiKey({ OLLAMA_API_KEY: "b" }), "b");
+    assert.strictEqual(ctx.cfg.resolveInferenceApiKey({}), "ollama");
+  });
+
+  // The precedence INTERLEAVES the two sources across two keys: .env OPENAI, container
+  // OPENAI, .env OLLAMA, container OLLAMA. An empty-string .env value (readEnv's regex
+  // captures `(.*)`, and bootstrap-from-hub.sh writes the Hub's response body straight
+  // into .env) must therefore fall through to the CONTAINER's OPENAI key — not to the
+  // .env OLLAMA key. Collapsing the two sources into one merged record breaks exactly this.
+  test("resolveInferenceApiKey: an empty .env OPENAI key falls through to the container's OPENAI key", () => {
+    const withContainer = makeReconciler(dataDir, {
+      containerEnv: { OPENAI_API_KEY: "container-openai" },
+    });
+    assert.strictEqual(
+      withContainer.cfg.resolveInferenceApiKey({ OPENAI_API_KEY: "", OLLAMA_API_KEY: "dotenv-ollama" }),
+      "container-openai",
+    );
+  });
+
+  test("resolveHubNumCtx reads CI_LLM_NUM_CTX, container first", () => {
+    const withContainer = makeReconciler(dataDir, { containerEnv: { CI_LLM_NUM_CTX: "8192" } });
+    assert.strictEqual(withContainer.cfg.resolveHubNumCtx(), 8192);
+  });
+
+  test("resolveHubNumCtx falls back to .env", () => {
+    dataDir = makeDataDir({ env: { CI_LLM_NUM_CTX: "4096" } });
+    assert.strictEqual(makeReconciler(dataDir).cfg.resolveHubNumCtx(), 4096);
+  });
+
+  test("resolveHubNumCtx rejects zero, negative and non-numeric values", () => {
+    for (const raw of ["0", "-1", "abc", ""]) {
+      dataDir = makeDataDir({ env: { CI_LLM_NUM_CTX: raw } });
+      assert.strictEqual(makeReconciler(dataDir).cfg.resolveHubNumCtx(), null, `for ${JSON.stringify(raw)}`);
+      rmDir(dataDir);
+    }
+    dataDir = undefined;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// discoverOllamaModels — against a real stub Ollama.
+// ---------------------------------------------------------------------------
+describe("discoverOllamaModels", () => {
+  test("discovers chat models and skips embedding models", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir();
+      const { cfg } = makeReconciler(dataDir);
+      const { models } = await cfg.discoverOllamaModels(baseUrl, "");
+      const ids = models.map((m) => m.id);
+      assert.ok(ids.includes("llama3.1:8b"));
+      assert.ok(!ids.includes("nomic-embed-text"), "embedding models must not enter the chat catalog");
+    });
+  });
+
+  test("prepends an 'auto' alias for DEFAULT_MODEL and inherits its capabilities", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir();
+      const { cfg } = makeReconciler(dataDir);
+      const { models, defaultModelAvailable } = await cfg.discoverOllamaModels(baseUrl, "qwen3:4b");
+      assert.strictEqual(models[0].id, "auto");
+      assert.strictEqual(models[0].name, "Hub Auto (qwen3:4b)");
+      assert.strictEqual(models[0].reasoning, true, "auto inherits qwen3's thinking capability");
+      assert.strictEqual(defaultModelAvailable, "qwen3:4b");
+    });
+  });
+
+  test("auto falls back to the first model when DEFAULT_MODEL is not installed", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir();
+      const { cfg } = makeReconciler(dataDir);
+      const { models, defaultModelAvailable } = await cfg.discoverOllamaModels(baseUrl, "not-installed");
+      assert.strictEqual(models[0].id, "auto");
+      assert.strictEqual(defaultModelAvailable, null);
+    });
+  });
+
+  test("caps the auto entry at its target model's window", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({ env: { CI_LLM_NUM_CTX: "131072" } });
+      const { cfg } = makeReconciler(dataDir);
+      const { models } = await cfg.discoverOllamaModels(baseUrl, "llava:7b");
+      assert.strictEqual(models[0].id, "auto");
+      assert.strictEqual(models[0].params.num_ctx, 4096, "auto must not exceed llava's 4k window");
+    });
+  });
+
+  test("returns no models when the catalog is empty", async () => {
+    await withOllama({}, async (baseUrl) => {
+      dataDir = makeDataDir();
+      const { cfg } = makeReconciler(dataDir);
+      const { models } = await cfg.discoverOllamaModels(baseUrl, "");
+      assert.deepStrictEqual(models, []);
+    });
+  });
+
+  test("tolerates /api/show failing for one model", async () => {
+    await withOllama({ "llama3.1:8b": "error" }, async (baseUrl) => {
+      dataDir = makeDataDir();
+      const { cfg } = makeReconciler(dataDir);
+      const { models } = await cfg.discoverOllamaModels(baseUrl, "");
+      assert.strictEqual(models.length, 2, "the entry is still emitted (plus auto)");
+      assert.strictEqual(models[1].compat.supportsTools, false, "unknown capabilities default off");
+    });
+  });
+
+  test("coerces a string context_length from model_info", async () => {
+    await withOllama({ "m:1": { capabilities: [], contextLength: "8192" } }, async (baseUrl) => {
+      dataDir = makeDataDir();
+      const { cfg } = makeReconciler(dataDir);
+      const caps = await cfg.fetchOllamaModelCapabilities(baseUrl, "m:1");
+      assert.strictEqual(caps.contextLimit, 8192);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// warnIfConfigClobbered
+// ---------------------------------------------------------------------------
+describe("warnIfConfigClobbered", () => {
+  const clobber = (dir, name, mtime) => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, "{}");
+    fs.utimesSync(file, mtime, mtime);
+  };
+
+  test("reports a quarantine newer than the cutoff", () => {
+    dataDir = makeDataDir();
+    clobber(dataDir, "openclaw.json.clobbered.123", new Date());
+    const ctx = makeReconciler(dataDir);
+    ctx.cfg.warnIfConfigClobbered(Date.now() - 60_000);
+    assert.ok(ctx.logs.some((l) => l.includes("openclaw rejected openclaw.json")));
+  });
+
+  // startOpenclaw re-runs on every gateway exit; without dedupe the same historical
+  // snapshot would be re-reported on every restart forever.
+  test("reports each snapshot exactly once across repeated calls", () => {
+    dataDir = makeDataDir();
+    clobber(dataDir, "openclaw.json.clobbered.123", new Date());
+    const ctx = makeReconciler(dataDir);
+    const since = Date.now() - 60_000;
+    ctx.cfg.warnIfConfigClobbered(since);
+    ctx.cfg.warnIfConfigClobbered(since);
+    const reports = ctx.logs.filter((l) => l.includes("openclaw rejected"));
+    assert.strictEqual(reports.length, 1);
+  });
+
+  test("ignores snapshots older than the cutoff", () => {
+    dataDir = makeDataDir();
+    clobber(dataDir, "openclaw.json.clobbered.old", new Date(Date.now() - 600_000));
+    const ctx = makeReconciler(dataDir);
+    ctx.cfg.warnIfConfigClobbered(Date.now());
+    assert.deepStrictEqual(ctx.logs, []);
+  });
+
+  test("never throws when the config dir is unreadable", () => {
+    const ctx = makeReconciler("/nonexistent/data/dir");
+    assert.doesNotThrow(() => ctx.cfg.warnIfConfigClobbered(0));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reconcileConfig — end to end, against a real stub Ollama.
+// ---------------------------------------------------------------------------
+describe("reconcileConfig (end to end)", () => {
+  const MEM = { CI_SERVER_URL: "http://ci-server:3030", CI_SERVER_TOKEN: "t" };
+  const HUB = { HUB_URL: "https://hub.example", HUB_MCP_API_KEY: "hub-key" };
+
+  test("no-ops when openclaw.json does not exist, and creates nothing", async () => {
+    dataDir = makeDataDir({ config: null });
+    const { cfg } = makeReconciler(dataDir);
+    await cfg.reconcileConfig();
+    assert.ok(!fs.existsSync(cfgPath(dataDir)), "must not conjure a config pre-onboarding");
+  });
+
+  test("writes a coherent config from an empty one", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({ config: {}, env: { OLLAMA_HOST: baseUrl } });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+
+      const config = readCfg(dataDir);
+      assert.strictEqual(config.gateway.mode, "local");
+      assert.strictEqual(config.gateway.auth.mode, "token");
+      assert.match(config.gateway.auth.token, /^[0-9a-f]{48}$/);
+      assert.strictEqual(config.gateway.controlUi.allowInsecureAuth, true);
+      assert.strictEqual(config.gateway.controlUi.dangerouslyDisableDeviceAuth, true);
+      assert.deepStrictEqual(config.gateway.controlUi.allowedOrigins, [
+        "http://127.0.0.1:18790",
+        "http://localhost:18790",
+      ]);
+      assert.strictEqual(config.update.checkOnStart, false);
+      assert.strictEqual(config.models.mode, "merge");
+      assert.strictEqual(config.models.providers["ci-hub"].api, "ollama");
+    });
+  });
+
+  // The regression, asserted on the file we actually write.
+  test("every generated model entry uses params.num_ctx and no options key", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: {},
+        env: { OLLAMA_HOST: baseUrl, CI_LLM_NUM_CTX: "16384" },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+
+      const models = readCfg(dataDir).models.providers["ci-hub"].models;
+      assert.ok(models.length > 0);
+      for (const model of models) {
+        assert.ok(!("options" in model), `${model.id} carries a forbidden \`options\` key`);
+        assert.ok(model.params.num_ctx > 0, `${model.id} is missing params.num_ctx`);
+        assert.ok(
+          model.params.num_ctx <= model.contextWindow,
+          `${model.id} requests more context than it advertises`,
+        );
+      }
+      // llava is a 4k model; the Hub's 16384 must have been clamped down for it.
+      const llava = models.find((m) => m.id === "llava:7b");
+      assert.strictEqual(llava.params.num_ctx, 4096);
+    });
+  });
+
+  test("generates a gateway token and syncs it to .env", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({ config: {}, env: { OLLAMA_HOST: baseUrl } });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+
+      const token = readCfg(dataDir).gateway.auth.token;
+      assert.strictEqual(cfg.readEnv().OPENCLAW_GATEWAY_TOKEN, token);
+    });
+  });
+
+  test("reuses an existing gateway token instead of minting a new one", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: { gateway: { auth: { token: "existing-token-value" } } },
+        env: { OLLAMA_HOST: baseUrl },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+      assert.strictEqual(readCfg(dataDir).gateway.auth.token, "existing-token-value");
+    });
+  });
+
+  // The `changed` -> writeConfig contract, and the reason it matters: a reconcile that
+  // rewrites a steady-state config would churn the file on every single boot.
+  test("a second reconcile changes nothing and does not rewrite either file", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: {},
+        env: {
+          OLLAMA_HOST: baseUrl,
+          DEFAULT_MODEL: "llama3.1:8b",
+          EMBEDDINGS_MODEL: "nomic-embed-text",
+          ...MEM,
+          ...HUB,
+        },
+      });
+      const ctx = makeReconciler(dataDir);
+      await ctx.cfg.reconcileConfig();
+      const first = fs.readFileSync(cfgPath(dataDir), "utf8");
+
+      // Backdate both files: if the second pass writes AT ALL — even byte-identical
+      // content — the mtime moves.
+      const epoch = new Date(0);
+      fs.utimesSync(cfgPath(dataDir), epoch, epoch);
+      fs.utimesSync(envPath(dataDir), epoch, epoch);
+      ctx.logs.length = 0;
+
+      await ctx.cfg.reconcileConfig();
+
+      assert.deepStrictEqual(ctx.patches(), [], "a steady-state reconcile must patch nothing");
+      assert.strictEqual(fs.readFileSync(cfgPath(dataDir), "utf8"), first);
+      assert.strictEqual(fs.statSync(cfgPath(dataDir)).mtimeMs, 0, "changed=false must skip writeConfig");
+      assert.strictEqual(fs.statSync(envPath(dataDir)).mtimeMs, 0, "token already synced -> no writeEnv");
+    });
+  });
+
+  test("sets the default agent model to DEFAULT_MODEL when it is installed", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: {},
+        env: { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "qwen3:4b" },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+      assert.strictEqual(readCfg(dataDir).agents.defaults.model.primary, "ci-hub/qwen3:4b");
+    });
+  });
+
+  test("replaces a primary that points at an uninstalled model", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: { agents: { defaults: { model: { primary: "ci-hub/gone:7b" } } } },
+        env: { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "qwen3:4b" },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+      assert.strictEqual(readCfg(dataDir).agents.defaults.model.primary, "ci-hub/qwen3:4b");
+    });
+  });
+
+  test("keeps a still-installed primary across reconciles", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: { agents: { defaults: { model: { primary: "ci-hub/llava:7b" } } } },
+        env: { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "qwen3:4b" },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+      assert.strictEqual(
+        readCfg(dataDir).agents.defaults.model.primary,
+        "ci-hub/llava:7b",
+        "an operator's still-valid choice must not be overridden",
+      );
+    });
+  });
+
+  test("drops stale ci-hub model keys but preserves non-ci-hub ones", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: {
+          agents: {
+            defaults: {
+              models: { "ci-hub/gone:7b": { x: 1 }, "anthropic/claude": { keep: true } },
+            },
+          },
+        },
+        env: { OLLAMA_HOST: baseUrl },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+
+      const models = readCfg(dataDir).agents.defaults.models;
+      assert.ok(!("ci-hub/gone:7b" in models), "an uninstalled ci-hub model must be dropped");
+      assert.deepStrictEqual(models["anthropic/claude"], { keep: true });
+      assert.ok("ci-hub/llama3.1:8b" in models);
+    });
+  });
+
+  // Ollama being unreachable must never wipe a working catalog — the appliance would
+  // lose every model until Ollama came back.
+  test("preserves the existing ci-hub catalog when Ollama is unreachable", async () => {
+    const existing = [{ id: "llama3.1:8b", name: "Llama" }];
+    dataDir = makeDataDir({
+      config: { models: { providers: { "ci-hub": { models: existing } } } },
+      env: { OLLAMA_HOST: OLLAMA_DOWN },
+    });
+    const ctx = makeReconciler(dataDir);
+    await ctx.cfg.reconcileConfig();
+
+    assert.deepStrictEqual(readCfg(dataDir).models.providers["ci-hub"].models, existing);
+    assert.ok(ctx.logs.some((l) => l.includes("Failed to sync") || l.includes("No Ollama chat models")));
+  });
+
+  test("wires CI memory end to end when CI-Server credentials are present", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: {},
+        env: { OLLAMA_HOST: baseUrl, EMBEDDINGS_MODEL: "nomic-embed-text", ...MEM },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+
+      const config = readCfg(dataDir);
+      assert.strictEqual(config.plugins.slots.memory, "companionintelligence");
+      assert.strictEqual(config.plugins.entries.companionintelligence.enabled, true);
+      assert.strictEqual(
+        config.plugins.entries.companionintelligence.hooks.allowConversationAccess,
+        true,
+      );
+      assert.strictEqual(config.hooks.internal.entries["session-memory"].enabled, false);
+      assert.ok(config.tools.alsoAllow.includes("memory_store"));
+      assert.strictEqual(config.agents.defaults.memorySearch.provider, "openai-compatible");
+      assert.strictEqual(config.agents.defaults.memorySearch.remote.baseUrl, `${baseUrl}/v1`);
+      assert.strictEqual(config.plugins.load.paths.length, 3, "all three plugins registered");
+    });
+  });
+
+  test("leaves the memory slot alone when a third-party backend is selected", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: { plugins: { slots: { memory: "someone-elses-memory" } } },
+        env: { OLLAMA_HOST: baseUrl, ...MEM },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+
+      const config = readCfg(dataDir);
+      assert.strictEqual(config.plugins.slots.memory, "someone-elses-memory");
+      assert.strictEqual(config.plugins.entries.companionintelligence.enabled, false);
+    });
+  });
+
+  test("keeps CI memory selected when the slot already names it, even without credentials", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: { plugins: { slots: { memory: "companionintelligence" } } },
+        env: { OLLAMA_HOST: baseUrl },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+      assert.strictEqual(readCfg(dataDir).plugins.entries.companionintelligence.enabled, true);
+    });
+  });
+
+  test("registers the Hub MCP server and enables the ci-hub plugin when creds exist", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({ config: {}, env: { OLLAMA_HOST: baseUrl, ...HUB } });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+
+      const config = readCfg(dataDir);
+      assert.strictEqual(config.mcp.servers["ci-hub"].url, "https://hub.example/api/mcp");
+      assert.strictEqual(config.plugins.entries["ci-hub"].enabled, true);
+      assert.ok(!JSON.stringify(config).includes("hub-key"), "the raw key must not be persisted");
+    });
+  });
+
+  test("disables the ci-hub plugin entry when Hub creds are absent", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({ config: {}, env: { OLLAMA_HOST: baseUrl } });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+
+      const config = readCfg(dataDir);
+      assert.strictEqual(config.mcp?.servers?.["ci-hub"], undefined);
+      assert.strictEqual(config.plugins.entries["ci-hub"].enabled, false);
+    });
+  });
+
+  // The Hub injects credentials as container env, not into .env; a container value must
+  // win over a stale persisted one (that is what makes HUB_MCP_ENABLED=false effective).
+  test("Hub-authoritative container env overrides a stale .env value", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: {},
+        env: { OLLAMA_HOST: baseUrl, ...MEM, CI_SERVER_ENABLED: "true" },
+      });
+      const { cfg } = makeReconciler(dataDir, {
+        containerEnv: { CI_SERVER_ENABLED: "false" },
+      });
+      await cfg.reconcileConfig();
+      assert.strictEqual(
+        readCfg(dataDir).plugins.entries.companionintelligence.enabled,
+        false,
+        "a Hub CI_SERVER_ENABLED=false must disable memory despite the .env saying true",
+      );
+    });
+  });
+
+  test("never clobbers an unrelated key an operator added", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: { somethingCustom: { keep: "me" } },
+        env: { OLLAMA_HOST: baseUrl },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+      assert.deepStrictEqual(readCfg(dataDir).somethingCustom, { keep: "me" });
+    });
+  });
+
+  test("surfaces a quarantine that appeared since our last write", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({ config: {}, env: { OLLAMA_HOST: baseUrl } });
+      const ctx = makeReconciler(dataDir);
+      await ctx.cfg.reconcileConfig(); // stamps configWrittenAtMs
+
+      fs.writeFileSync(path.join(dataDir, "openclaw.json.clobbered.999"), "{}");
+      ctx.logs.length = 0;
+      await ctx.cfg.reconcileConfig();
+
+      assert.ok(
+        ctx.logs.some((l) => l.includes("openclaw rejected openclaw.json")),
+        "a quarantine after our write must be surfaced, not swallowed",
+      );
+    });
+  });
+
+  test("produces no index-keyed junk anywhere in the written config", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: {},
+        env: { OLLAMA_HOST: baseUrl, EMBEDDINGS_MODEL: "nomic-embed-text", ...MEM, ...HUB },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+      assertNoIndexKeys(readCfg(dataDir));
+    });
+  });
+});

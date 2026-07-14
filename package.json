@@ -2,6 +2,12 @@
   "name": "ci-openclaw",
   "version": "1.0.0",
   "private": true,
+  "scripts": {
+    "test": "npm run test:unit && npm run test:sh",
+    "test:unit": "node --test",
+    "test:sh": "for f in tests/*.test.sh; do bash \"$f\" || exit 1; done",
+    "test:schema": "node tests/config-schema.gate.mjs"
+  },
   "dependencies": {
     "node-pty": "^1.0.0",
     "ws": "^8.18.0"
