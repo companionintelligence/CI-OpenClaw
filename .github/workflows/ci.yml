@@ -9,13 +9,28 @@ on:
     # schema tightening surfaces before the version-bump PR lands.
     - cron: "0 5 * * *"
   workflow_dispatch:
+  # Called by docker-publish.yml so a red suite cannot ship an image.
+  workflow_call:
+    inputs:
+      ref:
+        description: >-
+          Commit to test. The publish workflow passes the exact SHA it is about to
+          build; leave empty to test the ref that triggered the run.
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Keyed on the workflow name as well as the ref. When docker-publish.yml calls this
+  # workflow, github.workflow resolves to the CALLER's name, so a publish gate lands in
+  # its own group and cannot collide with a CI run on the same ref.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Only supersede in-flight PR runs. A publish gate must never be cancelled out from
+  # under the build that depends on it — a cancelled gate must not read as a passed one.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -24,6 +39,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Empty falls back to checkout's default (the triggering ref). When the publish
+          # workflow calls us it passes the exact SHA it is about to build, so we can
+          # never test one tree and ship another.
+          ref: ${{ inputs.ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -57,6 +77,11 @@ jobs:
         channel: ${{ github.event_name == 'schedule' && fromJSON('["pinned","latest"]') || fromJSON('["pinned"]') }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Empty falls back to checkout's default (the triggering ref). When the publish
+          # workflow calls us it passes the exact SHA it is about to build, so we can
+          # never test one tree and ship another.
+          ref: ${{ inputs.ref }}
 
       - uses: actions/setup-node@v4
         with:
