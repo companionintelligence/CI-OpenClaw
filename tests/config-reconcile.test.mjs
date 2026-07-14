@@ -374,6 +374,22 @@ describe("ensureHooksWake", () => {
     assert.strictEqual(config.hooks.token, "${HUB_WAKE_SECRET}");
   });
 
+  // hooks.enabled serves /hooks/agent as well as /hooks/wake. We only use wake, and a
+  // token-holder must never be able to name the session an agent run lands in — that would
+  // reach the user's own conversation. The upstream default is already false; pin it, so a
+  // future default flip cannot silently widen us.
+  test("pins allowRequestSessionKey=false so no caller can choose a session", () => {
+    const config = {};
+    ctx.cfg.ensureHooksWake(config, WAKE);
+    assert.strictEqual(config.hooks.allowRequestSessionKey, false);
+  });
+
+  test("re-pins allowRequestSessionKey if it is flipped on", () => {
+    const config = { hooks: { enabled: true, token: "${HUB_WAKE_SECRET}", allowRequestSessionKey: true } };
+    assert.strictEqual(ctx.cfg.ensureHooksWake(config, WAKE), true);
+    assert.strictEqual(config.hooks.allowRequestSessionKey, false);
+  });
+
   // Same rule as the MCP Bearer: openclaw.json is readable inside the app, so the secret
   // itself must never land there. OpenClaw resolves ${VAR} across the whole config on load.
   test("never persists the raw wake secret, only the env template", () => {

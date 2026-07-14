@@ -577,6 +577,21 @@ function createConfigReconciler({
       changed = true;
       log.log("Patched config: pointed hooks.token at the HUB_WAKE_SECRET env reference");
     }
+
+    // `hooks.enabled` does not only serve /hooks/wake — it also serves /hooks/agent, which
+    // runs an agent turn from a caller-supplied prompt. We do not use that path, and the
+    // Hub never will.
+    //
+    // The knob that matters is allowRequestSessionKey: with it on, an /hooks/agent caller
+    // holding the token could name the session to run in — including the user's own main
+    // session. It defaults to false, but pin it, because a default is not a decision and a
+    // future upstream flip would silently widen us. Off, a caller only ever gets an
+    // isolated per-request `hook:<uuid>` session.
+    if (hooks.allowRequestSessionKey !== false) {
+      hooks.allowRequestSessionKey = false;
+      changed = true;
+      log.log("Patched config: pinned hooks.allowRequestSessionKey=false (no caller-chosen sessions)");
+    }
     return changed;
   }
 
