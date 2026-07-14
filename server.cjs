@@ -527,11 +527,25 @@ function ensureMemorySearchEmbeddings(config, env) {
   const defaults = ensureRecordPath(config, ["agents", "defaults"]);
   const current = isPlainObject(defaults.memorySearch) ? defaults.memorySearch : {};
   const currentRemote = isPlainObject(current.remote) ? current.remote : {};
+
+  // Are we moving embeddings to a different provider or endpoint than the config
+  // currently names? If so, any apiKey already in the remote block was issued for
+  // the OLD endpoint — remote.apiKey is OpenClaw's canonical secret target — and
+  // carrying it across would send a credential to a host it was never issued for.
+  // Drop it. A key the operator set for the endpoint we already point at is theirs
+  // and is left untouched.
+  const repointing =
+    current.provider !== MEMORY_EMBEDDING_PROVIDER ||
+    currentRemote.baseUrl !== baseUrl;
+  const nextRemote = { ...currentRemote, baseUrl };
+  const droppedApiKey = repointing && "apiKey" in nextRemote;
+  if (droppedApiKey) delete nextRemote.apiKey;
+
   const next = {
     ...current,
     provider: MEMORY_EMBEDDING_PROVIDER,
     model,
-    remote: { ...currentRemote, baseUrl },
+    remote: nextRemote,
   };
   if (JSON.stringify(defaults.memorySearch) === JSON.stringify(next)) return false;
 
@@ -539,6 +553,12 @@ function ensureMemorySearchEmbeddings(config, env) {
   console.log(
     `Patched config: memory search embeddings -> ${model} @ ${baseUrl}`,
   );
+  if (droppedApiKey) {
+    // Never log the value, only that it is gone.
+    console.log(
+      "Patched config: dropped memory search remote.apiKey — it belonged to the previous embeddings endpoint",
+    );
+  }
   return true;
 }
 
