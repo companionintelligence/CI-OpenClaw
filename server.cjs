@@ -23,6 +23,9 @@ const CI_MEMORY_PLUGIN_PATH =
   "/app/openclaw-context/plugins/companionintelligence";
 const CI_HUB_PLUGIN_ID = "ci-hub";
 const CI_HUB_PLUGIN_PATH = "/app/openclaw-context/plugins/ci-hub";
+// Treats the embeddings endpoint as an OpenAI-compatible /v1 server (which Ollama
+// serves) and, unlike the bundled remote providers, requires no API key.
+const MEMORY_EMBEDDING_PROVIDER = "openai-compatible";
 // Anti-CSWSH token for the setup terminal WebSocket. Browsers don't enforce the
 // same-origin policy on WebSocket upgrades, so without this any site could connect
 // to /api/terminal and hijack the onboarding PTY. We embed APP_SEED (per-user
@@ -474,6 +477,36 @@ function ensureMemoryStoreToolAllowed(config) {
   return changed;
 }
 
+// The Hub injects EMBEDDINGS_MODEL (e.g. nomic-embed-text) as a managed key, but
+// OpenClaw has no env-var path for embeddings — memory search resolves its provider
+// from agents.defaults.memorySearch. Left unset, the provider falls back to its
+// "openai" default and semantic recall silently tries api.openai.com with a key we
+// don't have (memory_search then reports provider=openai model=text-embedding-3-small
+// while quietly returning nothing). "openai-compatible" points it at the appliance's
+// own Ollama /v1 instead, and needs no API key.
+function ensureMemorySearchEmbeddings(config, env) {
+  const model = (env.EMBEDDINGS_MODEL || process.env.EMBEDDINGS_MODEL || "").trim();
+  if (!model) return false;
+
+  const baseUrl = `${resolveOllamaBaseUrl(env)}/v1`;
+  config.agents = config.agents || {};
+  config.agents.defaults = config.agents.defaults || {};
+  const current = config.agents.defaults.memorySearch || {};
+  const next = {
+    ...current,
+    provider: MEMORY_EMBEDDING_PROVIDER,
+    model,
+    remote: { ...(current.remote || {}), baseUrl },
+  };
+  if (JSON.stringify(current) === JSON.stringify(next)) return false;
+
+  config.agents.defaults.memorySearch = next;
+  console.log(
+    `Patched config: memory search embeddings -> ${model} @ ${baseUrl}`,
+  );
+  return true;
+}
+
 function ensureOpenClawPlugin(config, pluginId, pluginPath, label, options = {}) {
   const enableEntry = options.enableEntry !== false;
 
@@ -879,6 +912,9 @@ async function reconcileConfig() {
       changed = ensureMemoryStoreToolAllowed(config) || changed;
     }
   }
+
+  // Point semantic memory search at the appliance's local embeddings server.
+  changed = ensureMemorySearchEmbeddings(config, env) || changed;
 
   // Register Hub tools through OpenClaw's built-in MCP client (native
   // mcp.servers.ci-hub), gated on Hub MCP credentials.
