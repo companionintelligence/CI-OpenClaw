@@ -102,10 +102,14 @@ function validate(file) {
   const check = run(["config", "validate", "--json"]);
   const lint = run(["doctor", "--lint", "--severity-min", "error", "--json"]);
 
-  const schemaFindings = (lint.parsed?.findings ?? []).filter(
+  // Guard with Array.isArray, not just `?? []`: a future CLI that emits one of these
+  // fields as a non-array object would make the spread/filter throw an opaque
+  // TypeError instead of producing a verdict.
+  const asArray = (v) => (Array.isArray(v) ? v : []);
+  const schemaFindings = asArray(lint.parsed?.findings).filter(
     (f) => f.checkId === SCHEMA_CHECK_ID,
   );
-  const issues = [...(check.parsed?.issues ?? []), ...(check.parsed?.errors ?? [])];
+  const issues = [...asArray(check.parsed?.issues), ...asArray(check.parsed?.errors)];
   const findings = [...issues, ...schemaFindings];
 
   // `config validate` exiting non-zero, or saying valid:false, is decisive. doctor's
@@ -155,6 +159,16 @@ const SCENARIOS = [
   { name: "capped-num-ctx", env: { CI_LLM_NUM_CTX: "131072" }, catalog: SMALL_MODEL },
   { name: "ollama-offline", env: MEM, offline: true },
   { name: "upgrade-from-legacy", env: { ...MEM, ...HUB }, seed: LEGACY },
+  // A hand-edited config with malformed nodes on paths that are INACTIVE here (Ollama
+  // down, no creds), so nothing coerces them via a feature path. The reconciler's
+  // safety net must still produce a schema-valid file; without it these scalars survive
+  // and openclaw quarantines the whole config at boot.
+  {
+    name: "malformed-inactive-paths",
+    env: {},
+    offline: true,
+    seed: { agents: "legacy-string", tools: "x", hooks: "x", mcp: "nope", plugins: { slots: [] } },
+  },
 ];
 
 /** Produce a config with the real reconciler, and return where it was written. */

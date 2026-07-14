@@ -1411,6 +1411,76 @@ describe("malformed nodes + convergence", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Malformed nodes on an INACTIVE feature path.
+//
+// The suite above runs with Ollama reachable and full credentials, so every feature
+// path executes and coerces its node. But agents/tools/hooks/mcp/plugins.slots are
+// only rewritten on their active path — discovery success, or CI-Server/Hub creds. On
+// an appliance with Ollama down and no creds, a hand-edited scalar there would survive
+// to writeConfig (the gateway-token write forces the file to be written) and openclaw's
+// strict schema would quarantine the WHOLE file. These run with NO creds and Ollama
+// unreachable to pin that gap shut.
+// ---------------------------------------------------------------------------
+describe("malformed nodes on an inactive feature path", () => {
+  const INACTIVE = [
+    ["agents is a scalar", { agents: "legacy-string" }, (c) => c.agents],
+    ["tools is a scalar", { tools: "x" }, (c) => c.tools],
+    ["hooks is a scalar", { hooks: "x" }, (c) => c.hooks],
+    ["mcp is a scalar", { mcp: "nope" }, (c) => c.mcp],
+    ["plugins.slots is an array", { plugins: { slots: [] } }, (c) => c.plugins.slots],
+  ];
+
+  for (const [name, seed, pick] of INACTIVE) {
+    test(`${name}: coerced to a record even with no creds and Ollama down`, async () => {
+      dataDir = makeDataDir({ config: seed, env: { OLLAMA_HOST: OLLAMA_DOWN } });
+      const ctx = makeReconciler(dataDir);
+      await ctx.cfg.reconcileConfig();
+
+      const config = readCfg(dataDir);
+      const node = pick(config);
+      assert.ok(
+        node === undefined || (typeof node === "object" && !Array.isArray(node)),
+        `${name} must be a record or absent, not ${JSON.stringify(node)} — a scalar/array here quarantines the whole file`,
+      );
+      assertNoIndexKeys(config);
+      assert.match(config.gateway.auth.token, /^[0-9a-f]{48}$/, "the gateway token must still be written");
+      assert.deepStrictEqual(JSON.parse(JSON.stringify(config)), config);
+
+      // Converges: a second pass rewrites nothing.
+      const before = fs.readFileSync(cfgPath(dataDir), "utf8");
+      fs.utimesSync(cfgPath(dataDir), new Date(0), new Date(0));
+      ctx.logs.length = 0;
+      await ctx.cfg.reconcileConfig();
+      assert.deepStrictEqual(ctx.patches(), []);
+      assert.strictEqual(fs.readFileSync(cfgPath(dataDir), "utf8"), before);
+      assert.strictEqual(fs.statSync(cfgPath(dataDir)).mtimeMs, 0);
+    });
+  }
+
+  test("a minimal config gains no empty agents/tools/hooks/mcp nodes", async () => {
+    dataDir = makeDataDir({ config: {}, env: { OLLAMA_HOST: OLLAMA_DOWN } });
+    const { cfg } = makeReconciler(dataDir);
+    await cfg.reconcileConfig();
+    const config = readCfg(dataDir);
+    for (const key of ["agents", "tools", "hooks", "mcp"]) {
+      assert.ok(!(key in config), `${key} must not be conjured onto a config that never had it`);
+    }
+  });
+
+  test("bails cleanly on a non-record top-level config", async () => {
+    for (const bad of ["[]", '"a string"', "42"]) {
+      dataDir = makeDataDir();
+      fs.writeFileSync(cfgPath(dataDir), bad);
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig(); // must not throw
+      assert.strictEqual(fs.readFileSync(cfgPath(dataDir), "utf8"), bad, "a corrupt top-level config is left for .bak recovery, not churned");
+      rmDir(dataDir);
+    }
+    dataDir = undefined;
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ensureRecordPathTracked — the change report the `changed` protocol depends on.
 // ---------------------------------------------------------------------------
 describe("ensureRecordPathTracked", () => {

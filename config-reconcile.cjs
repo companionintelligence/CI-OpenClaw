@@ -292,7 +292,9 @@ function createConfigReconciler({
     try {
       if (fs.existsSync(ENV_FILE)) {
         const content = fs.readFileSync(ENV_FILE, "utf8");
-        content.split("\n").forEach((line) => {
+        // Split on \r?\n: `.` and `$` (no /m flag) don't span a CR, so a CRLF-authored
+        // line would otherwise fail the match and silently drop the key.
+        content.split(/\r?\n/).forEach((line) => {
           const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
           if (match) {
             env[match[1]] = match[2];
@@ -343,8 +345,13 @@ function createConfigReconciler({
   function restrictToOwner(file) {
     try {
       fs.chmodSync(file, 0o600);
-    } catch {
-      // Best-effort: a read-only mount or foreign owner must not break reconcile.
+    } catch (e) {
+      // Best-effort: a read-only mount or foreign owner must not break reconcile. But
+      // this file holds the gateway token and provider keys, so a persistent failure to
+      // tighten it must not be silent — surface it rather than leave it undetectable.
+      log.warn(
+        `Could not restrict ${path.basename(file)} to 0600: ${e.message}`,
+      );
     }
   }
 
@@ -455,7 +462,8 @@ function createConfigReconciler({
       return false;
     }
 
-    const { node: servers } = ensureRecordPathTracked(config, ["mcp", "servers"]);
+    const { node: servers, replaced } = ensureRecordPathTracked(config, ["mcp", "servers"]);
+    let changed = replaced;
 
     const desired = {
       url,
@@ -466,9 +474,11 @@ function createConfigReconciler({
     };
 
     const current = servers["ci-hub"];
-    // Deep-equal on the small, fixed shape keeps reconcile idempotent.
+    // Deep-equal on the small, fixed shape keeps reconcile idempotent. `changed` still
+    // carries any replacement of a malformed mcp/servers node above, so coercing it
+    // (a real config mutation) is reported even when the ci-hub entry is unchanged.
     if (JSON.stringify(current) === JSON.stringify(desired)) {
-      return false;
+      return changed;
     }
     servers["ci-hub"] = desired;
     log.log(`Patched config: registered ci-hub MCP server (Streamable HTTP, ${url})`);
@@ -981,7 +991,12 @@ function createConfigReconciler({
     if (configWrittenAtMs) warnIfConfigClobbered(configWrittenAtMs);
 
     const config = readConfig();
-    if (!config) return;
+    // Bail on a non-record top-level config (a hand-edited array or scalar): walking it
+    // as a record would either attach named props that JSON.stringify silently drops
+    // (an array churns the file every boot) or throw on the second path segment. Such a
+    // config is corrupt beyond reconcile's remit — readConfig's .bak recovery and the
+    // gateway's own refusal to start are the right handlers.
+    if (!isPlainObject(config)) return;
     const env = readEnv();
 
     // CI-Server credentials may be supplied as container environment variables
@@ -1277,6 +1292,31 @@ function createConfigReconciler({
         changed = true;
         log.log(`Patched config: set default agent model to ${nextPrimaryModel}`);
       }
+    }
+
+    // Safety net for nodes reconcile only rewrites on an ACTIVE feature path. When
+    // Ollama is unreachable and no CI-Server/Hub creds are set, discovery throws and
+    // the memory + Hub-MCP blocks skip, so a hand-edited scalar at agents/tools/hooks/
+    // mcp is never coerced — yet the gateway-token write still sets `changed`, so it
+    // gets serialized verbatim and openclaw's strict schema quarantines the WHOLE file
+    // (reverting the token in the same pass). Coerce any that are present-but-not-a-
+    // record; leave absent ones absent so a minimal config gains no empty nodes, and a
+    // well-formed one is untouched.
+    for (const key of ["agents", "tools", "hooks", "mcp"]) {
+      if (key in config && !isPlainObject(config[key])) {
+        config[key] = {};
+        changed = true;
+        log.log(`Patched config: replaced malformed ${key} node with an empty record`);
+      }
+    }
+    if (
+      isPlainObject(config.plugins) &&
+      "slots" in config.plugins &&
+      !isPlainObject(config.plugins.slots)
+    ) {
+      config.plugins.slots = {};
+      changed = true;
+      log.log("Patched config: replaced malformed plugins.slots node with an empty record");
     }
 
     if (changed) {
