@@ -528,7 +528,7 @@ function asInferenceStatus(payload) {
   }
   return status;
 }
-function withSafeLogger(api) {
+function createSafeLogger(api) {
   const fallbacks = {
     info: (message) => console.info(`[ci-hub] ${message}`),
     warn: (message) => console.warn(`[ci-hub] ${message}`),
@@ -544,19 +544,22 @@ function withSafeLogger(api) {
     }
     fallbacks[level](message);
   };
-  const log = {
-    info: emit("info"),
-    warn: emit("warn"),
-    error: emit("error"),
-    debug: emit("debug")
+  return { info: emit("info"), warn: emit("warn"), error: emit("error"), debug: emit("debug") };
+}
+function withSafeLogger(api) {
+  const wrapped = {
+    registerTool: (tool) => api.registerTool(tool),
+    registerHttpRoute: (route) => api.registerHttpRoute(route),
+    wake: (message) => api.wake(message),
+    log: createSafeLogger(api)
   };
-  return new Proxy(api, {
-    get: (target, prop) => {
-      if (prop === "log") return log;
-      const value = Reflect.get(target, prop, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    }
-  });
+  if (typeof api.registerProvider === "function") {
+    wrapped.registerProvider = (provider) => api.registerProvider?.(provider);
+  }
+  if (typeof api.registerSpeechProvider === "function") {
+    wrapped.registerSpeechProvider = (provider) => api.registerSpeechProvider?.(provider);
+  }
+  return wrapped;
 }
 async function probeHubHealth(api, hubUrl) {
   try {
