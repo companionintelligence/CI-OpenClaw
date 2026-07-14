@@ -554,8 +554,18 @@ function createConfigReconciler({
         existing.enabled === true &&
         existing.token === HOOKS_WAKE_TOKEN_ENV_REF
       ) {
+        // Retract every key we wrote, allowRequestSessionKey included — leaving it behind
+        // would strand a `hooks: { allowRequestSessionKey: false }` node on a config that
+        // never had a `hooks` key, which is the same churn the read-don't-ensure above avoids.
         delete existing.enabled;
         delete existing.token;
+        delete existing.allowRequestSessionKey;
+        // ...and if that emptied the node entirely, take the node with it. Another helper
+        // (disableBundledSessionMemoryHook) may have put `internal` here; only drop `hooks`
+        // when nothing else is using it.
+        if (Object.keys(existing).length === 0) {
+          delete config.hooks;
+        }
         log.warn(
           "Patched config: disabled the wake hook — HUB_WAKE_SECRET is not set",
         );

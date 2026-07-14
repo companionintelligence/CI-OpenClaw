@@ -411,12 +411,29 @@ describe("ensureHooksWake", () => {
     assert.strictEqual(config.hooks?.token, undefined);
   });
 
+  // Retract everything we wrote, allowRequestSessionKey included — and take the `hooks` node
+  // with it if that emptied it. A config that never had a `hooks` key must not be left with
+  // `hooks: { allowRequestSessionKey: false }`; that is file churn on every boot, and it breaks
+  // the repo's "hooks must not be conjured onto a config that never had it" invariant.
   test("retracts a hook it previously wrote once the secret goes away", () => {
     const config = {};
     ctx.cfg.ensureHooksWake(config, WAKE);
     assert.strictEqual(ctx.cfg.ensureHooksWake(config, {}), true);
+    assert.strictEqual(config.hooks, undefined);
+  });
+
+  // ...but only the node, not a neighbour's keys. The bundled session-memory hook lives under
+  // the same `hooks` parent and is written by a different helper.
+  test("retracting the wake hook leaves the session-memory hook intact", () => {
+    const config = {};
+    ctx.cfg.disableBundledSessionMemoryHook(config);
+    ctx.cfg.ensureHooksWake(config, WAKE);
+
+    assert.strictEqual(ctx.cfg.ensureHooksWake(config, {}), true);
     assert.strictEqual(config.hooks.enabled, undefined);
     assert.strictEqual(config.hooks.token, undefined);
+    assert.strictEqual(config.hooks.allowRequestSessionKey, undefined);
+    assert.strictEqual(config.hooks.internal.entries["session-memory"].enabled, false);
   });
 
   // Only retract what WE wrote. An operator's own hooks integration is theirs to keep.
