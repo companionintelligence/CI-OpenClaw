@@ -512,13 +512,21 @@ function ensureMemoryStoreToolAllowed(config) {
 // don't have (memory_search then reports provider=openai model=text-embedding-3-small
 // while quietly returning nothing). "openai-compatible" points it at the appliance's
 // own Ollama /v1 instead, and needs no API key.
+// Trailing slashes are not meaningful in an embeddings base URL — OpenClaw strips
+// them itself (normalizeBaseUrl) — so compare URLs with them removed. Without this,
+// a config that merely spells the SAME endpoint with a trailing slash looks like a
+// different one, and the repoint check below would delete an operator's credential.
+function normalizeEmbeddingsBaseUrl(value) {
+  return typeof value === "string" ? value.trim().replace(/\/+$/, "") : "";
+}
+
 function ensureMemorySearchEmbeddings(config, env) {
   const model = (env.EMBEDDINGS_MODEL || process.env.EMBEDDINGS_MODEL || "").trim();
   if (!model) return false;
 
   // resolveOllamaBaseUrl yields a native Ollama host (no /v1); tolerate an
   // OLLAMA_HOST that already carries the suffix rather than emitting /v1/v1.
-  const ollamaBase = resolveOllamaBaseUrl(env);
+  const ollamaBase = normalizeEmbeddingsBaseUrl(resolveOllamaBaseUrl(env));
   const baseUrl = ollamaBase.endsWith("/v1") ? ollamaBase : `${ollamaBase}/v1`;
 
   // Guard every node we spread or assign into: a hand-edited memorySearch that is
@@ -536,7 +544,7 @@ function ensureMemorySearchEmbeddings(config, env) {
   // and is left untouched.
   const repointing =
     current.provider !== MEMORY_EMBEDDING_PROVIDER ||
-    currentRemote.baseUrl !== baseUrl;
+    normalizeEmbeddingsBaseUrl(currentRemote.baseUrl) !== baseUrl;
   const nextRemote = { ...currentRemote, baseUrl };
   const droppedApiKey = repointing && "apiKey" in nextRemote;
   if (droppedApiKey) delete nextRemote.apiKey;
