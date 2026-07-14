@@ -857,11 +857,13 @@ describe("resolvers", () => {
   });
 
   test("resolveHubNumCtx falls back to .env", () => {
+    rmDir(dataDir); // release the beforeEach dir before pointing dataDir elsewhere
     dataDir = makeDataDir({ env: { CI_LLM_NUM_CTX: "4096" } });
     assert.strictEqual(makeReconciler(dataDir).cfg.resolveHubNumCtx(), 4096);
   });
 
   test("resolveHubNumCtx rejects zero, negative and non-numeric values", () => {
+    rmDir(dataDir); // release the beforeEach dir before the loop reassigns dataDir
     for (const raw of ["0", "-1", "abc", ""]) {
       dataDir = makeDataDir({ env: { CI_LLM_NUM_CTX: raw } });
       assert.strictEqual(makeReconciler(dataDir).cfg.resolveHubNumCtx(), null, `for ${JSON.stringify(raw)}`);

@@ -5,7 +5,7 @@
   "scripts": {
     "test": "npm run test:unit && npm run test:sh",
     "test:unit": "node --test",
-    "test:sh": "for f in tests/*.test.sh; do bash \"$f\" || exit 1; done",
+    "test:sh": "for f in tests/*.test.sh; do [ -e \"$f\" ] || continue; bash \"$f\" || exit 1; done",
     "test:schema": "node tests/config-schema.gate.mjs"
   },
   "dependencies": {

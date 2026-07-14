@@ -208,6 +208,13 @@ for (const scenario of SCENARIOS) {
 // OPENCLAW_CONFIG_PATH, a CLI that no longer errors) would pass green forever and we
 // would trust it.
 function canary(label, mutate) {
+  if (!richest?.models?.providers?.["ci-hub"]?.models?.length) {
+    console.error(
+      `\nFATAL: cannot run the "${label}" canary — the "everything" scenario did not ` +
+        "produce a ci-hub model catalog to corrupt, so the self-test base is missing.",
+    );
+    process.exit(2);
+  }
   const config = structuredClone(richest);
   mutate(config);
   const file = path.join(OUT, `canary-${label}.json`);

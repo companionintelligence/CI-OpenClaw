@@ -159,9 +159,15 @@ export const OLLAMA_DOWN = "http://127.0.0.1:1";
  * Assert no record anywhere in the tree is index-keyed.
  *
  * This is the generalizing form of the malformed-node requirement: spreading a scalar
- * ({...\"http\"}) or walking an array yields records keyed "0","1","2". Nothing in a
- * valid openclaw.json looks like that, so we assert it NOWHERE — which is broader and
- * cheaper than enumerating every node we happened to remember to guard.
+ * ({...\"http\"}) or walking an array yields records whose keys are all "0","1","2".
+ * Nothing in a valid openclaw.json looks like that, so we assert it NOWHERE — which is
+ * broader and cheaper than enumerating every node we happened to remember to guard.
+ *
+ * The test is "every key is a non-negative integer string, starting at 0" rather than
+ * "has both 0 and 1": a single-character scalar spreads to `{"0":"x"}`, which the
+ * two-key form would miss. No legitimate config object is keyed by integers (providers,
+ * plugins, and servers are keyed by name; the model catalog is a real array, handled by
+ * the Array branch above), so this cannot false-positive.
  */
 export function assertNoIndexKeys(node, at = "$") {
   if (Array.isArray(node)) {
@@ -170,8 +176,9 @@ export function assertNoIndexKeys(node, at = "$") {
   }
   if (!node || typeof node !== "object") return;
   const keys = Object.keys(node);
+  const looksSpread = keys.length > 0 && keys.every((k) => /^\d+$/.test(k)) && keys.includes("0");
   assert.ok(
-    !(keys.includes("0") && keys.includes("1")),
+    !looksSpread,
     `index-keyed junk at ${at}: {${keys.slice(0, 6).join(",")}} — a scalar was spread into a record`,
   );
   for (const [key, value] of Object.entries(node)) {
