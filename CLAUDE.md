@@ -29,8 +29,12 @@ npm install
 # Start development server / service
 docker compose up --build
 
-# Run tests
-# validate via docker compose up
+# Run tests (config reconciler, CI memory plugin, bootstrap shell suites; no install needed)
+npm test
+
+# Validate the generated openclaw.json against OpenClaw's own strict schema.
+# Needs the CLI: npm i -g "openclaw@$(grep -oE 'openclaw@[0-9.]+' Dockerfile | head -1 | cut -d@ -f2)"
+npm run test:schema
 
 # Build for production
 docker compose build

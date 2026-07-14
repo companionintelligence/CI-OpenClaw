@@ -50,6 +50,10 @@ RUN printf '#!/bin/bash\necho "Error: apt is not available. Please use brew inst
 # read-only boundary. These files intentionally live outside /data so container
 # runtime edits are disposable and image updates overwrite the managed context.
 COPY --chown=node:node server.cjs /app/setup-server.cjs
+# setup-server.cjs requires this by __dirname-relative path. Copied file-by-file (no
+# COPY . /app), so a new module that is not listed here is missing from the image and
+# the container dies at boot with MODULE_NOT_FOUND — while working fine in local dev.
+COPY --chown=node:node config-reconcile.cjs /app/config-reconcile.cjs
 COPY --chown=node:node setup.html /app/setup.html
 COPY --chown=node:node logo.webp /app/logo.webp
 COPY --chown=node:node assets /app/assets

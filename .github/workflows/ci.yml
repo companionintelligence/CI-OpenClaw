@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+  schedule:
+    # Advisory nightly run that also validates against openclaw@latest, so an upstream
+    # schema tightening surfaces before the version-bump PR lands.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+  # Called by docker-publish.yml so a red suite cannot ship an image.
+  workflow_call:
+    inputs:
+      ref:
+        description: >-
+          Commit to test. The publish workflow passes the exact SHA it is about to
+          build; leave empty to test the ref that triggered the run.
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  # Keyed on the workflow name as well as the ref. When docker-publish.yml calls this
+  # workflow, github.workflow resolves to the CALLER's name, so a publish gate lands in
+  # its own group and cannot collide with a CI run on the same ref.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Only supersede in-flight PR runs. A publish gate must never be cancelled out from
+  # under the build that depends on it — a cancelled gate must not read as a passed one.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Unit + shell tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Empty falls back to checkout's default (the triggering ref). When the publish
+          # workflow calls us it passes the exact SHA it is about to build, so we can
+          # never test one tree and ship another.
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Deliberately NO `npm ci`. The suites are dependency-free by design, and
+      # config-reconcile.cjs must never pull node-pty/ws — server.cjs requires those by
+      # absolute /app path, which is exactly what made this layer untestable. If this job
+      # ever needs an install, that is the signal the module grew a dependency.
+      - name: Unit tests (config reconciler + CI memory plugin)
+        run: npm run test:unit
+
+      - name: Bootstrap shell tests
+        run: npm run test:sh
+
+  schema-gate:
+    # The check that generalizes: the config we ACTUALLY write, validated by OpenClaw's
+    # OWN strict schema. One unrecognized key invalidates the entire openclaw.json and
+    # gets it quarantined at boot, silently reverting everything written in the same pass.
+    # The unit suite catches the mistakes we thought to assert; this catches the rest.
+    name: openclaw schema gate (${{ matrix.channel }})
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: ${{ matrix.channel == 'latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The pinned channel blocks PRs. The nightly also probes openclaw@latest, purely
+        # as an early warning; it never blocks a PR on a version we have not adopted.
+        channel: ${{ github.event_name == 'schedule' && fromJSON('["pinned","latest"]') || fromJSON('["pinned"]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Empty falls back to checkout's default (the triggering ref). When the publish
+          # workflow calls us it passes the exact SHA it is about to build, so we can
+          # never test one tree and ship another.
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Resolve the openclaw version
+        id: resolve
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.channel }}" == "latest" ]]; then
+            version="$(npm view openclaw version)"
+          else
+            # The Dockerfile pin is the single source of truth, so this gate always
+            # validates against the same schema the shipped image enforces. It also means
+            # the nightly version-bump PR gets schema-gated against the version it
+            # proposes, before it can merge. Same one-liner openclaw-release-pr.yml uses.
+            version="$(grep -oE 'openclaw@[0-9]+(\.[0-9]+)*' Dockerfile | head -n1 | cut -d'@' -f2)"
+          fi
+          [[ -n "${version}" ]] || { echo "could not resolve an openclaw version"; exit 1; }
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Validating against openclaw@${version}"
+
+      - name: Cache the global openclaw install
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm-global
+          # Keyed on the version itself, so the cache invalidates exactly when the pin
+          # moves and can never go stale.
+          key: openclaw-${{ runner.os }}-${{ steps.resolve.outputs.version }}
+
+      - name: Install openclaw@${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          npm config set prefix "$HOME/.npm-global"
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+          if [[ "${{ steps.cache.outputs.cache-hit }}" != "true" ]]; then
+            npm install -g "openclaw@${{ steps.resolve.outputs.version }}"   # ~88MB
+          fi
+
+      - name: Validate the config reconcileConfig() really writes
+        env:
+          # The gate hard-fails rather than skipping when the binary is missing and CI is
+          # set, so this check can never silently pass by not running.
+          CI: "true"
+          SCHEMA_GATE_OUTDIR: ${{ runner.temp }}/schema-gate
+        run: npm run test:schema
+
+      - name: Upload the generated configs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openclaw-configs-${{ matrix.channel }}
+          path: ${{ runner.temp }}/schema-gate/
+          if-no-files-found: ignore

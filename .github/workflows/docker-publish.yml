@@ -16,7 +16,24 @@ on:
         type: string
 
 jobs:
+  # Gate the publish on the full suite — unit, bootstrap shell, and the openclaw schema
+  # gate — so a red suite cannot ship an image. This runs the SAME workflow that gates
+  # PRs rather than a copy of its steps, so the two can never drift apart.
+  #
+  # The ref matters: on the workflow_run path the build below checks out the triggering
+  # commit, not the default branch. Pass that same SHA down, or we would test master and
+  # ship a tag.
+  test:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    name: Tests
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
+
   build:
+    needs: test
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     name: Build and push to GitHub Container Registry
     runs-on: ubuntu-22.04
