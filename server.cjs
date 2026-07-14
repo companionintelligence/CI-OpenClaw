@@ -647,7 +647,12 @@ function buildOllamaModelEntry(modelId, displayName, capabilities) {
     // models internally consistent).
     maxTokens: Math.min(4096, contextWindow),
     compat: { supportsTools: capabilities?.supportsTools === true },
-    ...(effCtx ? { options: { num_ctx: effCtx } } : {}),
+    // `params`, not `options`: OpenClaw's model-entry schema is strict, so an
+    // unrecognized key fails validation for the ENTIRE openclaw.json. Startup
+    // `doctor --repair` then quarantines the file and restores last-known-good,
+    // silently reverting anything else written in the same pass — including the
+    // memory-connect wiring (plugins.slots.memory, companionintelligence).
+    ...(effCtx ? { params: { num_ctx: effCtx } } : {}),
   };
 }
 
