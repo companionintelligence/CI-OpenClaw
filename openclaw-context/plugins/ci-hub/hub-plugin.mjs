@@ -520,8 +520,15 @@ function register(rawApi, config) {
 function describeError(error) {
   return error instanceof Error ? error.message : String(error);
 }
+function asInferenceStatus(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  const status = payload;
+  if (!Array.isArray(status.models) || !Array.isArray(status.backends) || !Array.isArray(status.cloudProviders)) {
+    return null;
+  }
+  return status;
+}
 function withSafeLogger(api) {
-  const host = api.log;
   const fallbacks = {
     info: (message) => console.info(`[ci-hub] ${message}`),
     warn: (message) => console.warn(`[ci-hub] ${message}`),
@@ -529,6 +536,7 @@ function withSafeLogger(api) {
     debug: (message) => console.info(`[ci-hub] ${message}`)
   };
   const emit = (level) => (message) => {
+    const host = api.log;
     const hostFn = host?.[level];
     if (typeof hostFn === "function") {
       hostFn.call(host, message);
@@ -565,7 +573,10 @@ function registerInference(deps) {
   const ollamaNativeUrl = (process.env.OLLAMA_HOST ?? "http://ci-hub-ollama:11434").replace(/\/$/, "");
   let statusPromise = null;
   const getInferenceStatus = () => {
-    statusPromise ??= fetchInferenceStatus(api, hubUrl, mcpClient, mcpReady).then((status) => {
+    statusPromise ??= fetchInferenceStatus(api, hubUrl, mcpClient, mcpReady).catch((error) => {
+      api.log.warn(`Hub inference status lookup failed: ${describeError(error)}`);
+      return null;
+    }).then((status) => {
       if (!status) statusPromise = null;
       return status;
     });
@@ -628,15 +639,15 @@ function registerInference(deps) {
         };
       }
     });
+    void probeTtsAvailability(api, getInferenceStatus, tts);
   }
-  void probeTtsAvailability(api, getInferenceStatus, tts);
 }
 async function fetchInferenceStatus(api, hubUrl, mcpClient, mcpReady) {
   await mcpReady;
   let inferenceStatus = null;
   if (mcpClient.isConnected()) {
     try {
-      inferenceStatus = unwrapToolResult(await mcpClient.callTool("hub_get_inference_status", {}));
+      inferenceStatus = asInferenceStatus(unwrapToolResult(await mcpClient.callTool("hub_get_inference_status", {})));
     } catch {
       api.log.debug("hub_get_inference_status not yet available \u2014 trying REST fallback");
     }
@@ -645,7 +656,7 @@ async function fetchInferenceStatus(api, hubUrl, mcpClient, mcpReady) {
     try {
       const response = await fetchWithTimeout(`${hubUrl.replace(/\/$/, "")}/api/inference/status`, {});
       if (response.ok) {
-        inferenceStatus = await response.json();
+        inferenceStatus = asInferenceStatus(await response.json());
       }
     } catch {
       api.log.debug("Inference REST endpoint not available");
