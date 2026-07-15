@@ -11,11 +11,12 @@ name: ci-hub plugin bundle resync
 #
 # See scripts/check-ci-hub-plugin-drift.sh for the rebuild/compare/write logic.
 #
-# REQUIRED SECRET — set under Settings → Secrets and variables → Actions (repo or org level).
-# Until it exists the cross-repo checkout of the private CI-Hub cannot run, and the preflight step
-# fails fast with a pointer here. Use a fine-grained PAT (or a GitHub App token):
-#   * CI_HUB_SYNC_TOKEN — CI-Hub Contents: read + this repo Contents: write + Pull requests: write.
-#     Needed so the opened PR triggers CI (a GITHUB_TOKEN-created PR would not).
+# REQUIRED SECRETS — set under Settings → Secrets and variables → Actions (repo or org level).
+# Until they exist the preflight step fails fast with a pointer here. Use fine-grained PATs (or a
+# GitHub App token). Split for least privilege — the write token never touches CI-Hub:
+#   * CI_HUB_READ_TOKEN — CI-Hub Contents: read. Reads the CI-Hub source to rebuild the bundle.
+#   * CI_HUB_SYNC_TOKEN — this repo (CI-OpenClaw) Contents: write + Pull requests: write. Pushes the
+#     re-sync branch and opens the PR; needed so the PR triggers CI (a GITHUB_TOKEN-made PR would not).
 
 on:
   schedule:
@@ -49,12 +50,22 @@ jobs:
       - name: Checkout CI-OpenClaw
         uses: actions/checkout@v4
 
-      - name: Preflight — require CI_HUB_SYNC_TOKEN
+      - name: Preflight — require both resync tokens
         env:
-          TOKEN: ${{ secrets.CI_HUB_SYNC_TOKEN }}
+          READ_TOKEN: ${{ secrets.CI_HUB_READ_TOKEN }}
+          SYNC_TOKEN: ${{ secrets.CI_HUB_SYNC_TOKEN }}
         run: |
-          if [ -z "${TOKEN}" ]; then
-            echo "::error::CI_HUB_SYNC_TOKEN is not set. This job reads private CI-Hub and opens a PR, so it needs a fine-grained PAT (CI-Hub Contents: read + this repo Contents: write + Pull requests: write) at Settings → Secrets and variables → Actions. See this workflow's header."
+          missing=0
+          if [ -z "${READ_TOKEN}" ]; then
+            echo "::error::CI_HUB_READ_TOKEN is not set — needed to read the private CI-Hub source (CI-Hub Contents: read)."
+            missing=1
+          fi
+          if [ -z "${SYNC_TOKEN}" ]; then
+            echo "::error::CI_HUB_SYNC_TOKEN is not set — needed to push the re-sync branch and open the PR (this repo Contents: write + Pull requests: write)."
+            missing=1
+          fi
+          if [ "${missing}" -ne 0 ]; then
+            echo "Set the missing secret(s) at Settings → Secrets and variables → Actions. See this workflow's header."
             exit 1
           fi
 
@@ -63,7 +74,8 @@ jobs:
         with:
           repository: companionintelligence/CI-Hub
           ref: ${{ github.event.inputs.ref || 'dev' }}
-          token: ${{ secrets.CI_HUB_SYNC_TOKEN }}
+          # Read-only token — the write-scoped CI_HUB_SYNC_TOKEN deliberately has no CI-Hub access.
+          token: ${{ secrets.CI_HUB_READ_TOKEN }}
           path: ci-hub
           fetch-depth: 0
 

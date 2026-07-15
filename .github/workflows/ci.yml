@@ -148,7 +148,12 @@ jobs:
     #
     # Pinned to the RECORDED source, so it never fails just because CI-Hub `dev` moved on — that
     # "is the bundle behind dev?" freshness question is the separate, advisory
-    # ci-hub-plugin-resync.yml workflow. Skipped on fork PRs, which get no CI_HUB_READ_TOKEN.
+    # ci-hub-plugin-resync.yml workflow.
+    #
+    # Path-scoped on PRs: the rebuild (and its CI_HUB_READ_TOKEN) only runs when a PR touches the
+    # plugin dir or the drift script. An unrelated PR skips the heavy steps and the job passes
+    # trivially — so it neither needs the token nor waits on a CI-Hub checkout. Releases, pushes,
+    # schedule, and manual dispatch ALWAYS verify. Skipped entirely on fork PRs, which get no token.
     name: ci-hub plugin bundle integrity
     if: >-
       github.event_name != 'pull_request' ||
@@ -163,7 +168,30 @@ jobs:
           # (bundle + .ci-hub-source) is what gets verified — never one tree tested, another shipped.
           ref: ${{ inputs.ref }}
 
+      - name: Did this PR touch the plugin?
+        uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request'
+        id: filter
+        with:
+          filters: |
+            plugin:
+              - 'openclaw-context/plugins/ci-hub/**'
+              - 'scripts/check-ci-hub-plugin-drift.sh'
+
+      - name: Decide whether to rebuild-and-compare
+        id: scope
+        run: |
+          # Always verify off the PR path (releases / pushes / schedule / dispatch). On a PR, only
+          # when the plugin dir or the drift script actually changed.
+          if [ "${{ github.event_name }}" != "pull_request" ] || [ "${{ steps.filter.outputs.plugin }}" = "true" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No plugin/bundle/script changes in this PR — skipping the rebuild."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Preflight — require CI_HUB_READ_TOKEN
+        if: steps.scope.outputs.run == 'true'
         env:
           TOKEN: ${{ secrets.CI_HUB_READ_TOKEN }}
         run: |
@@ -173,6 +201,7 @@ jobs:
           fi
 
       - name: Read recorded CI-Hub source SHA
+        if: steps.scope.outputs.run == 'true'
         id: stamp
         run: |
           set -euo pipefail
@@ -182,6 +211,7 @@ jobs:
           echo "Recorded CI-Hub source: ${sha}"
 
       - name: Checkout CI-Hub at the recorded SHA
+        if: steps.scope.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
           repository: companionintelligence/CI-Hub
@@ -191,19 +221,23 @@ jobs:
           fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
+        if: steps.scope.outputs.run == 'true'
         with:
           # Match the pnpm CI-Hub itself pins, read from the checked-out repo's packageManager.
           package_json_file: ci-hub/package.json
 
       - uses: actions/setup-node@v4
+        if: steps.scope.outputs.run == 'true'
         with:
           node-version: "22"
 
       - name: Install the plugin's build dependency (esbuild)
+        if: steps.scope.outputs.run == 'true'
         working-directory: ci-hub
         # Only the openclaw-plugin package (zero runtime deps; esbuild devDep pinned to 0.25.0 by
         # the workspace override). --frozen-lockfile keeps the toolchain deterministic.
         run: pnpm install --frozen-lockfile --filter @ci-hub/openclaw-plugin
 
       - name: Check for drift
+        if: steps.scope.outputs.run == 'true'
         run: ./scripts/check-ci-hub-plugin-drift.sh --check --ci-hub ci-hub
