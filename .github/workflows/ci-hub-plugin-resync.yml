@@ -1,0 +1,127 @@
+name: ci-hub plugin bundle resync
+
+# Freshness half of the vendored ci-hub bundle guard (companionintelligence/CI-OpenClaw#45).
+#
+# The INTEGRITY check — "does the committed bundle match its recorded CI-Hub source?" — is a hard
+# gate in ci.yml (plugin-integrity job), so it also blocks releases via docker-publish.yml. This
+# workflow is the ADVISORY other half: "has the plugin source on CI-Hub `dev` moved ahead of what
+# we vendored?" If so it rebuilds and opens a re-sync PR, turning the signal into a ready fix.
+# It never blocks anything and never runs on pull_request, so it never executes untrusted PR code
+# with the write-capable token.
+#
+# See scripts/check-ci-hub-plugin-drift.sh for the rebuild/compare/write logic.
+#
+# REQUIRED SECRET — set under Settings → Secrets and variables → Actions (repo or org level).
+# Until it exists the cross-repo checkout of the private CI-Hub cannot run, and the preflight step
+# fails fast with a pointer here. Use a fine-grained PAT (or a GitHub App token):
+#   * CI_HUB_SYNC_TOKEN — CI-Hub Contents: read + this repo Contents: write + Pull requests: write.
+#     Needed so the opened PR triggers CI (a GITHUB_TOKEN-created PR would not).
+
+on:
+  schedule:
+    # Daily freshness sweep against CI-Hub dev (an hour after the openclaw-release-pr sweep).
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "CI-Hub ref to rebuild from (the freshness target)."
+        type: string
+        required: false
+        default: "dev"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialize so cron and manual dispatch can't race the fixed re-sync branch.
+  group: ci-hub-plugin-resync
+  cancel-in-progress: false
+
+jobs:
+  resync-pr:
+    name: freshness → re-sync PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout CI-OpenClaw
+        uses: actions/checkout@v4
+
+      - name: Preflight — require CI_HUB_SYNC_TOKEN
+        env:
+          TOKEN: ${{ secrets.CI_HUB_SYNC_TOKEN }}
+        run: |
+          if [ -z "${TOKEN}" ]; then
+            echo "::error::CI_HUB_SYNC_TOKEN is not set. This job reads private CI-Hub and opens a PR, so it needs a fine-grained PAT (CI-Hub Contents: read + this repo Contents: write + Pull requests: write) at Settings → Secrets and variables → Actions. See this workflow's header."
+            exit 1
+          fi
+
+      - name: Checkout CI-Hub at the freshness ref
+        uses: actions/checkout@v4
+        with:
+          repository: companionintelligence/CI-Hub
+          ref: ${{ github.event.inputs.ref || 'dev' }}
+          token: ${{ secrets.CI_HUB_SYNC_TOKEN }}
+          path: ci-hub
+          fetch-depth: 0
+
+      - name: Ancestry gate — is the vendored source actually behind this ref?
+        id: gate
+        run: |
+          set -euo pipefail
+          stamp="$(grep -oE '[0-9a-f]{40}' openclaw-context/plugins/ci-hub/.ci-hub-source | head -n1)"
+          head="$(git -C ci-hub rev-parse HEAD)"
+          if [ "${stamp}" = "${head}" ]; then
+            echo "Recorded source already equals the freshness ref (${head}); nothing to do."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          elif git -C ci-hub merge-base --is-ancestor "${stamp}" HEAD; then
+            # dev is strictly ahead of what we vendored → a real re-sync candidate.
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            # The vendored bundle was built from a commit not on this ref (e.g. an unmerged
+            # branch); we are intentionally ahead. Do NOT revert it — the ci.yml integrity gate
+            # still guards it against the recorded source.
+            echo "::notice::Recorded source ${stamp} is not an ancestor of ${head}; the bundle is ahead of the freshness ref. Skipping re-sync."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: pnpm/action-setup@v4
+        if: steps.gate.outputs.proceed == 'true'
+        with:
+          package_json_file: ci-hub/package.json
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.proceed == 'true'
+        with:
+          node-version: "22"
+
+      - name: Install the plugin's build dependency (esbuild)
+        if: steps.gate.outputs.proceed == 'true'
+        working-directory: ci-hub
+        run: pnpm install --frozen-lockfile --filter @ci-hub/openclaw-plugin
+
+      - name: Re-vendor the bundle + restamp
+        if: steps.gate.outputs.proceed == 'true'
+        run: ./scripts/check-ci-hub-plugin-drift.sh --write --ci-hub ci-hub
+
+      - name: Open or update the re-sync PR
+        if: steps.gate.outputs.proceed == 'true'
+        uses: peter-evans/create-pull-request@c0f553fe549906ede9cf27b5156039d195d2ece0 # v8.1.0
+        with:
+          token: ${{ secrets.CI_HUB_SYNC_TOKEN }}
+          branch: bot/ci-hub-plugin-resync
+          delete-branch: true
+          add-paths: |
+            openclaw-context/plugins/ci-hub/hub-plugin.mjs
+            openclaw-context/plugins/ci-hub/.ci-hub-source
+          commit-message: "Re-sync vendored ci-hub bundle from CI-Hub source"
+          title: "Re-sync vendored ci-hub bundle from CI-Hub source"
+          body: |
+            The vendored `ci-hub` plugin bundle drifted behind its CI-Hub source. This rebuilds
+            `hub-plugin.mjs` from the current freshness ref and updates the `.ci-hub-source` stamp.
+
+            Automated by `.github/workflows/ci-hub-plugin-resync.yml`. Refs #45.
+          labels: |
+            ci-hub-plugin-resync

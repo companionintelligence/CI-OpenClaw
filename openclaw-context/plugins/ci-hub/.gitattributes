@@ -1,0 +1,7 @@
+# The vendored ci-hub plugin bundle is byte-compared in CI against a fresh esbuild
+# rebuild from CI-Hub source (see scripts/check-ci-hub-plugin-drift.sh). esbuild emits
+# LF; a CRLF-normalized copy committed from a machine with core.autocrlf=true would then
+# fail that byte comparison on the Linux runner. Pin these files to LF (and never let git
+# re-normalize the bundle) regardless of the committer's settings.
+hub-plugin.mjs -text
+.ci-hub-source text eol=lf

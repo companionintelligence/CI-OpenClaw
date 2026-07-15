@@ -137,3 +137,73 @@ jobs:
           name: openclaw-configs-${{ matrix.channel }}
           path: ${{ runner.temp }}/schema-gate/
           if-no-files-found: ignore
+
+  plugin-integrity:
+    # Vendored ci-hub bundle integrity: rebuild the plugin from the exact CI-Hub commit recorded
+    # in openclaw-context/plugins/ci-hub/.ci-hub-source and byte-compare against the committed
+    # hub-plugin.mjs. Living in ci.yml means it gates PRs AND releases — docker-publish.yml calls
+    # this workflow (with `secrets: inherit`) before building, so a stale or hand-edited bundle can
+    # never ship inside an image. See scripts/check-ci-hub-plugin-drift.sh and
+    # companionintelligence/CI-OpenClaw#45.
+    #
+    # Pinned to the RECORDED source, so it never fails just because CI-Hub `dev` moved on — that
+    # "is the bundle behind dev?" freshness question is the separate, advisory
+    # ci-hub-plugin-resync.yml workflow. Skipped on fork PRs, which get no CI_HUB_READ_TOKEN.
+    name: ci-hub plugin bundle integrity
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout CI-OpenClaw
+        uses: actions/checkout@v4
+        with:
+          # The publish workflow passes the exact SHA it is about to build, so the shipped tree
+          # (bundle + .ci-hub-source) is what gets verified — never one tree tested, another shipped.
+          ref: ${{ inputs.ref }}
+
+      - name: Preflight — require CI_HUB_READ_TOKEN
+        env:
+          TOKEN: ${{ secrets.CI_HUB_READ_TOKEN }}
+        run: |
+          if [ -z "${TOKEN}" ]; then
+            echo "::error::CI_HUB_READ_TOKEN is not set. This gate rebuilds the plugin from the private CI-Hub repo and needs a fine-grained PAT (CI-Hub Contents: read) at Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+      - name: Read recorded CI-Hub source SHA
+        id: stamp
+        run: |
+          set -euo pipefail
+          sha="$(grep -oE '[0-9a-f]{40}' openclaw-context/plugins/ci-hub/.ci-hub-source | head -n1)"
+          [ -n "${sha}" ] || { echo "::error::.ci-hub-source has no commit SHA"; exit 1; }
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "Recorded CI-Hub source: ${sha}"
+
+      - name: Checkout CI-Hub at the recorded SHA
+        uses: actions/checkout@v4
+        with:
+          repository: companionintelligence/CI-Hub
+          ref: ${{ steps.stamp.outputs.sha }}
+          token: ${{ secrets.CI_HUB_READ_TOKEN }}
+          path: ci-hub
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          # Match the pnpm CI-Hub itself pins, read from the checked-out repo's packageManager.
+          package_json_file: ci-hub/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install the plugin's build dependency (esbuild)
+        working-directory: ci-hub
+        # Only the openclaw-plugin package (zero runtime deps; esbuild devDep pinned to 0.25.0 by
+        # the workspace override). --frozen-lockfile keeps the toolchain deterministic.
+        run: pnpm install --frozen-lockfile --filter @ci-hub/openclaw-plugin
+
+      - name: Check for drift
+        run: ./scripts/check-ci-hub-plugin-drift.sh --check --ci-hub ci-hub

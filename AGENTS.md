@@ -26,7 +26,14 @@ npm run test:schema   # validate openclaw.json against OpenClaw's own schema (ne
 docker compose build   # build
 ```
 
+## Vendored ci-hub plugin bundle
 
+`openclaw-context/plugins/ci-hub/hub-plugin.mjs` is a build artifact of CI-Hub's
+`packages/openclaw-plugin`, not source — never hand-edit it. To change plugin behaviour, fix the
+CI-Hub source, then re-sync: `scripts/check-ci-hub-plugin-drift.sh --write --ci-hub /path/to/CI-Hub`
+(rebuilds the bundle and records the source commit in `.ci-hub-source`). CI byte-checks it against a
+rebuild (the `plugin-integrity` job in `.github/workflows/ci.yml`, which also gates releases), so a
+hand-edit or missed re-sync fails the check.
 
 ## Git discipline
 

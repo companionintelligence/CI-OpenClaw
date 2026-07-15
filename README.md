@@ -266,6 +266,22 @@ The bundle is written to `packages/openclaw-plugin/dist/hub-plugin.mjs` by defau
 OPENCLAW_PLUGIN_OUT_DIR=/path/to/CI-OpenClaw/openclaw-context/plugins/ci-hub pnpm bundle
 ```
 
+### Bundle drift is CI-enforced
+
+`openclaw-context/plugins/ci-hub/hub-plugin.mjs` is the copy the appliance actually loads, and it is re-synced by hand — a fix landing in CI-Hub does nothing on any appliance until this bundle is rebuilt and committed. That silent gap shipped broken plugins more than once (companionintelligence/CI-OpenClaw#45), so CI now guards it:
+
+- **Integrity** (the `plugin-integrity` job in `.github/workflows/ci.yml`, a hard gate) rebuilds from the exact CI-Hub commit recorded in `openclaw-context/plugins/ci-hub/.ci-hub-source` and byte-compares. Because `docker-publish.yml` runs `ci.yml` before building, this also blocks a release from shipping a stale bundle.
+- **Freshness** (`.github/workflows/ci-hub-plugin-resync.yml`, daily) rebuilds from CI-Hub `dev` and opens an automatic re-sync PR when the source has moved ahead.
+
+The recommended way to re-sync (rebuilds **and** records provenance in `.ci-hub-source` in one step):
+
+```bash
+scripts/check-ci-hub-plugin-drift.sh --write --ci-hub /path/to/CI-Hub
+git add openclaw-context/plugins/ci-hub/hub-plugin.mjs openclaw-context/plugins/ci-hub/.ci-hub-source
+```
+
+Verify against a checkout without changing anything: `npm run check:ci-hub-plugin-drift -- --ci-hub /path/to/CI-Hub`. Only `hub-plugin.mjs` is byte-checked; the `index.js` shim, `openclaw.plugin.json`, and `package.json` siblings are hand-authored (a `node --test` smoke test covers that the shim still loads the bundle synchronously).
+
 ## License
 
 MIT
