@@ -101,10 +101,22 @@ describe("ci-hub plugin bundle + shim load contract", () => {
     assert.equal(typeof shim.register, "function");
   });
 
-  test("the shim mounts no wake route without HUB_WAKE_SECRET", () => {
-    const { api, routes } = makeApi();
-    shim.register(api);
-    assert.equal(routes.length, 0, "no wake route without HUB_WAKE_SECRET");
+  test("the shim mounts no wake route when HUB_WAKE_SECRET is absent", () => {
+    // HUB_URL MUST be set: register() early-returns when it's missing, before the wake-route
+    // gate — so without it this would pass for the wrong reason (early return, not the secret
+    // check). Leave HUB_WAKE_SECRET unset to exercise the `else` (wake disabled) branch. Setting
+    // HUB_URL fires the health probe (fetch), so stub it to stay hermetic.
+    process.env.HUB_URL = "http://127.0.0.1:9";
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = () => Promise.reject(new Error("fetch disabled in test"));
+    try {
+      const { api, routes } = makeApi();
+      shim.register(api);
+      const wake = routes.find((r) => r.path === "/hooks/hub-wake");
+      assert.ok(!wake, "no /hooks/hub-wake route should be registered without HUB_WAKE_SECRET");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 
   test("the bundle's register() returns synchronously — the #46 contract", () => {
