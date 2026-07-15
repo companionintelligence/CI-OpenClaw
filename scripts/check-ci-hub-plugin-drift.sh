@@ -254,7 +254,8 @@ mode_compare() {
 }
 
 usage() {
-  sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # Print the header comment block (title through EXIT CODES), stripping the leading "# ".
+  sed -n '2,54p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # --- Arg parsing -----------------------------------------------------------------------------
