@@ -10,8 +10,12 @@
 /**
  * Where OpenClaw mounts its own webhook routes (POST /hooks/wake, POST /hooks/agent).
  *
- * This is OpenClaw's default mount point and CI-OpenClaw never sets `hooks.path`, so the
- * prefix is fixed. If we ever do set it, this must follow.
+ * This is OpenClaw's default mount point, and `config-reconcile.cjs` (ensureHooksWake) never
+ * sets `hooks.path`, so the prefix is fixed at the default. The two are coupled: if reconcile
+ * ever writes a non-default `hooks.path`, the real hook routes move but this exception keeps
+ * excepting `/hooks`, so the gateway token is re-injected onto the live hook route and every
+ * wake silently 401s again (CI-Hub#897). Change both together — the reciprocal note is on
+ * ensureHooksWake in config-reconcile.cjs.
  */
 const HOOKS_PATH_PREFIX = "/hooks";
 

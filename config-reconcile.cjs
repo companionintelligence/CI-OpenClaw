@@ -577,6 +577,10 @@ function createConfigReconciler({
     const { node: hooks, replaced } = ensureRecordPathTracked(config, ["hooks"]);
     let changed = replaced;
 
+    // Do NOT set `hooks.path` here. The setup-server proxy (proxy-headers.cjs, HOOKS_PATH_PREFIX)
+    // hardcodes the default `/hooks` mount to know which requests must keep the caller's own hook
+    // token instead of the injected gateway token. Moving the mount here without updating that
+    // constant would re-break the Hub's wake exactly as CI-Hub#897 — change both together.
     if (hooks.enabled !== true) {
       hooks.enabled = true;
       changed = true;
