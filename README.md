@@ -16,7 +16,7 @@ This is a containerized version of OpenClaw with seamless onboarding on the CI m
 - apt/apt-get disabled with a message telling openclaw to use brew instead
 - Globally installed node modules persisted between app updates
 - A bundled `companionintelligence` memory plugin that can use CI-Server as OpenClaw's active memory backend when `CI_SERVER_URL` and `CI_SERVER_TOKEN` are configured
-- Automatic Hub MCP tool access via a native `mcp.servers.ci-hub` entry in `openclaw.json` (Streamable HTTP), registered when the Hub injects `HUB_URL` / `HUB_MCP_API_KEY` (default on CI marketplace installs with MCP enabled). A bundled `ci-hub` plugin additionally provides the wake endpoint, app-event SSE, and local-inference auto-config.
+- Automatic Hub MCP tool access via a native `mcp.servers.ci-hub` entry in `openclaw.json` (Streamable HTTP), registered when the Hub injects `HUB_URL` / `HUB_MCP_API_KEY` (default on CI marketplace installs with MCP enabled). A bundled `ci-hub` plugin additionally provides the wake endpoint and app-event SSE. The `ci-hub` model provider is written to `openclaw.json` by the setup server (`config-reconcile.cjs`), not by the plugin — see the note below.
 - Security features that complicate setup disabled which are not required on the CI marketplace due to OpenClaw already being protected when running behind the CI app proxy
 
 This creates a seamless one-click install experience for OpenClaw on the CI marketplace.
@@ -250,7 +250,7 @@ Hub MCP **tools** load through OpenClaw's built-in MCP client via the `mcp.serve
 Two plugin behaviours are **not** what they used to be:
 
 - **`HUB_MCP_LEGACY_CLIENT=true` is no longer a working rollback.** It registered Hub tools in-plugin after awaiting `tools/list`, but OpenClaw requires `register()` to be synchronous and closes the plugin API once it returns — a late `registerTool()` is silently discarded. The flag now logs an error instead of pretending to work. Hub tools come from `mcp.servers.ci-hub`.
-- **Inference auto-config is off by default**, behind `CI_HUB_PLUGIN_INFERENCE=1`. The plugin-registered `ci-hub` provider declares `api: "ollama"`, which OpenClaw only resolves for providers declared in `openclaw.json` — registered through the plugin API it has no implementation, and the first LLM call fails with `No API provider registered for api: ollama`. `server.cjs` already writes a working `models.providers.ci-hub` into `openclaw.json`, so the plugin path is redundant on an appliance. See companionintelligence/CI-Hub#895.
+- **The plugin no longer registers an inference/model provider** (the `CI_HUB_PLUGIN_INFERENCE` opt-in is gone). A provider registered through the plugin API resolves its transport against OpenClaw's api-provider registry, which has no `ollama` implementation — so a plugin-registered `ci-hub` provider with `api: "ollama"` made the first LLM call fail with `No API provider registered for api: ollama`, taking chat down. (A provider declared in `openclaw.json` resolves `ollama` fine, via a separate provider-runtime path the plugin API never reaches.) `server.cjs` / `config-reconcile.cjs` already write the working `models.providers.ci-hub` into `openclaw.json` — the single source of truth for the `ci-hub` provider on an appliance. See companionintelligence/CI-Hub#895.
 
 If Hub MCP is disabled (`HUB_MCP_ENABLED=false` in the container env), bootstrap steps no-op gracefully (and remove any prior `mcp.servers.ci-hub` entry). Run `cihub mcp setup` on the Hub to provision a key for existing installs.
 
