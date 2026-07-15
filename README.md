@@ -266,6 +266,27 @@ The bundle is written to `packages/openclaw-plugin/dist/hub-plugin.mjs` by defau
 OPENCLAW_PLUGIN_OUT_DIR=/path/to/CI-OpenClaw/openclaw-context/plugins/ci-hub pnpm bundle
 ```
 
+### Bundle drift is CI-enforced
+
+`openclaw-context/plugins/ci-hub/hub-plugin.mjs` is the copy the appliance actually loads, and it is re-synced by hand — a fix landing in CI-Hub does nothing on any appliance until this bundle is rebuilt and committed. That silent gap shipped broken plugins more than once (companionintelligence/CI-OpenClaw#45), so CI now guards it:
+
+- **Integrity** (the `plugin-integrity` job in `.github/workflows/ci.yml`, a hard gate) rebuilds from the exact CI-Hub commit recorded in `openclaw-context/plugins/ci-hub/.ci-hub-source` and byte-compares. On PRs it runs only when the plugin dir or the drift script changed; on pushes, schedule, and releases (via `docker-publish.yml`, which runs `ci.yml` before building) it always runs — so a stale bundle can't ship in an image.
+- **Freshness** (`.github/workflows/ci-hub-plugin-resync.yml`, daily) rebuilds from CI-Hub `dev` and opens an automatic re-sync PR when the source has moved ahead.
+
+Both need cross-repo access to the private CI-Hub. Set these under **Settings → Secrets and variables → Actions** (fine-grained PATs, or a GitHub App token) — scoped for least privilege:
+
+- **`CI_HUB_READ_TOKEN`** — CI-Hub **Contents: read**. Used by the integrity gate and the resync rebuild.
+- **`CI_HUB_SYNC_TOKEN`** — this repo (CI-OpenClaw) **Contents: write + Pull requests: write**, and *no* CI-Hub access. Used only to push the resync branch and open its PR.
+
+The recommended way to re-sync (rebuilds **and** records provenance in `.ci-hub-source` in one step):
+
+```bash
+scripts/check-ci-hub-plugin-drift.sh --write --ci-hub /path/to/CI-Hub
+git add openclaw-context/plugins/ci-hub/hub-plugin.mjs openclaw-context/plugins/ci-hub/.ci-hub-source
+```
+
+Verify against a checkout without changing anything: `npm run check:ci-hub-plugin-drift -- --ci-hub /path/to/CI-Hub`. Only `hub-plugin.mjs` is byte-checked; the `index.js` shim, `openclaw.plugin.json`, and `package.json` siblings are hand-authored (a `node --test` smoke test covers that the shim still loads the bundle synchronously).
+
 ## License
 
 MIT
