@@ -125,7 +125,10 @@ die_setup() {
 # empty if the stamp is missing/unreadable.
 read_stamp() {
   [ -f "${STAMP_FILE}" ] || { echo ""; return 0; }
-  grep -oE '[0-9a-f]{40}' "${STAMP_FILE}" | head -n1 || echo ""
+  # grep -m1 stops at the first match and needs no `| head`, so there is no pipe that could
+  # SIGPIPE (and, under pipefail, wrongly blank the stamp) were the file ever large. No match
+  # exits 1 → "".
+  grep -m1 -oE '[0-9a-f]{40}' "${STAMP_FILE}" || echo ""
 }
 
 # --- Rebuild ---------------------------------------------------------------------------------

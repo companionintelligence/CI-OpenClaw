@@ -149,8 +149,8 @@ jobs:
     # Vendored ci-hub bundle integrity: rebuild the plugin from the exact CI-Hub commit recorded
     # in openclaw-context/plugins/ci-hub/.ci-hub-source and byte-compare against the committed
     # hub-plugin.mjs. Living in ci.yml means it gates PRs AND releases — docker-publish.yml calls
-    # this workflow (with `secrets: inherit`) before building, so a stale or hand-edited bundle can
-    # never ship inside an image. See scripts/check-ci-hub-plugin-drift.sh and
+    # this workflow (passing only CI_HUB_READ_TOKEN, not `secrets: inherit`) before building, so a
+    # stale or hand-edited bundle can never ship inside an image. See scripts/check-ci-hub-plugin-drift.sh and
     # companionintelligence/CI-OpenClaw#45.
     #
     # Pinned to the RECORDED source, so it never fails just because CI-Hub `dev` moved on — that
@@ -194,8 +194,12 @@ jobs:
           # step under `set -e` and fails CLOSED — red, not a silent skip. Piping git directly
           # into `if … grep` would swallow that failure as "no match" and skip the gate.
           changed="$(git diff --name-only "${base}...${head}")"
+          # grep WITHOUT -q so it reads ALL of printf's output. With -q, grep exits on the first
+          # match; on a large diff (a matching path early, >64KB of paths after it) printf then dies
+          # with SIGPIPE, which pipefail surfaces as a non-zero pipeline — the `if` reads that as
+          # "no match" and skips the integrity gate (fail-OPEN). Reading all input keeps it closed.
           if printf '%s\n' "${changed}" \
-               | grep -qE '^(openclaw-context/plugins/ci-hub/|scripts/check-ci-hub-plugin-drift\.sh$)'; then
+               | grep -E '^(openclaw-context/plugins/ci-hub/|scripts/check-ci-hub-plugin-drift\.sh$)' >/dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "No plugin/bundle/script changes in this PR — skipping the rebuild."
@@ -217,9 +221,10 @@ jobs:
         id: stamp
         run: |
           set -euo pipefail
-          # `|| true` so a stamp with no 40-hex token doesn't abort the assignment under pipefail
-          # before the friendly guard below can print an actionable ::error::.
-          sha="$(grep -oE '[0-9a-f]{40}' openclaw-context/plugins/ci-hub/.ci-hub-source | head -n1 || true)"
+          # grep -m1 (no `| head`) so there is no pipe to SIGPIPE; `|| true` so a stamp with no
+          # 40-hex token doesn't abort the assignment under pipefail before the guard below prints
+          # an actionable ::error::.
+          sha="$(grep -m1 -oE '[0-9a-f]{40}' openclaw-context/plugins/ci-hub/.ci-hub-source || true)"
           [ -n "${sha}" ] || { echo "::error::.ci-hub-source has no commit SHA"; exit 1; }
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
           echo "Recorded CI-Hub source: ${sha}"
@@ -231,6 +236,11 @@ jobs:
           repository: companionintelligence/CI-Hub
           ref: ${{ steps.stamp.outputs.sha }}
           token: ${{ secrets.CI_HUB_READ_TOKEN }}
+          # Don't persist the cross-repo PAT into ci-hub/.git/config. This job then runs the PR
+          # head's own drift script (attacker-controlled on a same-repo PR), which could otherwise
+          # read the token from the git config. The rebuild only reads the working tree + local
+          # `git rev-parse HEAD`; it never re-fetches, so the token isn't needed after checkout.
+          persist-credentials: false
           path: ci-hub
           fetch-depth: 0
 

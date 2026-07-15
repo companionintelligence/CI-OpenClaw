@@ -101,11 +101,21 @@ describe("ci-hub plugin bundle + shim load contract", () => {
     assert.equal(typeof shim.register, "function");
   });
 
-  test("register() returns synchronously with no credentials (the #46 contract)", () => {
+  test("the shim mounts no wake route without HUB_WAKE_SECRET", () => {
     const { api, routes } = makeApi();
-    const ret = shim.register(api);
-    assert.equal(isThenable(ret), false, 'register() must not return a promise ("must be synchronous")');
+    shim.register(api);
     assert.equal(routes.length, 0, "no wake route without HUB_WAKE_SECRET");
+  });
+
+  test("the bundle's register() returns synchronously — the #46 contract", () => {
+    // Assert on the BUNDLE directly. The shim (index.js) calls registerHubPlugin(api, {...})
+    // WITHOUT returning it, so shim.register() is always undefined and can't reveal an async
+    // regression — isThenable(undefined) is trivially false. bundle.register IS registerHubPlugin,
+    // the exact function OpenClaw's loader invokes and throws on if it returns a promise. Called
+    // exactly as the shim does; no credentials → no network.
+    const { api } = makeApi();
+    const ret = bundle.register(api, { sseEnabled: false });
+    assert.equal(isThenable(ret), false, 'bundle register() must not return a promise ("must be synchronous")');
   });
 
   test("register() mounts POST /hooks/hub-wake when wake credentials are present", () => {
@@ -118,8 +128,9 @@ describe("ci-hub plugin bundle + shim load contract", () => {
     globalThis.fetch = () => Promise.reject(new Error("fetch disabled in test"));
     try {
       const { api, routes } = makeApi();
-      const ret = shim.register(api);
-      assert.equal(isThenable(ret), false, "register() must stay synchronous on the credentialed path too");
+      // Through the shim here, to prove it forwards to the bundle and the wake route mounts.
+      // (The bundle's synchronous-return contract is asserted directly in the test above.)
+      shim.register(api);
       const wake = routes.find((r) => r.path === "/hooks/hub-wake");
       assert.ok(wake, "expected a /hooks/hub-wake route to be registered");
       assert.equal(wake.method, "POST");

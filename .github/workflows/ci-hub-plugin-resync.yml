@@ -76,6 +76,10 @@ jobs:
           ref: ${{ github.event.inputs.ref || 'dev' }}
           # Read-only token — the write-scoped CI_HUB_SYNC_TOKEN deliberately has no CI-Hub access.
           token: ${{ secrets.CI_HUB_READ_TOKEN }}
+          # Don't leave the PAT in ci-hub/.git/config; the subsequent build runs CI-Hub's own
+          # bundle script and the token isn't needed after checkout (ancestry gate + rebuild use
+          # only local git and the working tree).
+          persist-credentials: false
           path: ci-hub
           fetch-depth: 0
 
@@ -88,8 +92,9 @@ jobs:
           FRESHNESS_REF: ${{ github.event.inputs.ref || 'dev' }}
         run: |
           set -euo pipefail
-          # `|| true` so a stamp with no 40-hex token doesn't abort under pipefail before the guard.
-          stamp="$(grep -oE '[0-9a-f]{40}' openclaw-context/plugins/ci-hub/.ci-hub-source | head -n1 || true)"
+          # grep -m1 (no `| head`) avoids a SIGPIPE-prone pipe; `|| true` so a stamp with no 40-hex
+          # token doesn't abort under pipefail before the guard.
+          stamp="$(grep -m1 -oE '[0-9a-f]{40}' openclaw-context/plugins/ci-hub/.ci-hub-source || true)"
           if [ -z "${stamp}" ]; then
             echo "::error::.ci-hub-source has no commit SHA — cannot determine freshness."
             exit 1
