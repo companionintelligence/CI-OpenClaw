@@ -262,7 +262,7 @@ function register(rawApi, config) {
     });
   }
   api.log.info(
-    "ci-hub chat/TTS providers come from openclaw.json (models.providers.ci-hub, written by config-reconcile); this plugin does not register an LLM provider \u2014 see CI-Hub#895"
+    "ci-hub chat models come from openclaw.json (models.providers.ci-hub, written by config-reconcile); this plugin registers no LLM or speech provider \u2014 see CI-Hub#895"
   );
 }
 function describeError(error) {
