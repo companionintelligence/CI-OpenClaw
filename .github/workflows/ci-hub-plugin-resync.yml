@@ -81,6 +81,11 @@ jobs:
 
       - name: Ancestry gate — is the vendored source actually behind this ref?
         id: gate
+        env:
+          # Reference the dispatch input via the environment, never interpolated into the shell
+          # body — a `${{ github.event.inputs.ref }}` spliced into `run:` is a script-injection
+          # sink (a crafted ref could execute arbitrary shell on the runner).
+          FRESHNESS_REF: ${{ github.event.inputs.ref || 'dev' }}
         run: |
           set -euo pipefail
           # `|| true` so a stamp with no 40-hex token doesn't abort under pipefail before the guard.
@@ -114,7 +119,7 @@ jobs:
             # squash-merged and deleted, which also puts the ci.yml integrity checkout at risk.
             # Flag it loudly for a human to re-vendor from a merge-reachable commit, but don't turn
             # this advisory cron red over it.
-            echo "::warning::Recorded source ${stamp} is not present in the CI-Hub checkout (merge-base exit ${rc}). Re-vendor the bundle from a commit on ${{ github.event.inputs.ref || 'dev' }}. Skipping re-sync."
+            echo "::warning::Recorded source ${stamp} is not present in the CI-Hub checkout (merge-base exit ${rc}). Re-vendor the bundle from a commit on ${FRESHNESS_REF}. Skipping re-sync."
             echo "proceed=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -133,32 +138,26 @@ jobs:
         working-directory: ci-hub
         run: pnpm install --frozen-lockfile --filter @ci-hub/openclaw-plugin
 
-      - name: Is the bundle actually stale vs this ref?
+      - name: Re-vendor from this ref, open a PR only on real bundle drift
         id: fresh
         if: steps.gate.outputs.proceed == 'true'
         run: |
-          set -uo pipefail
-          # Only a real BUNDLE difference is worth a re-sync PR. If `dev` advanced but the plugin
-          # source is unchanged, the rebuild is byte-identical and re-vendoring would open a PR
-          # that merely bumps the .ci-hub-source stamp — misleading churn. Rebuild from the
-          # checked-out ref and byte-compare; act only on genuine drift.
-          # Exit codes: 0 = in sync, 1 = drift (re-sync), 2 = setup/build error.
-          if ./scripts/check-ci-hub-plugin-drift.sh --check --ci-hub ci-hub; then
-            echo "The bundle already matches a rebuild from this ref; only the stamp is behind. No re-sync PR needed."
-            echo "stale=false" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          # Rebuild from the checked-out freshness ref and restamp in one step (--write). Only a
+          # real BUNDLE change is worth a PR: if `dev` advanced but the plugin source is unchanged,
+          # the rebuild is byte-identical and only .ci-hub-source moved — re-vendoring that is
+          # misleading churn. Gate on the bundle file actually changing; the stamp-only edit is left
+          # uncommitted and discarded with the runner when no PR is opened.
+          # (A single --write, not --check + --write: --check would rebuild a second time AND emit a
+          # drift ::error:: annotation on this expected-stale path, which reads as a failure.)
+          ./scripts/check-ci-hub-plugin-drift.sh --write --ci-hub ci-hub
+          if [ -n "$(git status --porcelain -- openclaw-context/plugins/ci-hub/hub-plugin.mjs)" ]; then
+            echo "Bundle changed — opening a re-sync PR."
+            echo "stale=true" >> "$GITHUB_OUTPUT"
           else
-            rc=$?
-            if [ "${rc}" -eq 1 ]; then
-              echo "stale=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "::error::Drift check failed to run (exit ${rc})."
-              exit "${rc}"
-            fi
+            echo "Bundle is byte-identical to this ref; only the stamp moved. No re-sync PR needed."
+            echo "stale=false" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Re-vendor the bundle + restamp
-        if: steps.fresh.outputs.stale == 'true'
-        run: ./scripts/check-ci-hub-plugin-drift.sh --write --ci-hub ci-hub
 
       - name: Open or update the re-sync PR
         if: steps.fresh.outputs.stale == 'true'

@@ -225,6 +225,7 @@ check_drift() {
 mode_check() {
   local ci_hub="$1" committed="$2"
   local stamp; stamp="$(read_stamp)"
+  local head_sha=""
   if [ -n "${stamp}" ]; then
     log_info "Recorded source (.ci-hub-source): ${stamp}"
     # If the checkout is a git repo, note whether its HEAD matches the recorded source, so a
@@ -292,9 +293,11 @@ main() {
       --check)      mode="check" ;;
       --write)      mode="write" ;;
       --compare)    mode="compare" ;;
-      --ci-hub)     ci_hub="${2:?--ci-hub needs a path}"; shift ;;
-      --committed)  committed="${2:?--committed needs a path}"; shift ;;
-      --fresh)      fresh="${2:?--fresh needs a path}"; shift ;;
+      # Validate the value explicitly (not `${2:?}`, which exits 1 — indistinguishable from drift)
+      # so a missing option-argument is reported as a setup error (exit 2), per the exit contract.
+      --ci-hub)     [ $# -ge 2 ] || die_setup "--ci-hub needs a path"; ci_hub="$2"; shift ;;
+      --committed)  [ $# -ge 2 ] || die_setup "--committed needs a path"; committed="$2"; shift ;;
+      --fresh)      [ $# -ge 2 ] || die_setup "--fresh needs a path"; fresh="$2"; shift ;;
       -h|--help)    usage; exit 0 ;;
       *)            die_setup "unknown argument: $1 (try --help)" ;;
     esac
