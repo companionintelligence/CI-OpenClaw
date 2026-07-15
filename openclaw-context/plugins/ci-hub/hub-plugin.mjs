@@ -232,8 +232,8 @@ function register(rawApi, config) {
   const hubApiKey = config.hubApiKey || process.env.HUB_API_KEY;
   const mcpApiKey = config.mcpApiKey || process.env.HUB_MCP_API_KEY || hubApiKey;
   const wakeSecret = config.wakeSecret || process.env.HUB_WAKE_SECRET;
-  if (!hubUrl || !mcpApiKey) {
-    api.log.error("CI-Hub plugin requires hubUrl and mcpApiKey (via config or HUB_URL/HUB_MCP_API_KEY env vars)");
+  if (!hubUrl) {
+    api.log.error("CI-Hub plugin requires hubUrl (via config.hubUrl or the HUB_URL env var)");
     return;
   }
   api.log.info(`CI-Hub plugin initializing (hub: ${hubUrl})`);
@@ -256,10 +256,14 @@ function register(rawApi, config) {
   }
   void probeHubHealth(api, hubUrl);
   if (config.sseEnabled) {
-    const sseListener = new SseListenerService(hubUrl, mcpApiKey, api, config.wakeFilter);
-    void sseListener.start().catch((error) => {
-      api.log.warn(`SSE listener failed to start: ${describeError(error)}`);
-    });
+    if (mcpApiKey) {
+      const sseListener = new SseListenerService(hubUrl, mcpApiKey, api, config.wakeFilter);
+      void sseListener.start().catch((error) => {
+        api.log.warn(`SSE listener failed to start: ${describeError(error)}`);
+      });
+    } else {
+      api.log.warn("SSE listener enabled but no API key is set (config.mcpApiKey / HUB_MCP_API_KEY / HUB_API_KEY) \u2014 SSE disabled");
+    }
   }
   api.log.info(
     "ci-hub chat models come from openclaw.json (models.providers.ci-hub, written by config-reconcile); this plugin registers no LLM or speech provider \u2014 see CI-Hub#895"
