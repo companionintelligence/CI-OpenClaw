@@ -30,6 +30,13 @@
 #     source moved ahead and the bundle needs re-vendoring (the scheduled workflow turns this
 #     into an auto re-sync PR).
 #
+# Only ever stamp a MERGE-REACHABLE CI-Hub commit. The integrity gate checks CI-Hub out at the
+# exact recorded SHA, and GitHub's git server only serves SHAs reachable from an advertised ref.
+# Vendoring from an unmerged branch and then letting that branch get squash-merged and deleted
+# leaves the recorded SHA unreachable, so the integrity checkout would fail for everyone until the
+# bundle is re-vendored from a commit that is on `dev`. --write stamps the checkout's HEAD, so run
+# it against a pushed, merge-reachable commit (the resync bot always stamps `dev` HEAD).
+#
 # REPRODUCIBILITY — the cwd matters
 # ---------------------------------
 # esbuild writes each module's banner comment (e.g. `// src/mcp-client.ts`) RELATIVE TO THE
@@ -64,7 +71,9 @@ STAMP_FILE="${REPO_ROOT}/${PLUGIN_REL}/.ci-hub-source"
 # Where packages/openclaw-plugin lives inside a CI-Hub checkout.
 CI_HUB_PLUGIN_SUBPATH="packages/openclaw-plugin"
 
-# Temp dirs to clean up on exit (rebuild output lands here).
+# Temp dirs to clean up on exit (rebuild output lands here). rebuild_bundle appends to this from
+# the top-level shell — NOT from inside a command substitution — so the EXIT trap actually sees
+# the dir it created (a `$(...)` subshell's array mutation would be lost).
 TMP_DIRS=()
 cleanup() {
   local d
@@ -88,10 +97,13 @@ log_warn()  { printf '%s WARN: %s\n' "${LOG_PREFIX}" "$*" >&2; }
 log_error() { printf '%s ERROR: %s\n' "${LOG_PREFIX}" "$*" >&2; }
 log_ok()    { printf '%s OK: %s\n' "${LOG_PREFIX}" "$*" >&2; }
 
-# gh_annotation LEVEL MESSAGE — emit a GitHub Actions annotation when running in CI.
+# gh_annotation LEVEL MESSAGE — emit a GitHub Actions annotation when running in CI. Written to
+# stderr (like all our logging) so it is never captured by a `$(...)` around a caller — GitHub
+# parses workflow commands from stderr just as it does from stdout, but a captured `::error::`
+# would be swallowed into a variable and never surface in the checks UI.
 gh_annotation() {
   [ "${GITHUB_ACTIONS:-}" = "true" ] || return 0
-  printf '::%s::%s\n' "$1" "$2"
+  printf '::%s::%s\n' "$1" "$2" >&2
 }
 
 # gh_summary LINE — append a line to the job step summary when running in CI.
@@ -117,10 +129,17 @@ read_stamp() {
 }
 
 # --- Rebuild ---------------------------------------------------------------------------------
-# rebuild_bundle CI_HUB_DIR — build the plugin from the given CI-Hub checkout and echo the path
-# to the freshly built hub-plugin.mjs (in a temp dir cleaned up on exit). Runs the build from
-# the plugin package directory so esbuild's cwd-relative module banners match the committed
-# bundle (see the reproducibility note in the header).
+# Set by rebuild_bundle to the path of the freshly built hub-plugin.mjs. Returned via a global
+# (not stdout) on purpose: rebuild_bundle must run in the top-level shell so its TMP_DIRS append
+# reaches the EXIT trap — capturing it as `$(rebuild_bundle …)` would run it in a subshell and
+# leak the temp dir. Callers read this immediately after calling rebuild_bundle.
+REBUILT_BUNDLE=""
+
+# rebuild_bundle CI_HUB_DIR — build the plugin from the given CI-Hub checkout into a temp dir
+# (registered for cleanup on exit) and set REBUILT_BUNDLE to the built hub-plugin.mjs. Runs the
+# build from the plugin package directory so esbuild's cwd-relative module banners match the
+# committed bundle (see the reproducibility note in the header). Must be called directly, NOT in
+# a command substitution.
 rebuild_bundle() {
   local ci_hub="$1"
   [ -n "${ci_hub}" ] || die_setup "--ci-hub <dir> is required for this mode"
@@ -129,7 +148,7 @@ rebuild_bundle() {
   [ -f "${plugin_dir}/scripts/bundle-to-openclaw.mjs" ] || die_setup "bundle script missing in ${plugin_dir}/scripts"
 
   local out
-  out="$(mktemp -d)"
+  out="$(mktemp -d)" || die_setup "could not create a temp directory for the rebuild"
   TMP_DIRS+=("${out}")
 
   log_info "Rebuilding bundle from ${plugin_dir} (cwd-pinned to the plugin package)"
@@ -147,7 +166,7 @@ rebuild_bundle() {
 
   local built="${out}/hub-plugin.mjs"
   [ -f "${built}" ] || die_setup "rebuild produced no ${built}"
-  echo "${built}"
+  REBUILT_BUNDLE="${built}"
 }
 
 # --- Compare + report ------------------------------------------------------------------------
@@ -216,7 +235,8 @@ mode_check() {
     fi
   fi
 
-  local fresh; fresh="$(rebuild_bundle "${ci_hub}")"
+  rebuild_bundle "${ci_hub}"
+  local fresh="${REBUILT_BUNDLE}"
   if check_drift "${fresh}" "${committed}"; then
     log_ok "vendored bundle matches the CI-Hub source rebuild — no drift"
     gh_summary "### ✅ ci-hub plugin bundle in sync"
@@ -230,12 +250,15 @@ mode_check() {
 # and restamp .ci-hub-source with the checkout's HEAD SHA.
 mode_write() {
   local ci_hub="$1" committed="$2"
-  local fresh; fresh="$(rebuild_bundle "${ci_hub}")"
-  cp "${fresh}" "${committed}"
+  rebuild_bundle "${ci_hub}"
+  local fresh="${REBUILT_BUNDLE}"
+  # A failed copy or stamp write is a setup error (exit 2), not drift (exit 1) — keep the contract.
+  cp "${fresh}" "${committed}" || die_setup "failed to copy the rebuilt bundle into ${committed}"
   local sha
   sha="$(git -C "${ci_hub}" rev-parse HEAD 2>/dev/null)" \
     || die_setup "cannot read CI-Hub HEAD (is ${ci_hub} a git checkout?)"
-  printf '%s\n' "${sha}" >"${STAMP_FILE}"
+  printf '%s\n' "${sha}" >"${STAMP_FILE}" \
+    || die_setup "failed to write the provenance stamp ${STAMP_FILE}"
   log_ok "re-vendored ${committed}"
   log_ok "stamped .ci-hub-source = ${sha}"
 }
@@ -254,8 +277,11 @@ mode_compare() {
 }
 
 usage() {
-  # Print the header comment block (title through EXIT CODES), stripping the leading "# ".
-  sed -n '2,54p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # Reprint the header comment block — everything from the line after the shebang down to the
+  # first line of actual code — stripping the leading "# ". Driven off the shape of the file
+  # (leading comment run) rather than magic line numbers, so it can't silently truncate or leak
+  # code when the header is edited.
+  awk 'NR==1 { next } /^#/ { print; next } { exit }' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # --- Arg parsing -----------------------------------------------------------------------------

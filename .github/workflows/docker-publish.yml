@@ -25,15 +25,17 @@ jobs:
   # commit, not the default branch. Pass that same SHA down, or we would test master and
   # ship a tag.
   #
-  # secrets: inherit so ci.yml's plugin-integrity job can read the private CI-Hub with
-  # CI_HUB_READ_TOKEN during the publish gate (a called workflow gets no secrets otherwise).
+  # Pass ONLY CI_HUB_READ_TOKEN down (not `secrets: inherit`) so ci.yml's plugin-integrity job can
+  # read the private CI-Hub during the publish gate, while every other repo secret stays out of the
+  # called workflow's scope. A called workflow gets no secrets otherwise.
   test:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     name: Tests
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
-    secrets: inherit
+    secrets:
+      CI_HUB_READ_TOKEN: ${{ secrets.CI_HUB_READ_TOKEN }}
     with:
       ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
 

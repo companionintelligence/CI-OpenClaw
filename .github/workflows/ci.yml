@@ -19,6 +19,13 @@ on:
         type: string
         required: false
         default: ""
+    secrets:
+      CI_HUB_READ_TOKEN:
+        description: >-
+          Fine-grained PAT with CI-Hub Contents: read, used by the plugin-integrity job to
+          rebuild the vendored bundle from source. Passed explicitly by docker-publish.yml
+          (not `secrets: inherit`) so only this one secret crosses into the called workflow.
+        required: false
 
 permissions:
   contents: read
@@ -183,7 +190,11 @@ jobs:
           fi
           base='${{ github.event.pull_request.base.sha }}'
           head='${{ github.event.pull_request.head.sha }}'
-          if git diff --name-only "${base}...${head}" \
+          # Compute the diff first so a git failure (missing SHA, unmergeable PR) aborts this
+          # step under `set -e` and fails CLOSED — red, not a silent skip. Piping git directly
+          # into `if … grep` would swallow that failure as "no match" and skip the gate.
+          changed="$(git diff --name-only "${base}...${head}")"
+          if printf '%s\n' "${changed}" \
                | grep -qE '^(openclaw-context/plugins/ci-hub/|scripts/check-ci-hub-plugin-drift\.sh$)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
@@ -206,7 +217,9 @@ jobs:
         id: stamp
         run: |
           set -euo pipefail
-          sha="$(grep -oE '[0-9a-f]{40}' openclaw-context/plugins/ci-hub/.ci-hub-source | head -n1)"
+          # `|| true` so a stamp with no 40-hex token doesn't abort the assignment under pipefail
+          # before the friendly guard below can print an actionable ::error::.
+          sha="$(grep -oE '[0-9a-f]{40}' openclaw-context/plugins/ci-hub/.ci-hub-source | head -n1 || true)"
           [ -n "${sha}" ] || { echo "::error::.ci-hub-source has no commit SHA"; exit 1; }
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
           echo "Recorded CI-Hub source: ${sha}"

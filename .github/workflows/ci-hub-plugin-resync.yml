@@ -83,19 +83,38 @@ jobs:
         id: gate
         run: |
           set -euo pipefail
-          stamp="$(grep -oE '[0-9a-f]{40}' openclaw-context/plugins/ci-hub/.ci-hub-source | head -n1)"
+          # `|| true` so a stamp with no 40-hex token doesn't abort under pipefail before the guard.
+          stamp="$(grep -oE '[0-9a-f]{40}' openclaw-context/plugins/ci-hub/.ci-hub-source | head -n1 || true)"
+          if [ -z "${stamp}" ]; then
+            echo "::error::.ci-hub-source has no commit SHA — cannot determine freshness."
+            exit 1
+          fi
           head="$(git -C ci-hub rev-parse HEAD)"
           if [ "${stamp}" = "${head}" ]; then
             echo "Recorded source already equals the freshness ref (${head}); nothing to do."
             echo "proceed=false" >> "$GITHUB_OUTPUT"
-          elif git -C ci-hub merge-base --is-ancestor "${stamp}" HEAD; then
+            exit 0
+          fi
+          # Distinguish "definitely not an ancestor" (exit 1) from "commit absent from this
+          # checkout" (exit 128) — merge-base conflates both into non-zero, but they mean very
+          # different things and warrant different messages.
+          rc=0
+          git -C ci-hub merge-base --is-ancestor "${stamp}" HEAD || rc=$?
+          if [ "${rc}" -eq 0 ]; then
             # dev is strictly ahead of what we vendored → a real re-sync candidate.
             echo "proceed=true" >> "$GITHUB_OUTPUT"
-          else
+          elif [ "${rc}" -eq 1 ]; then
             # The vendored bundle was built from a commit not on this ref (e.g. an unmerged
             # branch); we are intentionally ahead. Do NOT revert it — the ci.yml integrity gate
             # still guards it against the recorded source.
             echo "::notice::Recorded source ${stamp} is not an ancestor of ${head}; the bundle is ahead of the freshness ref. Skipping re-sync."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            # 128: the recorded SHA isn't in the checkout at all — its branch may have been
+            # squash-merged and deleted, which also puts the ci.yml integrity checkout at risk.
+            # Flag it loudly for a human to re-vendor from a merge-reachable commit, but don't turn
+            # this advisory cron red over it.
+            echo "::warning::Recorded source ${stamp} is not present in the CI-Hub checkout (merge-base exit ${rc}). Re-vendor the bundle from a commit on ${{ github.event.inputs.ref || 'dev' }}. Skipping re-sync."
             echo "proceed=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -114,12 +133,35 @@ jobs:
         working-directory: ci-hub
         run: pnpm install --frozen-lockfile --filter @ci-hub/openclaw-plugin
 
-      - name: Re-vendor the bundle + restamp
+      - name: Is the bundle actually stale vs this ref?
+        id: fresh
         if: steps.gate.outputs.proceed == 'true'
+        run: |
+          set -uo pipefail
+          # Only a real BUNDLE difference is worth a re-sync PR. If `dev` advanced but the plugin
+          # source is unchanged, the rebuild is byte-identical and re-vendoring would open a PR
+          # that merely bumps the .ci-hub-source stamp — misleading churn. Rebuild from the
+          # checked-out ref and byte-compare; act only on genuine drift.
+          # Exit codes: 0 = in sync, 1 = drift (re-sync), 2 = setup/build error.
+          if ./scripts/check-ci-hub-plugin-drift.sh --check --ci-hub ci-hub; then
+            echo "The bundle already matches a rebuild from this ref; only the stamp is behind. No re-sync PR needed."
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          else
+            rc=$?
+            if [ "${rc}" -eq 1 ]; then
+              echo "stale=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::Drift check failed to run (exit ${rc})."
+              exit "${rc}"
+            fi
+          fi
+
+      - name: Re-vendor the bundle + restamp
+        if: steps.fresh.outputs.stale == 'true'
         run: ./scripts/check-ci-hub-plugin-drift.sh --write --ci-hub ci-hub
 
       - name: Open or update the re-sync PR
-        if: steps.gate.outputs.proceed == 'true'
+        if: steps.fresh.outputs.stale == 'true'
         uses: peter-evans/create-pull-request@c0f553fe549906ede9cf27b5156039d195d2ece0 # v8.1.0
         with:
           token: ${{ secrets.CI_HUB_SYNC_TOKEN }}
