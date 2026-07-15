@@ -13,6 +13,7 @@ const {
   createConfigReconciler,
   hasCiServerCredentials,
 } = require("./config-reconcile.cjs");
+const { buildGatewayHeaders } = require("./proxy-headers.cjs");
 
 const CONFIG_DIR = process.env.OPENCLAW_DATA_DIR || "/data/.openclaw";
 const PORT = parseInt(process.env.SETUP_PORT || "18789");
@@ -291,27 +292,17 @@ function proxyToOpenclaw(req, res) {
     return;
   }
 
-  // Rewrite headers so the gateway sees requests as local.
-  // The gateway checks Origin/Host to block cross-origin requests (anti-CSRF),
-  // but that's redundant here — our proxy is the only thing that can reach the
-  // gateway (it binds to 127.0.0.1 inside the container), and on the CI marketplace the
-  // entire app is already behind the CI app proxy.
-  // We also strip forwarding headers (X-Forwarded-For, etc.) that the CI app proxy
-  // reverse proxy injects — if the gateway sees these from a source not in
-  // gateway.trustedProxies it treats the connection as non-local and rejects it.
+  // Rewrite headers so the gateway sees the request as local, and attach the gateway token
+  // everywhere EXCEPT OpenClaw's hook routes — which carry their own auth, and which a
+  // gateway token would silently shadow. The rules, and why, live in proxy-headers.cjs,
+  // where they can be tested; this file cannot be required from a test.
   const gatewayHost = `127.0.0.1:${OPENCLAW_PORT}`;
-  const headers = { ...req.headers };
-  headers["host"] = gatewayHost;
-  headers["origin"] = `http://${gatewayHost}`;
-  delete headers["x-forwarded-for"];
-  delete headers["x-forwarded-proto"];
-  delete headers["x-forwarded-host"];
-  delete headers["x-forwarded-port"];
-  delete headers["x-real-ip"];
-  delete headers["forwarded"];
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
+  const headers = buildGatewayHeaders({
+    reqHeaders: req.headers,
+    url: req.url,
+    gatewayHost,
+    token,
+  });
 
   const options = {
     hostname: "127.0.0.1",
@@ -347,20 +338,17 @@ function handleUpgrade(req, socket, head) {
     // Rebuild the upgrade request with auth header
     let requestLine = `${req.method} ${req.url} HTTP/1.1\r\n`;
 
-    // Rewrite headers to appear local (same rationale as HTTP proxy above)
+    // Same header rewrite as the HTTP proxy — through the shared builder, so the strip-list and
+    // the /hooks token exception cannot drift between the two paths (they did once). A WS upgrade
+    // never targets /hooks, so the exception is a no-op here; sharing it keeps the invariant in
+    // one place regardless.
     const gatewayHost = `127.0.0.1:${OPENCLAW_PORT}`;
-    const headers = { ...req.headers };
-    headers["host"] = gatewayHost;
-    headers["origin"] = `http://${gatewayHost}`;
-    delete headers["x-forwarded-for"];
-    delete headers["x-forwarded-proto"];
-    delete headers["x-forwarded-host"];
-    delete headers["x-forwarded-port"];
-    delete headers["x-real-ip"];
-    delete headers["forwarded"];
-    if (token) {
-      headers["authorization"] = `Bearer ${token}`;
-    }
+    const headers = buildGatewayHeaders({
+      reqHeaders: req.headers,
+      url: req.url,
+      gatewayHost,
+      token,
+    });
 
     let headerLines = "";
     for (const [key, value] of Object.entries(headers)) {
