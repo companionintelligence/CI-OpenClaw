@@ -135,6 +135,14 @@ describe("requestAbsoluteUrl: where to send the user back to", () => {
     }
   });
 
+  test("trims a whitespace-padded Host instead of dropping the deep-link", () => {
+    const url = requestAbsoluteUrl({ url: "/chat", headers: { host: "  192.168.1.9:8080  " } });
+
+    // An untrimmed padded Host makes the base URL unparseable and returns null,
+    // silently losing the return path.
+    assert.equal(url, "http://192.168.1.9:8080/chat");
+  });
+
   test("returns null without a Host rather than inventing an origin", () => {
     assert.equal(requestAbsoluteUrl({ url: "/", headers: {} }), null);
     assert.equal(requestAbsoluteUrl({ headers: {} }), null);
@@ -172,6 +180,12 @@ describe("buildStateUrl", () => {
     // Without clientHost the Hub only sees this container's internal hostname
     // and could never offer the LAN launcher to the callers who need it.
     assert.equal(url.pathname, "/api/memory-connect/apps/ci-openclaw%3Aci-marketplace/state");
+    assert.equal(url.searchParams.get("clientHost"), "192.168.1.9:8080");
+  });
+
+  test("trims a whitespace-padded clientHost before forwarding it", () => {
+    const url = buildStateUrl("http://ci-os-hub:5002", "ci-openclaw:ci-marketplace", "  192.168.1.9:8080  ");
+
     assert.equal(url.searchParams.get("clientHost"), "192.168.1.9:8080");
   });
 

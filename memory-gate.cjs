@@ -83,7 +83,10 @@ function requestAbsoluteUrl(req) {
     .trim()
     .toLowerCase();
   const scheme = forwardedProto === "https" ? "https" : "http";
-  const host = req && req.headers && req.headers.host;
+  // Trim the Host: a stray leading/trailing space from an odd proxy would make
+  // the base URL unparseable and silently drop the whole `next` deep-link.
+  const rawHost = req && req.headers && req.headers.host;
+  const host = typeof rawHost === "string" ? rawHost.trim() : "";
   if (!host) return null;
   // Only accept an origin-form request target (a single-leading-slash path).
   // Absolute-form (`http://evil/`), scheme-relative (`//evil/`) and non-path
@@ -121,7 +124,10 @@ function launcherWithNext(launcher, nextUrl) {
  */
 function buildStateUrl(hubBase, appUrn, clientHost) {
   const url = new URL(`${hubBase}/api/memory-connect/apps/${encodeURIComponent(appUrn)}/state`);
-  if (clientHost) url.searchParams.set("clientHost", clientHost);
+  // Trim before forwarding: a whitespace-padded Host would otherwise reach the
+  // Hub and skew its launcher selection.
+  const trimmedHost = typeof clientHost === "string" ? clientHost.trim() : "";
+  if (trimmedHost) url.searchParams.set("clientHost", trimmedHost);
   return url;
 }
 
