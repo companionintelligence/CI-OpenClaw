@@ -55,6 +55,7 @@ COPY --chown=node:node server.cjs /app/setup-server.cjs
 # the container dies at boot with MODULE_NOT_FOUND — while working fine in local dev.
 COPY --chown=node:node config-reconcile.cjs /app/config-reconcile.cjs
 COPY --chown=node:node proxy-headers.cjs /app/proxy-headers.cjs
+COPY --chown=node:node memory-gate.cjs /app/memory-gate.cjs
 COPY --chown=node:node setup.html /app/setup.html
 COPY --chown=node:node logo.webp /app/logo.webp
 COPY --chown=node:node assets /app/assets
