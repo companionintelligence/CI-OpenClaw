@@ -66,17 +66,21 @@ function shouldPromptForState(state) {
  * falls back to the app's public URL and silently moves them off the origin they
  * deliberately chose (CI-Engineering#75, Problems 5 and 6).
  *
- * Trusts `X-Forwarded-Proto` for the scheme since the app always sits behind the
- * appliance gateway, and falls back to http for a direct LAN hit.
+ * Reads `X-Forwarded-Proto` for the scheme since the app always sits behind the
+ * appliance gateway, and falls back to http for a direct LAN hit. Only `https` is
+ * honoured; every other value (empty, `ftp`, `javascript`, …) collapses to `http`
+ * so a spoofed header can never make `next` a non-http(s) URL handed to the Hub.
  */
 function requestAbsoluteUrl(req) {
   const forwardedProto = String((req && req.headers && req.headers["x-forwarded-proto"]) || "")
     .split(",")[0]
-    .trim();
+    .trim()
+    .toLowerCase();
+  const scheme = forwardedProto === "https" ? "https" : "http";
   const host = req && req.headers && req.headers.host;
   if (!host) return null;
   try {
-    return new URL((req && req.url) || "/", `${forwardedProto || "http"}://${host}`).toString();
+    return new URL((req && req.url) || "/", `${scheme}://${host}`).toString();
   } catch {
     return null;
   }

@@ -112,6 +112,19 @@ describe("requestAbsoluteUrl: where to send the user back to", () => {
     assert.equal(url, "https://app.example.com/");
   });
 
+  test("collapses a non-http(s) proto to http so `next` is never a foreign scheme", () => {
+    for (const proto of ["ftp", "javascript", "file", "HTTPS://evil"]) {
+      const url = requestAbsoluteUrl({
+        url: "/",
+        headers: { host: "app.example.com", "x-forwarded-proto": proto },
+      });
+
+      // A spoofed X-Forwarded-Proto must not produce a next the Hub would honour
+      // as anything but http/https.
+      assert.equal(url, "http://app.example.com/");
+    }
+  });
+
   test("returns null without a Host rather than inventing an origin", () => {
     assert.equal(requestAbsoluteUrl({ url: "/", headers: {} }), null);
     assert.equal(requestAbsoluteUrl({ headers: {} }), null);
