@@ -125,6 +125,16 @@ describe("requestAbsoluteUrl: where to send the user back to", () => {
     }
   });
 
+  test("ignores an off-origin request target so `next` can't escape the app's origin", () => {
+    // Absolute-form / scheme-relative / non-path targets would otherwise override
+    // the ${scheme}://${host} base and become an off-origin next handed to the Hub.
+    for (const target of ["http://evil.com/", "//evil.com/", "https://evil.com/path", "javascript:alert(1)"]) {
+      const url = requestAbsoluteUrl({ url: target, headers: { host: "app.example.com" } });
+
+      assert.equal(url, "http://app.example.com/");
+    }
+  });
+
   test("returns null without a Host rather than inventing an origin", () => {
     assert.equal(requestAbsoluteUrl({ url: "/", headers: {} }), null);
     assert.equal(requestAbsoluteUrl({ headers: {} }), null);
@@ -146,6 +156,12 @@ describe("launcherWithNext", () => {
 
   test("leaves the launcher untouched when there is no next to add", () => {
     assert.equal(launcherWithNext("https://hub.example.com/start?app=x", null), "https://hub.example.com/start?app=x");
+  });
+
+  test("inserts next ahead of a fragment so the query isn't swallowed by the hash", () => {
+    const out = launcherWithNext("https://hub.example.com/start#section", "http://192.168.1.9/chat");
+
+    assert.equal(out, "https://hub.example.com/start?next=http%3A%2F%2F192.168.1.9%2Fchat#section");
   });
 });
 

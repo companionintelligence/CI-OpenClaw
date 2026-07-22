@@ -79,8 +79,14 @@ function requestAbsoluteUrl(req) {
   const scheme = forwardedProto === "https" ? "https" : "http";
   const host = req && req.headers && req.headers.host;
   if (!host) return null;
+  // Only accept an origin-form request target (a single-leading-slash path).
+  // Absolute-form (`http://evil/`), scheme-relative (`//evil/`) and non-path
+  // targets (`javascript:...`) would otherwise override the ${scheme}://${host}
+  // base inside new URL() and become an off-origin `next` handed to the Hub.
+  const rawTarget = req && req.url;
+  const path = typeof rawTarget === "string" && rawTarget.startsWith("/") && !rawTarget.startsWith("//") ? rawTarget : "/";
   try {
-    return new URL((req && req.url) || "/", `${scheme}://${host}`).toString();
+    return new URL(path, `${scheme}://${host}`).toString();
   } catch {
     return null;
   }
@@ -89,8 +95,14 @@ function requestAbsoluteUrl(req) {
 /** Append `next` to a Hub launcher URL, preserving whatever query it already carries. */
 function launcherWithNext(launcher, nextUrl) {
   if (!nextUrl) return launcher;
-  const separator = launcher.includes("?") ? "&" : "?";
-  return `${launcher}${separator}next=${encodeURIComponent(nextUrl)}`;
+  // Insert `next` BEFORE any fragment: a query placed after `#` is part of the
+  // fragment and never sent to the server, which would silently drop the return
+  // path. Splitting on `#` keeps the existing encoding and separator logic.
+  const hashIndex = launcher.indexOf("#");
+  const base = hashIndex === -1 ? launcher : launcher.slice(0, hashIndex);
+  const fragment = hashIndex === -1 ? "" : launcher.slice(hashIndex);
+  const separator = base.includes("?") ? "&" : "?";
+  return `${base}${separator}next=${encodeURIComponent(nextUrl)}${fragment}`;
 }
 
 /**
