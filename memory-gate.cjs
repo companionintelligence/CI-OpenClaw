@@ -1,9 +1,9 @@
 /**
  * Pure helpers for the Companion Memory connect interstitial.
  *
- * Split out of server.cjs (mirroring proxy-headers.cjs) so the decisions that
- * decide whether a user is shown a blocking gate — and which Hub launcher that
- * gate points at — are unit-testable without standing up the server.
+ * Split out of server.cjs into a sidecar module so the decisions that decide
+ * whether a user is shown a blocking gate — and which Hub launcher that gate
+ * points at — are unit-testable without standing up the server.
  *
  * The rule these encode, from CI-Engineering#75: never render a gate whose only
  * escape is a URL we cannot verify. The Hub tells us which launchers are usable
