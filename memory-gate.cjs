@@ -21,7 +21,13 @@
 function safeHttpUrl(url) {
   try {
     const parsed = new URL(url);
-    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.toString() : null;
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+    // This value is rendered into an <a href> as defense-in-depth against Hub bugs
+    // or compromised internal traffic, so require a real host and reject embedded
+    // credentials: `http://trusted.com@evil.com/` reads as trusted.com but points
+    // at evil.com, exactly the confusion an href must not carry.
+    if (!parsed.hostname || parsed.username || parsed.password) return null;
+    return parsed.toString();
   } catch {
     return null;
   }

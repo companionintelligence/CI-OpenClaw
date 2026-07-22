@@ -200,4 +200,11 @@ describe("safeHttpUrl", () => {
     assert.equal(safeHttpUrl("not a url"), null);
     assert.equal(safeHttpUrl(null), null);
   });
+
+  test("rejects embedded credentials whose userinfo can disguise the host", () => {
+    // Rendered into <a href>; `trusted.com@evil.com` reads as trusted.com but
+    // resolves to evil.com.
+    assert.equal(safeHttpUrl("http://trusted.com@evil.com/"), null);
+    assert.equal(safeHttpUrl("https://user:pass@evil.com/"), null);
+  });
 });
