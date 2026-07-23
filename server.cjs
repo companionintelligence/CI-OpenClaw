@@ -4,6 +4,7 @@ const fs = require("fs");
 const fsp = require("fs").promises;
 const path = require("path");
 const crypto = require("crypto");
+const memoryGate = require("./memory-gate.cjs");
 const { spawn, exec } = require("child_process");
 const { promisify } = require("util");
 const execAsync = promisify(exec);
@@ -465,16 +466,6 @@ function escapeHtmlAttr(value) {
     .replace(/'/g, "&#39;");
 }
 
-/** Return `url` only if it is an http(s) URL; otherwise null (reject javascript:, data:, etc.). */
-function safeHttpUrl(url) {
-  try {
-    const u = new URL(url);
-    return u.protocol === "https:" || u.protocol === "http:" ? u.toString() : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Minimal, self-contained interstitial page. Matches the Companion Memory
  * (CI-Import-Tools) sign-in aesthetic: navy background, elevated card, the
@@ -563,17 +554,31 @@ async function maybeServeMemoryGate(req, res) {
   if (!appUrn || !hubBase) return false; // can't resolve — fail open
 
   try {
-    const resp = await fetch(`${hubBase}/api/memory-connect/apps/${encodeURIComponent(appUrn)}/state`, {
+    // `clientHost` tells the Hub where the BROWSER is. This request is
+    // server-to-server over the internal network, so the Hub would otherwise see
+    // its own container hostname and could never tell a LAN visitor from a remote
+    // one — which is what decides whether the LAN launcher is usable.
+    const stateUrl = memoryGate.buildStateUrl(hubBase, appUrn, req.headers.host);
+
+    const resp = await fetch(stateUrl, {
       headers: mcpAuthHeaders(env),
       signal: AbortSignal.timeout(4000),
     });
     if (!resp.ok) return false;
-    const { state, connectUrl } = await resp.json();
+    const { state, connectUrl, connectUrlLocal, reason } = await resp.json();
     // Only prompt when the user hasn't decided yet; skipped/manual/connected pass through.
-    if (state !== "unconfigured" && state !== "deferred") return false;
+    if (!memoryGate.shouldPromptForState(state)) return false;
     // Only ever link to an http(s) Hub URL — never a javascript:/data: scheme.
-    const safeConnectUrl = safeHttpUrl(connectUrl);
-    if (!safeConnectUrl) return false;
+    // Public route first; the LAN launcher is the fallback the Hub supplies when
+    // its public origin is down and this browser is on the local network.
+    const safeConnectUrl = memoryGate.selectLauncher({ connectUrl, connectUrlLocal });
+    if (!safeConnectUrl) {
+      // Fail open, but not fail silent: a gate that vanishes reads as "memory is
+      // connected". The Hub's app-detail badge still shows the app as
+      // disconnected; this line is what makes the reason diagnosable here.
+      console.warn(`[ci-memory] connect gate suppressed (${reason || "no launcher available"}); letting the user through`);
+      return false;
+    }
 
     res.writeHead(200, {
       "Content-Type": "text/html",
@@ -583,7 +588,7 @@ async function maybeServeMemoryGate(req, res) {
       "X-Frame-Options": "DENY",
       "Content-Security-Policy": "frame-ancestors 'none'",
     });
-    res.end(renderMemoryGateHtml(safeConnectUrl));
+    res.end(renderMemoryGateHtml(memoryGate.launcherWithNext(safeConnectUrl, memoryGate.requestAbsoluteUrl(req))));
     return true;
   } catch {
     return false; // Hub unreachable → fail open
