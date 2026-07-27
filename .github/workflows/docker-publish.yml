@@ -217,7 +217,10 @@ jobs:
           tag_name: ${{ env.TAG }}
           name: ${{ env.TAG }}
           generate_release_notes: true
-          append_body: true
+          # No append_body: this workflow is re-runnable and workflow_dispatch can
+          # republish an existing tag, and appending would stack a duplicate
+          # "Bundled OpenClaw" line on the release every time. Replacing the body
+          # keeps a republish idempotent.
           body: |
             Bundled OpenClaw: `${{ env.OPENCLAW_VERSION }}`
           draft: false
