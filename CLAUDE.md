@@ -33,7 +33,7 @@ docker compose up --build
 npm test
 
 # Validate the generated openclaw.json against OpenClaw's own strict schema.
-# Needs the CLI: npm i -g "openclaw@$(grep -oE 'openclaw@[0-9.]+' Dockerfile | head -1 | cut -d@ -f2)"
+# Needs the CLI: npm i -g "openclaw@$(scripts/openclaw-pin.sh)"
 npm run test:schema
 
 # Build for production

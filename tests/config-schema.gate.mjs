@@ -49,8 +49,7 @@ function haveOpenclaw() {
 
 if (!haveOpenclaw()) {
   const hint =
-    "install it with:\n" +
-    "  npm i -g \"openclaw@$(grep -oE 'openclaw@[0-9]+(\\.[0-9]+)*' Dockerfile | head -n1 | cut -d'@' -f2)\"";
+    "install it with:\n" + '  npm i -g "openclaw@$(scripts/openclaw-pin.sh)"';
   if (process.env.CI) {
     // CI must never silently skip the only check that catches an unrecognized key.
     console.error(`FATAL: the openclaw binary is not on PATH and CI is set.\n${hint}`);

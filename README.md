@@ -206,7 +206,7 @@ proves it is really validating by feeding the validator two deliberately corrupt
 canaries and requiring both to be rejected.
 
 ```bash
-npm i -g "openclaw@$(grep -oE 'openclaw@[0-9.]+' Dockerfile | head -1 | cut -d@ -f2)"
+npm i -g "openclaw@$(scripts/openclaw-pin.sh)"
 npm run test:schema
 ```
 

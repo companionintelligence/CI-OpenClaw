@@ -14,8 +14,9 @@ on:
     inputs:
       ref:
         description: >-
-          Commit to test. The publish workflow passes the exact SHA it is about to
-          build; leave empty to test the ref that triggered the run.
+          Ref to test. The publish workflow passes the exact ref it is about to check
+          out and build — the release tag — so the gate and the build can never
+          disagree about the tree. Leave empty to test the ref that triggered the run.
         type: string
         required: false
         default: ""
@@ -105,7 +106,17 @@ jobs:
             # validates against the same schema the shipped image enforces. It also means
             # the nightly version-bump PR gets schema-gated against the version it
             # proposes, before it can merge. Same one-liner openclaw-release-pr.yml uses.
-            version="$(grep -oE 'openclaw@[0-9]+(\.[0-9]+)*' Dockerfile | head -n1 | cut -d'@' -f2)"
+            if [[ -x scripts/openclaw-pin.sh ]]; then
+              version="$(scripts/openclaw-pin.sh)"
+            else
+              # Compatibility: release tags cut before scripts/openclaw-pin.sh
+              # existed can still be rebuilt via workflow_dispatch. This workflow
+              # comes from the caller's ref, but the checkout is the old tree.
+              # `|| true`: grep exits 1 on no match, pipefail promotes it, and a
+              # bare assignment takes that status — so without this the step dies
+              # here and the "could not resolve" message below never runs.
+              version="$(grep -oE 'openclaw@[0-9][^[:space:]]*' Dockerfile | head -n1 | cut -d'@' -f2 || true)"
+            fi
           fi
           [[ -n "${version}" ]] || { echo "could not resolve an openclaw version"; exit 1; }
           echo "version=${version}" >> "$GITHUB_OUTPUT"

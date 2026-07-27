@@ -1,19 +1,38 @@
 name: Docker Build and Push
 on:
+  # Release tags only. This was `"*"`, which meant the runbook's own
+  # "push a test tag to verify" recipe published a real image and moved
+  # :latest onto it. Every real release tag is YYYY.M.D[.N], so it starts
+  # with a digit.
   push:
     tags:
-      - "*"
-  workflow_run:
-    workflows:
-      - "Tag CI-OpenClaw Version On Merge"
-    types:
-      - completed
+      - "[0-9]*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Container tag to publish (for example 2026.6.1)"
+        description: "Existing release tag to (re)publish (for example 2026.6.1)"
         required: true
         type: string
+      dry_run:
+        description: "Build without pushing to GHCR or touching the Release"
+        required: false
+        default: false
+        type: boolean
+
+# Keyed on the tag being published, so two releases never contend. An unkeyed
+# group would be actively harmful here: a group holds only one pending entry,
+# so a third release arriving would cancel the queued second one — and a
+# cancelled release build leaves a tag with no image, which is exactly the
+# state 2026.7.1 is in. Same-tag reruns still serialize, which is the case
+# worth serializing.
+#
+# github.ref_name, not github.ref: the dispatch input is a bare tag name, so
+# keying the push side on `refs/tags/X` would put a dispatch republish of X in a
+# different group from the original push of X and let the two build the same tag
+# at once.
+concurrency:
+  group: docker-publish-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   # Gate the publish on the full suite — unit, bootstrap shell, the openclaw schema gate, and
@@ -21,15 +40,16 @@ jobs:
   # the SAME workflow that gates PRs rather than a copy of its steps, so the two can never drift
   # apart.
   #
-  # The ref matters: on the workflow_run path the build below checks out the triggering
-  # commit, not the default branch. Pass that same SHA down, or we would test master and
-  # ship a tag.
+  # Both jobs resolve the same ref: the tag being published. Tested tree, built tree, and tagged
+  # commit are therefore the same commit by construction. (This previously went through a
+  # `workflow_run` hop and passed `workflow_run.head_sha`, which is the PR head-branch tip, not
+  # the merge commit — so it tested a pre-merge tree. That is why the 2026.7.1 publish failed on
+  # a file that existed on master but not on the branch, leaving a tag with no image.)
   #
   # Pass ONLY CI_HUB_READ_TOKEN down (not `secrets: inherit`) so ci.yml's plugin-integrity job can
   # read the private CI-Hub during the publish gate, while every other repo secret stays out of the
   # called workflow's scope. A called workflow gets no secrets otherwise.
   test:
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     name: Tests
     uses: ./.github/workflows/ci.yml
     permissions:
@@ -37,11 +57,10 @@ jobs:
     secrets:
       CI_HUB_READ_TOKEN: ${{ secrets.CI_HUB_READ_TOKEN }}
     with:
-      ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
   build:
     needs: test
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     name: Build and push to GitHub Container Registry
     runs-on: ubuntu-22.04
     timeout-minutes: 180
@@ -49,40 +68,63 @@ jobs:
       contents: write
       packages: write
     steps:
-      - name: Checkout (workflow_run)
-        if: github.event_name == 'workflow_run'
+      - name: Checkout the tag being published
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
+          fetch-tags: true
 
-      - name: Checkout (push/workflow_dispatch)
-        if: github.event_name != 'workflow_run'
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Set TAG from workflow_run commit
-        if: github.event_name == 'workflow_run'
+      - name: Resolve TAG and the openclaw pin
         shell: bash
+        # INPUT_TAG comes through env rather than a ${{ }} interpolation: the
+        # dispatch input is user-supplied, and interpolating it into the script
+        # body would let a crafted value break out of the quoting.
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          tag=$(grep -oE 'openclaw@[0-9]+(\.[0-9]+)*' Dockerfile | head -n1 | cut -d'@' -f2)
+
+          # Resolved here rather than as `${{ !inputs.dry_run }}` on the build
+          # step. The inputs context is only defined for workflow_dispatch and
+          # workflow_call, and getting this wrong on a tag push would produce a
+          # green release that silently published nothing. Only an explicit
+          # dry-run request suppresses the push; everything else publishes.
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${INPUT_DRY_RUN}" == "true" ]]; then
+            echo "PUSH_IMAGE=false" >> "$GITHUB_ENV"
+            echo "::notice::dry run — building without pushing to GHCR or touching the Release"
+          else
+            echo "PUSH_IMAGE=true" >> "$GITHUB_ENV"
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${INPUT_TAG}"
+            git rev-parse -q --verify "refs/tags/${tag}" >/dev/null \
+              || { echo "::error::tag ${tag} does not exist"; exit 1; }
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
           echo "TAG=${tag}" >> "$GITHUB_ENV"
 
-      - name: Set TAG from workflow_dispatch input
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "TAG=${{ github.event.inputs.tag }}" >> "$GITHUB_ENV"
+          if [[ -x scripts/openclaw-pin.sh ]]; then
+            pin="$(scripts/openclaw-pin.sh)"
+          else
+            # Compatibility: release tags cut before scripts/openclaw-pin.sh
+            # existed can still be rebuilt via workflow_dispatch. This workflow
+            # comes from the caller's ref, but the checkout is the old tree.
+            # `|| true` for the same reason as the newest-tag fallback below:
+            # grep exiting 1 on no match trips pipefail and would kill the step
+            # with no explanation. An empty pin is caught right after.
+            pin="$(grep -oE 'openclaw@[0-9][^[:space:]]*' Dockerfile | head -n1 | cut -d'@' -f2 || true)"
+          fi
+          [[ -n "${pin}" ]] || { echo "::error::could not read the openclaw@ pin from the Dockerfile"; exit 1; }
+          echo "OPENCLAW_VERSION=${pin}" >> "$GITHUB_ENV"
 
-      - name: Set TAG from pushed ref
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          # Not github.sha: on workflow_dispatch that is the ref the run was
+          # started from (usually master), not the tag being built, so the
+          # image would claim a revision it was not built from.
+          echo "BUILD_REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Set image name
         shell: bash
@@ -93,6 +135,44 @@ jobs:
             image='ghcr.io/${{ github.repository }}'
           fi
           echo "IMAGE_NAME=${image,,}" >> "$GITHUB_ENV"
+
+      # :latest tracks the newest release only. Without this, a workflow_dispatch
+      # republish of an older tag silently repoints :latest at it.
+      - name: Compose image refs
+        id: refs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -x scripts/newest-release-tag.sh ]]; then
+            newest="$(scripts/newest-release-tag.sh)"
+          else
+            # Compatibility: release tags cut before scripts/newest-release-tag.sh
+            # existed can still be rebuilt via workflow_dispatch. This workflow
+            # comes from the caller's ref, but the checkout is the old tree.
+            newest="$(git tag --list --sort=-v:refname \
+                      | grep -E '^[0-9]{4}\.[1-9][0-9]?\.[1-9][0-9]?(\.[0-9]+)?$' | head -n1 || true)"
+          fi
+
+          {
+            echo 'tags<<EOF'
+            echo "${IMAGE_NAME}:${TAG}"
+            if [[ -n "${newest}" && "${TAG}" == "${newest}" ]]; then
+              echo "${IMAGE_NAME}:latest"
+            fi
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+          if [[ -z "${newest}" ]]; then
+            # Reachable: the push trigger is `[0-9]*`, which is wider than the
+            # release-tag shape. Publish the tag, but never let a non-release
+            # claim :latest.
+            echo "::notice::no tag matching YYYY.M.D[.N] exists — publishing ${TAG} without :latest"
+          elif [[ "${TAG}" == "${newest}" ]]; then
+            echo "${TAG} is the newest release tag — :latest will point at it"
+          else
+            echo "::notice::${TAG} is not the newest release tag (newest: ${newest}) — leaving :latest alone"
+          fi
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
@@ -112,18 +192,40 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ env.TAG }}
-            ${{ env.IMAGE_NAME }}:latest
+          push: ${{ env.PUSH_IMAGE == 'true' }}
+          tags: ${{ steps.refs.outputs.tags }}
+          # The bundled openclaw version rides along as a label rather than in
+          # the tag name, so a running container is self-describing without
+          # overloading the release-tag namespace.
+          labels: |
+            org.opencontainers.image.version=${{ env.TAG }}
+            org.opencontainers.image.revision=${{ env.BUILD_REVISION }}
+            io.companionintelligence.openclaw.version=${{ env.OPENCLAW_VERSION }}
           provenance: false
+          # Registry cache, not type=gha. Actions cache entries are ref-scoped —
+          # a run restores only from its own ref plus the default branch — and
+          # this workflow only ever runs on refs/tags/*, so the cache written by
+          # one release tag is unreadable by the next. Every build would miss
+          # while mode=max wrote multi-GB entries into the repo's shared 10GB
+          # Actions cache quota, evicting the actions/cache entry ci.yml depends
+          # on. A registry cache has no ref scoping, so releases actually reuse
+          # each other's layers. The GHCR login above covers both directions.
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache
+          # Read-only on a dry run: a dry run must not write to the registry.
+          cache-to: ${{ env.PUSH_IMAGE == 'true' && format('type=registry,ref={0}:buildcache,mode=max', env.IMAGE_NAME) || '' }}
 
       - name: Create or update GitHub Release
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        if: env.PUSH_IMAGE == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
           name: ${{ env.TAG }}
           generate_release_notes: true
+          # No append_body: this workflow is re-runnable and workflow_dispatch can
+          # republish an existing tag, and appending would stack a duplicate
+          # "Bundled OpenClaw" line on the release every time. Replacing the body
+          # keeps a republish idempotent.
+          body: |
+            Bundled OpenClaw: `${{ env.OPENCLAW_VERSION }}`
           draft: false
           prerelease: false
