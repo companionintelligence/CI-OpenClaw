@@ -19,10 +19,14 @@ on:
         default: false
         type: boolean
 
-# A cancelled release build leaves a tag with no image — which is exactly the
-# state 2026.7.1 is in. Queue instead.
+# Keyed on the tag being published, so two releases never contend. An unkeyed
+# group would be actively harmful here: a group holds only one pending entry,
+# so a third release arriving would cancel the queued second one — and a
+# cancelled release build leaves a tag with no image, which is exactly the
+# state 2026.7.1 is in. Same-tag reruns still serialize, which is the case
+# worth serializing.
 concurrency:
-  group: docker-publish
+  group: docker-publish-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -73,8 +77,22 @@ jobs:
         # body would let a crafted value break out of the quoting.
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
+
+          # Resolved here rather than as `${{ !inputs.dry_run }}` on the build
+          # step. The inputs context is only defined for workflow_dispatch and
+          # workflow_call, and getting this wrong on a tag push would produce a
+          # green release that silently published nothing. Only an explicit
+          # dry-run request suppresses the push; everything else publishes.
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${INPUT_DRY_RUN}" == "true" ]]; then
+            echo "PUSH_IMAGE=false" >> "$GITHUB_ENV"
+            echo "::notice::dry run — building without pushing to GHCR or touching the Release"
+          else
+            echo "PUSH_IMAGE=true" >> "$GITHUB_ENV"
+          fi
+
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             tag="${INPUT_TAG}"
             git rev-parse -q --verify "refs/tags/${tag}" >/dev/null \
@@ -151,7 +169,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ !inputs.dry_run }}
+          push: ${{ env.PUSH_IMAGE == 'true' }}
           tags: ${{ steps.refs.outputs.tags }}
           # The bundled openclaw version rides along as a label rather than in
           # the tag name, so a running container is self-describing without
@@ -165,7 +183,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Create or update GitHub Release
-        if: ${{ !inputs.dry_run }}
+        if: env.PUSH_IMAGE == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
