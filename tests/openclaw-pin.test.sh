@@ -36,12 +36,31 @@ check "four-component"       "2026.7.1.3"      "2026.7.1.3"
 
 # A Dockerfile with no pin must fail loudly rather than print an empty string —
 # an empty version silently became `openclaw@` in every caller.
+#
+# Asserting on the MESSAGE, not just the exit code: under `set -euo pipefail` a
+# failing grep killed the script at the assignment, so this exited non-zero with
+# no output at all and an exit-code-only check passed for the wrong reason.
 printf 'FROM node:22\n' > "${TMP}/Dockerfile"
-if bash "${SCRIPT}" "${TMP}/Dockerfile" >/dev/null 2>&1; then
+if err="$(bash "${SCRIPT}" "${TMP}/Dockerfile" 2>&1)"; then
   echo "  FAIL missing pin: expected non-zero exit" >&2
   FAIL=$((FAIL + 1))
+elif [[ "${err}" != *"no openclaw@<version> pin found"* ]]; then
+  echo "  FAIL missing pin: exited non-zero but without the expected message (got: '${err}')" >&2
+  FAIL=$((FAIL + 1))
 else
-  echo "  ok   missing pin: exits non-zero"
+  echo "  ok   missing pin: exits non-zero with a diagnostic"
+  PASS=$((PASS + 1))
+fi
+
+# Likewise for a Dockerfile that does not exist at all.
+if err="$(bash "${SCRIPT}" "${TMP}/absent" 2>&1)"; then
+  echo "  FAIL absent Dockerfile: expected non-zero exit" >&2
+  FAIL=$((FAIL + 1))
+elif [[ "${err}" != *"no Dockerfile at"* ]]; then
+  echo "  FAIL absent Dockerfile: wrong message (got: '${err}')" >&2
+  FAIL=$((FAIL + 1))
+else
+  echo "  ok   absent Dockerfile: exits non-zero with a diagnostic"
   PASS=$((PASS + 1))
 fi
 

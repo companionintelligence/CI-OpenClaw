@@ -18,7 +18,13 @@ DOCKERFILE="${1:-$(cd "$(dirname "$0")/.." && pwd)/Dockerfile}"
 
 # Match everything up to whitespace so prerelease and same-day-patch forms
 # (-beta.1, -2) survive intact.
-version=$(grep -oE 'openclaw@[0-9][^[:space:]]*' "${DOCKERFILE}" | head -n1 | cut -d'@' -f2)
+#
+# `|| version=''` is load-bearing under `set -euo pipefail`: grep exits 1 on no
+# match, pipefail promotes that to the pipeline's status, and a bare assignment
+# takes its substitution's status — so without this the script died here and the
+# "no pin found" message below never printed. A missing pin then surfaced as a
+# bare exit 1 with no output at all.
+version=$(grep -oE 'openclaw@[0-9][^[:space:]]*' "${DOCKERFILE}" | head -n1 | cut -d'@' -f2) || version=''
 
 [[ -n "${version}" ]] || { echo "no openclaw@<version> pin found in ${DOCKERFILE}" >&2; exit 1; }
 

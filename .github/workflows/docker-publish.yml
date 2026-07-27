@@ -113,8 +113,12 @@ jobs:
             # Compatibility: release tags cut before scripts/openclaw-pin.sh
             # existed can still be rebuilt via workflow_dispatch. This workflow
             # comes from the caller's ref, but the checkout is the old tree.
-            pin="$(grep -oE 'openclaw@[0-9][^[:space:]]*' Dockerfile | head -n1 | cut -d'@' -f2)"
+            # `|| true` for the same reason as the newest-tag fallback below:
+            # grep exiting 1 on no match trips pipefail and would kill the step
+            # with no explanation. An empty pin is caught right after.
+            pin="$(grep -oE 'openclaw@[0-9][^[:space:]]*' Dockerfile | head -n1 | cut -d'@' -f2 || true)"
           fi
+          [[ -n "${pin}" ]] || { echo "::error::could not read the openclaw@ pin from the Dockerfile"; exit 1; }
           echo "OPENCLAW_VERSION=${pin}" >> "$GITHUB_ENV"
 
           # Not github.sha: on workflow_dispatch that is the ref the run was
