@@ -25,8 +25,13 @@ on:
 # cancelled release build leaves a tag with no image, which is exactly the
 # state 2026.7.1 is in. Same-tag reruns still serialize, which is the case
 # worth serializing.
+#
+# github.ref_name, not github.ref: the dispatch input is a bare tag name, so
+# keying the push side on `refs/tags/X` would put a dispatch republish of X in a
+# different group from the original push of X and let the two build the same tag
+# at once.
 concurrency:
-  group: docker-publish-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  group: docker-publish-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
