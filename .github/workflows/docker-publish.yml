@@ -68,17 +68,31 @@ jobs:
 
       - name: Resolve TAG and the openclaw pin
         shell: bash
+        # INPUT_TAG comes through env rather than a ${{ }} interpolation: the
+        # dispatch input is user-supplied, and interpolating it into the script
+        # body would let a crafted value break out of the quoting.
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            tag='${{ inputs.tag }}'
+            tag="${INPUT_TAG}"
             git rev-parse -q --verify "refs/tags/${tag}" >/dev/null \
               || { echo "::error::tag ${tag} does not exist"; exit 1; }
           else
             tag="${GITHUB_REF_NAME}"
           fi
           echo "TAG=${tag}" >> "$GITHUB_ENV"
-          echo "OPENCLAW_VERSION=$(scripts/openclaw-pin.sh)" >> "$GITHUB_ENV"
+
+          if [[ -x scripts/openclaw-pin.sh ]]; then
+            pin="$(scripts/openclaw-pin.sh)"
+          else
+            # Compatibility: release tags cut before scripts/openclaw-pin.sh
+            # existed can still be rebuilt via workflow_dispatch. This workflow
+            # comes from the caller's ref, but the checkout is the old tree.
+            pin="$(grep -oE 'openclaw@[0-9][^[:space:]]*' Dockerfile | head -n1 | cut -d'@' -f2)"
+          fi
+          echo "OPENCLAW_VERSION=${pin}" >> "$GITHUB_ENV"
 
       - name: Set image name
         shell: bash
