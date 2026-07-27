@@ -198,8 +198,17 @@ jobs:
             org.opencontainers.image.revision=${{ env.BUILD_REVISION }}
             io.companionintelligence.openclaw.version=${{ env.OPENCLAW_VERSION }}
           provenance: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Registry cache, not type=gha. Actions cache entries are ref-scoped —
+          # a run restores only from its own ref plus the default branch — and
+          # this workflow only ever runs on refs/tags/*, so the cache written by
+          # one release tag is unreadable by the next. Every build would miss
+          # while mode=max wrote multi-GB entries into the repo's shared 10GB
+          # Actions cache quota, evicting the actions/cache entry ci.yml depends
+          # on. A registry cache has no ref scoping, so releases actually reuse
+          # each other's layers. The GHCR login above covers both directions.
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache
+          # Read-only on a dry run: a dry run must not write to the registry.
+          cache-to: ${{ env.PUSH_IMAGE == 'true' && format('type=registry,ref={0}:buildcache,mode=max', env.IMAGE_NAME) || '' }}
 
       - name: Create or update GitHub Release
         if: env.PUSH_IMAGE == 'true'

@@ -83,6 +83,11 @@ workflow, so it is covered by `npm test`. It accepts exactly the shape
 `scripts/next-release-tag.sh` allocates and prints nothing when no release tag exists — a tag
 that does not match publishes its own tag and leaves `:latest` alone.
 
+Layers are cached in the registry (`<IMAGE_NAME>:buildcache`), not in the Actions cache.
+Actions cache entries are scoped to the ref that wrote them, and this workflow only ever runs
+on `refs/tags/*`, so a GHA cache could never be read by the next release while still consuming
+the repo's shared 10&nbsp;GB quota.
+
 ## Required GitHub Settings
 
 ### 1) Repository Action Permissions
