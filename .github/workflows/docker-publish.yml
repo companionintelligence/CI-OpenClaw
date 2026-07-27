@@ -139,18 +139,32 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          newest=$(git tag --list --sort=-v:refname \
-                   | grep -E '^[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(\.[0-9]+)?$' | head -n1)
+
+          if [[ -x scripts/newest-release-tag.sh ]]; then
+            newest="$(scripts/newest-release-tag.sh)"
+          else
+            # Compatibility: release tags cut before scripts/newest-release-tag.sh
+            # existed can still be rebuilt via workflow_dispatch. This workflow
+            # comes from the caller's ref, but the checkout is the old tree.
+            newest="$(git tag --list --sort=-v:refname \
+                      | grep -E '^[0-9]{4}\.[1-9][0-9]?\.[1-9][0-9]?(\.[0-9]+)?$' | head -n1 || true)"
+          fi
+
           {
             echo 'tags<<EOF'
             echo "${IMAGE_NAME}:${TAG}"
-            if [[ "${TAG}" == "${newest}" ]]; then
+            if [[ -n "${newest}" && "${TAG}" == "${newest}" ]]; then
               echo "${IMAGE_NAME}:latest"
             fi
             echo EOF
           } >> "$GITHUB_OUTPUT"
 
-          if [[ "${TAG}" == "${newest}" ]]; then
+          if [[ -z "${newest}" ]]; then
+            # Reachable: the push trigger is `[0-9]*`, which is wider than the
+            # release-tag shape. Publish the tag, but never let a non-release
+            # claim :latest.
+            echo "::notice::no tag matching YYYY.M.D[.N] exists — publishing ${TAG} without :latest"
+          elif [[ "${TAG}" == "${newest}" ]]; then
             echo "${TAG} is the newest release tag — :latest will point at it"
           else
             echo "::notice::${TAG} is not the newest release tag (newest: ${newest}) — leaving :latest alone"

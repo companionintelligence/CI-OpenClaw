@@ -78,6 +78,11 @@ the bundled openclaw version (`io.companionintelligence.openclaw.version`).
 Both the test gate and the build check out **the tag itself**, so the tested tree, the built
 tree, and the tagged commit are always the same commit.
 
+The `:latest` rule lives in `scripts/newest-release-tag.sh` rather than inline in the
+workflow, so it is covered by `npm test`. It accepts exactly the shape
+`scripts/next-release-tag.sh` allocates and prints nothing when no release tag exists — a tag
+that does not match publishes its own tag and leaves `:latest` alone.
+
 ## Required GitHub Settings
 
 ### 1) Repository Action Permissions
@@ -129,3 +134,7 @@ Do **not** verify by pushing a throwaway tag. That was the old recipe, and under
 - Known oddity: git tag `2026.7.1` exists but has no image. It was created by the old
   merge-tagger, whose publish run built the pre-merge branch tip and failed. Left in place
   rather than deleted; a date-based tag can never reuse that name.
+- Known limitation: the `:latest` decision reads the tag list at checkout time, and a
+  multi-arch build can take well over an hour. Cutting two releases inside one build window
+  can therefore land them out of order and leave `:latest` on the older of the two. Cut one
+  release at a time, or wait for the run to go green before pushing the next tag.
