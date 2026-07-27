@@ -94,6 +94,11 @@ jobs:
           fi
           echo "OPENCLAW_VERSION=${pin}" >> "$GITHUB_ENV"
 
+          # Not github.sha: on workflow_dispatch that is the ref the run was
+          # started from (usually master), not the tag being built, so the
+          # image would claim a revision it was not built from.
+          echo "BUILD_REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       - name: Set image name
         shell: bash
         run: |
@@ -146,21 +151,21 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event.inputs.dry_run != 'true' }}
+          push: ${{ !inputs.dry_run }}
           tags: ${{ steps.refs.outputs.tags }}
           # The bundled openclaw version rides along as a label rather than in
           # the tag name, so a running container is self-describing without
           # overloading the release-tag namespace.
           labels: |
             org.opencontainers.image.version=${{ env.TAG }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ env.BUILD_REVISION }}
             io.companionintelligence.openclaw.version=${{ env.OPENCLAW_VERSION }}
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Create or update GitHub Release
-        if: github.event.inputs.dry_run != 'true'
+        if: ${{ !inputs.dry_run }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
