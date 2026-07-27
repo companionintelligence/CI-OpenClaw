@@ -57,15 +57,37 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# Format must match the existing tags: unpadded components.
-got="$(RELEASE_DATE_OVERRIDE="$(date -u -d 2026-07-05 +%Y.%-m.%-d 2>/dev/null || echo 2026.7.5)" bash "${SCRIPT}")"
-if [[ "${got}" == "2026.7.5" ]]; then
+# Format must match the existing tags: unpadded components. Asserted on the
+# DEFAULT path, because that is the one that calls `date -u +%Y.%-m.%-d` — `%-m`
+# and `%-d` are a GNU extension, and a platform that pads would produce
+# 2026.07.05, which matches no existing tag. (This used to hedge the date call
+# with `|| echo 2026.7.5`, which meant that on exactly the platform the test was
+# meant to catch it compared the fallback to itself and asserted nothing.)
+got="$(bash "${SCRIPT}")"
+if [[ "${got}" =~ ^[0-9]{4}\.[1-9][0-9]?\.[1-9][0-9]?(\.[0-9]+)?$ ]]; then
   echo "  ok   unpadded components: -> ${got}"
   PASS=$((PASS + 1))
 else
-  echo "  FAIL unpadded components: got '${got}', want '2026.7.5'" >&2
+  echo "  FAIL unpadded components: '${got}' has a padded or malformed component" >&2
   FAIL=$((FAIL + 1))
 fi
+
+# A malformed date must be rejected rather than allocated as a tag.
+for bad in 2026.07.05 2026-7-5 "" "not-a-date" "2026.7.5.1"; do
+  if RELEASE_DATE_OVERRIDE="${bad}" bash "${SCRIPT}" >/dev/null 2>&1; then
+    # An empty override is not malformed — it falls through to today's date.
+    if [[ -z "${bad}" ]]; then
+      echo "  ok   empty override falls back to today"
+      PASS=$((PASS + 1))
+      continue
+    fi
+    echo "  FAIL malformed date '${bad}': expected non-zero exit" >&2
+    FAIL=$((FAIL + 1))
+  else
+    echo "  ok   malformed date rejected: '${bad}'"
+    PASS=$((PASS + 1))
+  fi
+done
 
 # The default (no override) must produce today's UTC date in the same shape.
 today="$(date -u +%Y.%-m.%-d)"
