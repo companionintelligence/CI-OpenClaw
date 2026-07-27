@@ -14,8 +14,9 @@ on:
     inputs:
       ref:
         description: >-
-          Commit to test. The publish workflow passes the exact SHA it is about to
-          build; leave empty to test the ref that triggered the run.
+          Ref to test. The publish workflow passes the exact ref it is about to check
+          out and build — the release tag — so the gate and the build can never
+          disagree about the tree. Leave empty to test the ref that triggered the run.
         type: string
         required: false
         default: ""
