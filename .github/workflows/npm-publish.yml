@@ -105,6 +105,13 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - name: Require the NPM_TOKEN secret
+        # Skipped for an explicit dry run: dry_run packs and compares without
+        # publishing, so demanding a publish credential would block the one check
+        # worth running BEFORE the token exists. Both forms are matched because a
+        # boolean input arrives as a string over the API.
+        if: >-
+          github.event_name != 'workflow_dispatch'
+          || !(inputs.dry_run == true || inputs.dry_run == 'true')
         # Fail here with an actionable message rather than 15 minutes later with a raw
         # npm E401, after the whole CI gate and the pack have run. Mirrors ci.yml's
         # CI_HUB_READ_TOKEN preflight.

@@ -391,7 +391,11 @@ jobs:
             cfg.plugins.slots = { ...(cfg.plugins.slots ?? {}), memory: "companionintelligence" };
             fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
           '
-          openclaw plugins inspect companionintelligence --json > "${RUNNER_TEMP}/inspect.json"
+          # --runtime, matching what the plugin README tells users to run. Without it
+          # inspect reports registration only; --runtime actually loads the plugin
+          # runtime for hooks/tools, which is the property this step claims to confirm
+          # and the one a regression would break.
+          openclaw plugins inspect companionintelligence --runtime --json > "${RUNNER_TEMP}/inspect.json"
           node -e '
             const doc = require(process.env.RUNNER_TEMP + "/inspect.json").plugin;
             const problems = [];
