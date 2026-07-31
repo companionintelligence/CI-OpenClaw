@@ -48,6 +48,9 @@ Then add your server URL and key, and select the plugin as the memory provider, 
 }
 ```
 
+Use your own server's address in place of `https://memory.example.com` — see
+[Which URL do I use?](#which-url-do-i-use) if your hub answers on more than one.
+
 Restart the gateway, then verify:
 
 ```bash
@@ -55,6 +58,11 @@ openclaw plugins inspect companionintelligence --runtime --json
 ```
 
 You are looking for `"status": "loaded"` and `"activationReason": "selected memory slot"`.
+
+That confirms OpenClaw loaded the plugin and handed it the memory slot. It does **not**
+contact your server: a plugin pointed at an unreachable `url` still reports `loaded`. To
+check the connection itself, run `/ci-memory` in a session — it calls `GET /api/health`
+and reports back the URL it used.
 
 ### Why each key is needed
 
@@ -75,6 +83,43 @@ You are looking for `"status": "loaded"` and `"activationReason": "selected memo
 > file, after which `openclaw doctor --repair` quarantines it and restores the last
 > known good copy — silently reverting anything else written in the same pass. Copy
 > the block above as-is, and check `openclaw doctor --lint` after editing.
+
+## Which URL do I use?
+
+Companion Memory runs as an app on your Companion Hub, and a hub can answer on more than
+one address at the same time. Which one belongs in `url` depends on where this agent
+runs, not on which address is the "real" one. The plugin calls the server from the agent
+process rather than from a browser, so no origin or CORS restriction applies: any address
+the agent's machine can route to will work.
+
+The app's exposure is set in the hub under **App → Settings**. Each setting produces a
+different address:
+
+| Exposure | Address shape | Reachable from |
+| --- | --- | --- |
+| Local network (default) | `http://ci-memory.ci.lan` — or `http://<hub-ip>:8642` if Traefik routing is not set up | Devices on the hub's LAN |
+| Private VPN (Tailscale) | `https://<hub>.<tailnet>.ts.net:8642` | Any device signed into your tailnet |
+| Public (**Expose app**) | `https://<the domain you configured>` | Anywhere |
+
+`ci.lan` is the default local domain and can be changed in **Settings → General**; `8642`
+is Companion Memory's app port. Use `http://localhost:8642` only when the agent runs on
+the hub host itself.
+
+This value is written to your config once and never re-resolved, so it does not follow
+you between networks. An agent that always runs on the hub's LAN is served by the local
+address, and its traffic never leaves your network. An agent on a machine that moves — a
+laptop that leaves the house — keeps working only on an address reachable from wherever
+it goes, which means joining the tailnet or exposing the app publicly; exposing it puts
+the memory server on the internet, where its API key is the only thing guarding it. The
+three forms differ in reach and in what they ask of you, not in what the plugin can do
+with them.
+
+### If it does not connect
+
+`"status": "loaded"` says nothing about reachability. Run `/ci-memory`: on failure it
+prints the error alongside the URL it tried, which is usually enough to separate a wrong
+address from a wrong key. A timeout or a refused connection points at the address; a
+`401` points at the key.
 
 ## Configuration
 
