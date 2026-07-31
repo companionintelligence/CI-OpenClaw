@@ -36,7 +36,6 @@ assert_eq() {
   fi
 }
 
-# run_status CMD... — run, capturing status without tripping set -e.
 assert_contains() {
   local label="$1" needle="$2" haystack="$3"
   if grep -qF -- "${needle}" <<<"${haystack}"; then
@@ -50,6 +49,7 @@ assert_contains() {
   fi
 }
 
+# run_status CMD... — run, capturing status without tripping set -e.
 run_status() {
   local status=0
   "$@" >/dev/null 2>&1 || status=$?

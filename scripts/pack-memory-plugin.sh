@@ -118,12 +118,14 @@ assert_files_cover_plugin_dir() {
     || die "could not list ${tarball}"
 
   # Captured before the loop rather than piped straight into `while`. A process
-  # substitution discards the producer's exit status, so a `find` that fails — no GNU
-  # -printf on BSD/macOS, an unreadable directory — fed the loop zero lines, left
-  # `missing` empty, and made THIS check return success while packing a short tarball.
-  # The one check that must never fail open was the one that did.
+  # substitution discards the producer's exit status, so a `find` that failed — an
+  # unreadable directory, or the GNU-only `-printf` this once used, which BSD/macOS
+  # find rejects outright — fed the loop zero lines, left `missing` empty, and made
+  # THIS check return success while packing a short tarball. The one check that must
+  # never fail open was the one that did. `-print` plus a `./` strip is the portable
+  # equivalent, and pipefail keeps a failing `find` fatal through the pipe.
   local listing
-  listing="$(cd "${PLUGIN_DIR}" && find . -type f ! -path '*/node_modules/*' -printf '%P\n' | LC_ALL=C sort)" \
+  listing="$(cd "${PLUGIN_DIR}" && find . -type f ! -path '*/node_modules/*' -print | sed 's|^\./||' | LC_ALL=C sort)" \
     || die "could not list ${PLUGIN_DIR}"
   [[ -n "${listing}" ]] || die "found no files in ${PLUGIN_DIR}"
 
