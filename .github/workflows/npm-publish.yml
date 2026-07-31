@@ -80,7 +80,10 @@ jobs:
     secrets:
       CI_HUB_READ_TOKEN: ${{ secrets.CI_HUB_READ_TOKEN }}
     with:
-      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      # refs/tags/... rather than a bare name: actions/checkout resolves a bare ref as
+      # a branch before it tries a tag, so a branch shadowing a tag would be tested and
+      # published while the rev-parse guard below still confirmed the tag exists.
+      ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
   publish:
     needs: test
@@ -91,9 +94,9 @@ jobs:
       - name: Checkout the tag being published
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
-          # Tags are needed so the next step can prove the dispatch input names a real
-          # tag rather than a branch.
+          # refs/tags/... rather than a bare name — see the note on the test job.
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+          # Tags are needed so the rev-parse guard below can run at all.
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
@@ -162,6 +165,7 @@ jobs:
         env:
           PACKAGE: "@companionintelligence/openclaw-memory"
           VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
           candidate="$(scripts/pack-memory-plugin.sh --pack --version "${VERSION}" --out "${RUNNER_TEMP}/candidate")"
@@ -192,10 +196,18 @@ jobs:
           # A rerun of an already-published tag must be a no-op rather than a failed
           # publish: npm rejects a duplicate version, and that failure would read as a
           # broken release rather than "already done".
-          if npm view "${PACKAGE}@${VERSION}" version >/dev/null 2>&1; then
+          # Same discrimination as above rather than `>/dev/null 2>&1`: swallowing a
+          # 5xx here would read as "not published yet" and turn a rerun of a finished
+          # release into a duplicate-version publish failure — the exact outcome this
+          # guard exists to prevent.
+          if npm view "${PACKAGE}@${VERSION}" version >/dev/null 2>"${RUNNER_TEMP}/view2.err"; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
             echo "::notice::${PACKAGE}@${VERSION} is already published; nothing to do."
             exit 0
+          elif ! grep -qiE 'E404|is not in this registry|404 Not Found' "${RUNNER_TEMP}/view2.err"; then
+            echo "::error::could not query the registry for ${PACKAGE}@${VERSION}"
+            cat "${RUNNER_TEMP}/view2.err"
+            exit 1
           fi
 
           # `npm pack --pack-destination` does NOT create a missing directory: it
@@ -215,7 +227,7 @@ jobs:
           case "${status}" in
             0)
               echo "publish=false" >> "$GITHUB_OUTPUT"
-              echo "::notice::Plugin is byte-identical to ${PACKAGE}@${published_latest}; skipping the npm publish for ${{ steps.version.outputs.tag }}. This is an image-only release."
+              echo "::notice::Plugin is byte-identical to ${PACKAGE}@${published_latest}; skipping the npm publish for ${RELEASE_TAG}. This is an image-only release."
               ;;
             1)
               echo "publish=true" >> "$GITHUB_OUTPUT"
@@ -223,7 +235,35 @@ jobs:
               # npm publish always claims the `latest` dist-tag. Republishing an OLD
               # tag by dispatch therefore repoints `latest` at older plugin code. Not
               # blocked (it is occasionally what you want), but never silent.
-              newest="$(printf '%s\n%s\n' "${published_latest}" "${VERSION}" | sort -V | tail -n1)"
+              #
+              # Compared with semver precedence, not `sort -V`. They disagree on exactly
+              # the versions this repo mints: `sort -V` ranks 2026.7.7-2 ABOVE 2026.7.7,
+              # semver ranks it below. That inverted the warning on the same-day-suffix
+              # case the version mapper exists to support — silent when `latest` really
+              # did move backwards, noisy when it did not.
+              newest="$(VERSION="${VERSION}" PUBLISHED="${published_latest}" node -e '
+                const parse = (v) => {
+                  const s = String(v);
+                  // Split on the FIRST hyphen only: a prerelease may itself contain
+                  // hyphens (2026.8.1-rc-1), and split("-", 2) would drop the tail.
+                  const i = s.indexOf("-");
+                  const core = (i < 0 ? s : s.slice(0, i)).split(".").map(Number);
+                  return { core, pre: i < 0 ? undefined : s.slice(i + 1) };
+                };
+                const cmp = (a, b) => {
+                  const x = parse(a), y = parse(b);
+                  for (let i = 0; i < 3; i++) {
+                    if ((x.core[i] || 0) !== (y.core[i] || 0)) return (x.core[i] || 0) - (y.core[i] || 0);
+                  }
+                  // A release outranks any prerelease of the same core version.
+                  if (x.pre === undefined && y.pre !== undefined) return 1;
+                  if (x.pre !== undefined && y.pre === undefined) return -1;
+                  if (x.pre === y.pre) return 0;
+                  return String(x.pre) < String(y.pre) ? -1 : 1;
+                };
+                const v = process.env.VERSION, p = process.env.PUBLISHED;
+                console.log(cmp(v, p) >= 0 ? v : p);
+              ')"
               if [[ "${newest}" != "${VERSION}" ]]; then
                 echo "::warning::${VERSION} sorts below the currently published ${published_latest}. Publishing will move the npm 'latest' tag BACKWARDS to this older release."
               fi
@@ -245,6 +285,10 @@ jobs:
           # that goes to the registry is then exactly the one the decision was made
           # about.
           tarball="$(find "${RUNNER_TEMP}/candidate" -name '*.tgz' -print -quit)"
+          # Guarded like the published-tarball lookup above. `npm publish ""` does not
+          # fail cleanly: npm resolves the empty spec to the registry package literally
+          # named `undefined` and tries to publish that.
+          [[ -n "${tarball}" ]] || { echo "::error::no packed tarball in ${RUNNER_TEMP}/candidate"; exit 1; }
           npm publish "${tarball}" --access public
           echo "Published ${VERSION}"
 

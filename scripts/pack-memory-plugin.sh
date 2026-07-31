@@ -87,6 +87,12 @@ mktempdir() {
 npm_version() {
   local tag="${1#v}"
   [[ -n "${tag}" ]] || die "empty tag"
+  # No leading zeros in any segment: npm silently rewrites 2026.08.01 to 2026.8.1 at
+  # publish time, after which the registry version, the version stamped into the
+  # shipped plugin, and the URL the workflow verifies all disagree.
+  if [[ "${tag}" =~ (^|\.)0[0-9] ]]; then
+    die "tag '${1}' has a zero-padded segment; npm would silently renumber it"
+  fi
   if [[ "${tag}" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)$ ]]; then
     printf '%s-%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
   elif [[ "${tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
@@ -111,6 +117,16 @@ assert_files_cover_plugin_dir() {
   shipped="$(tar -tzf "${tarball}" | sed 's|^package/||' | grep -v '/$' | LC_ALL=C sort)" \
     || die "could not list ${tarball}"
 
+  # Captured before the loop rather than piped straight into `while`. A process
+  # substitution discards the producer's exit status, so a `find` that fails — no GNU
+  # -printf on BSD/macOS, an unreadable directory — fed the loop zero lines, left
+  # `missing` empty, and made THIS check return success while packing a short tarball.
+  # The one check that must never fail open was the one that did.
+  local listing
+  listing="$(cd "${PLUGIN_DIR}" && find . -type f ! -path '*/node_modules/*' -printf '%P\n' | LC_ALL=C sort)" \
+    || die "could not list ${PLUGIN_DIR}"
+  [[ -n "${listing}" ]] || die "found no files in ${PLUGIN_DIR}"
+
   # Plain `if`s throughout: under errexit a bare `[[ ... ]] && cmd` whose test is
   # false returns non-zero and aborts the function rather than skipping the line.
   local rel skip pattern
@@ -127,7 +143,7 @@ assert_files_cover_plugin_dir() {
         missing+=("${rel}")
       fi
     fi
-  done < <(cd "${PLUGIN_DIR}" && find . -type f ! -path '*/node_modules/*' -printf '%P\n' | LC_ALL=C sort)
+  done <<<"${listing}"
 
   if [[ "${#missing[@]}" -gt 0 ]]; then
     printf 'These files are in the plugin directory but the published tarball does not ship them:\n' >&2
@@ -147,7 +163,12 @@ do_pack() {
   # carrying regex or JSON metacharacters would otherwise corrupt a manifest and
   # still exit 0. The workflow always feeds this from --npm-version, but the
   # script's contract should not depend on its only caller behaving.
-  [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
+  #
+  # The prerelease class must stay in step with npm_version's, hyphen included. It did
+  # not, and the gap was reachable: tag 2026.8.1-rc-1 satisfies the publish workflow's
+  # tag glob and npm_version emits it unchanged, then --pack rejected it — a release
+  # that failed here, after the full CI gate had already run.
+  [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
     || die "--version '${version}' is not a valid release version"
 
   mkdir -p "${outdir}" || die "could not create ${outdir}"
@@ -230,8 +251,26 @@ do_compare() {
     done
   done
 
-  if diff -r "${work}/a" "${work}/b" >/dev/null 2>&1; then
+  # Both extracted trees must be non-empty. `tar --strip-components=1` silently drops
+  # entries with fewer than two path components and still exits 0, so a differently
+  # rooted tarball would extract to nothing and compare equal to another one — a
+  # permanent "identical, image-only release" skip.
+  local side
+  for side in a b; do
+    if [[ -z "$(ls -A "${work}/${side}")" ]]; then
+      die "extracted an empty tree from the ${side} tarball; refusing to call that identical"
+    fi
+  done
+
+  # diff exits 0 same, 1 differs, 2 TROUBLE. Mapping anything non-zero to 1 would turn
+  # an unreadable file into a publish.
+  local diff_status=0
+  diff -r "${work}/a" "${work}/b" >/dev/null 2>&1 || diff_status=$?
+  if [[ "${diff_status}" -eq 0 ]]; then
     return 0
+  fi
+  if [[ "${diff_status}" -ne 1 ]]; then
+    die "diff failed with status ${diff_status} while comparing the tarballs"
   fi
   # The human-readable report goes to stderr so callers can still parse stdout.
   # --brief: the payload is a 34KB index.js and a full unified diff of it helps

@@ -67,6 +67,7 @@ assert_eq "same-day suffix becomes a prerelease" "2026.7.7-2" "$("${SCRIPT}" --n
 assert_eq "a leading v is tolerated" "2026.8.1" "$("${SCRIPT}" --npm-version v2026.8.1)"
 assert_eq "an already-mapped version is idempotent" "2026.7.7-2" "$("${SCRIPT}" --npm-version 2026.7.7-2)"
 assert_eq "a non-release tag is a setup error" "2" "$(run_status "${SCRIPT}" --npm-version latest)"
+assert_eq "a zero-padded tag is refused" "2" "$(run_status "${SCRIPT}" --npm-version v2026.08.01)"
 assert_eq "an empty tag is a setup error" "2" "$(run_status "${SCRIPT}" --npm-version "")"
 
 echo "packing"
@@ -147,6 +148,15 @@ assert_eq "a corrupt tarball is a setup error, not a difference" "2" \
 # silently producing a valid-looking tarball with a corrupt manifest.
 assert_eq "a hostile --version is refused" "2" \
   "$(run_status "${SCRIPT}" --pack --version '1.0.0-x&y' --out "${WORK}/hostile")"
+# `tar --strip-components=1` drops single-component members and still exits 0, so a
+# differently rooted tarball extracts to nothing. Two of those must not compare equal.
+mkdir -p "${WORK}/flat"
+printf 'name: x\nversion: 1.0.0\n' >"${WORK}/flat/plugin.yaml"
+tar -czf "${WORK}/flat1.tgz" -C "${WORK}/flat" plugin.yaml
+tar -czf "${WORK}/flat2.tgz" -C "${WORK}/flat" plugin.yaml
+assert_eq "two empty extractions are not called identical" "2" \
+  "$(run_status "${SCRIPT}" --compare "${WORK}/flat1.tgz" "${WORK}/flat2.tgz")"
+
 assert_eq "no mode is a usage error" "2" "$(run_status "${SCRIPT}")"
 
 echo
