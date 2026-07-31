@@ -363,11 +363,19 @@ jobs:
             process.exit(1);
           }
           console.log("registered under the manifest id, enabled");
-          // Documented behaviour, asserted so it cannot change silently: the npm form
-          // leaves the memory slot alone, which is why the install instructions tell
-          // users to set plugins.slots.memory themselves.
+          // Documented behaviour, actually asserted: the npm form leaves the memory
+          // slot alone. The README's install block rests on this — it tells users to
+          // set plugins.slots.memory themselves precisely because installing does not.
+          // If a future OpenClaw starts auto-claiming the slot, that instruction turns
+          // from necessary into wrong, so this has to fail rather than just report.
           const slot = cfg.plugins?.slots?.memory;
           console.log(`memory slot after install: ${slot ?? "(unset)"}`);
+          if (slot === "companionintelligence") {
+            console.error(
+              "the npm install claimed the memory slot on its own; the install docs tell users to set it themselves and now say something untrue",
+            );
+            process.exit(1);
+          }
           NODE
 
       - name: Confirm the installed plugin loads
