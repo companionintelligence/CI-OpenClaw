@@ -316,7 +316,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.npm-global
-          # Same key as the schema gate, so only one job pays the ~88MB download.
+          # Shared with the schema gate, which runs in parallel: on a cold key both
+          # download and both try to save it (one loses the race, harmlessly). On a
+          # warm key — the common case, since the pin moves rarely — neither pays.
           key: openclaw-${{ runner.os }}-${{ steps.resolve.outputs.version }}
 
       - name: Install openclaw@${{ steps.resolve.outputs.version }}

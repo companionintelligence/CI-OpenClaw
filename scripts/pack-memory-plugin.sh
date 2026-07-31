@@ -43,8 +43,35 @@ PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)/openclaw-context/plugins/companion
 # Both files carry a version and both are stamped; normalising them is what makes
 # --compare answer "did the plugin change" rather than "is this a different release".
 VERSIONED_FILES=(package.json openclaw.plugin.json)
+# Files that legitimately live in the plugin directory but must not ship. Anything
+# in the directory matching none of these MUST appear in the tarball — see
+# assert_files_cover_plugin_dir for why that check exists at all.
+NOT_PUBLISHED=('*.test.js')
 
 die() { echo "$*" >&2; exit 2; }
+
+# Temp dirs are registered here and removed by a single EXIT trap. A per-function
+# `trap ... RETURN` does not fire when the function exits (every `die`) or when
+# errexit aborts it, which leaked a full copy of the plugin source per failure.
+TMPDIRS=()
+cleanup() {
+  local d
+  for d in "${TMPDIRS[@]:-}"; do
+    if [[ -n "${d}" && -d "${d}" ]]; then rm -rf "${d}"; fi
+  done
+  # Explicit: the trap's exit status becomes the script's, so a falsy last command
+  # here turns a successful run into a failure.
+  return 0
+}
+trap cleanup EXIT
+
+# Sets MKTEMP_DIR rather than printing it. A `$(mktempdir)` would run in a subshell,
+# where the TMPDIRS append is discarded and the directory is never cleaned up.
+MKTEMP_DIR=""
+mktempdir() {
+  MKTEMP_DIR="$(mktemp -d)" || die "mktemp failed"
+  TMPDIRS+=("${MKTEMP_DIR}")
+}
 
 # Map a release tag to a valid npm version.
 #
@@ -69,17 +96,67 @@ npm_version() {
   fi
 }
 
+# Fail if the plugin directory contains a file the tarball does not ship.
+#
+# THIS IS THE MOST IMPORTANT CHECK IN THE SCRIPT. `files` in package.json is a
+# hand-maintained allowlist, but the appliance image copies the whole directory. Add
+# a module (say the intent catalog gets split again) without touching `files`, and:
+# the image gets it, the tarball does not, --compare finds the two tarballs identical
+# so the release is logged as "image-only" and skipped, and every later release
+# repeats the skip. npm users are left on a version whose remaining files import a
+# module that is not there. It never self-heals and the job stays green throughout.
+assert_files_cover_plugin_dir() {
+  local tarball="${1}"
+  local shipped expected missing=()
+  shipped="$(tar -tzf "${tarball}" | sed 's|^package/||' | grep -v '/$' | LC_ALL=C sort)" \
+    || die "could not list ${tarball}"
+
+  # Plain `if`s throughout: under errexit a bare `[[ ... ]] && cmd` whose test is
+  # false returns non-zero and aborts the function rather than skipping the line.
+  local rel skip pattern
+  while IFS= read -r rel; do
+    skip=0
+    for pattern in "${NOT_PUBLISHED[@]}"; do
+      # shellcheck disable=SC2053 -- glob match is intended
+      if [[ "${rel}" == ${pattern} ]]; then
+        skip=1
+      fi
+    done
+    if [[ "${skip}" -eq 0 ]]; then
+      if ! grep -qxF "${rel}" <<<"${shipped}"; then
+        missing+=("${rel}")
+      fi
+    fi
+  done < <(cd "${PLUGIN_DIR}" && find . -type f ! -path '*/node_modules/*' -printf '%P\n' | LC_ALL=C sort)
+
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    printf 'These files are in the plugin directory but the published tarball does not ship them:\n' >&2
+    printf '  %s\n' "${missing[@]}" >&2
+    printf 'Add them to "files" in package.json, or to NOT_PUBLISHED in %s if they are deliberately excluded.\n' "$0" >&2
+    exit 2
+  fi
+}
+
 # Stage the plugin, stamp both version fields, npm pack. Prints the tarball path.
 do_pack() {
   local version="${1}" outdir="${2}"
   [[ -n "${version}" ]] || die "--pack needs --version"
   [[ -n "${outdir}" ]] || die "--pack needs --out"
   [[ -d "${PLUGIN_DIR}" ]] || die "no plugin directory at ${PLUGIN_DIR}"
+  # Validate rather than trust: the version is substituted into files, and a value
+  # carrying regex or JSON metacharacters would otherwise corrupt a manifest and
+  # still exit 0. The workflow always feeds this from --npm-version, but the
+  # script's contract should not depend on its only caller behaving.
+  [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
+    || die "--version '${version}' is not a valid release version"
 
-  mkdir -p "${outdir}"
+  mkdir -p "${outdir}" || die "could not create ${outdir}"
+  # Absolute, because npm pack runs after `cd "${stage}"` and would otherwise
+  # resolve a relative --out inside the staging dir, which is then deleted.
+  outdir="$(cd "${outdir}" && pwd)" || die "could not resolve ${outdir}"
+
   local stage
-  stage="$(mktemp -d)"
-  trap 'rm -rf "${stage}"' RETURN
+  mktempdir; stage="${MKTEMP_DIR}"
 
   cp -R "${PLUGIN_DIR}/." "${stage}/"
 
@@ -91,16 +168,26 @@ do_pack() {
       const p = process.argv[1];
       const doc = JSON.parse(fs.readFileSync(p, "utf8"));
       doc.version = process.env.VERSION;
+      // `private: true` stays in the working tree so a stray `npm publish` from the
+      // plugin directory refuses; it is stripped only here, in the staging copy that
+      // becomes the published artifact. Without that, a local publish would burn a
+      // version number AND move the `latest` dist-tag the change-guard reads.
+      delete doc.private;
+      // Nothing in the published tarball can run these: `files` excludes the test
+      // files, so a published `npm test` would run over nothing and exit 0.
+      delete doc.scripts;
       fs.writeFileSync(p, JSON.stringify(doc, null, 2) + "\n");
-    ' "${stage}/${f}"
+    ' "${stage}/${f}" || die "could not stamp ${f}"
   done
 
   # `npm pack` applies the `files` allowlist, so the plugin's own test files are
   # excluded here rather than by a second list this script would have to keep in
   # sync. --silent keeps stdout to the filename npm prints.
   local tarball
-  tarball="$(cd "${stage}" && npm pack --silent --pack-destination "${outdir}")"
+  tarball="$(cd "${stage}" && npm pack --silent --pack-destination "${outdir}")" \
+    || die "npm pack failed"
   [[ -n "${tarball}" ]] || die "npm pack produced no tarball"
+  assert_files_cover_plugin_dir "${outdir%/}/${tarball}"
   printf '%s\n' "${outdir%/}/${tarball}"
 }
 
@@ -110,22 +197,26 @@ do_pack() {
 # `npm pack <pkg>@latest` and hands both paths here, so this seam stays testable
 # offline — the same split that makes check-ci-hub-plugin-drift.sh's --compare
 # testable.
+# Every failure in here `die`s with 2 rather than being allowed to surface as 1.
+# Exit 1 means one thing to the caller — "the plugin changed, publish it" — so an
+# internal error that leaked out as 1 would silently turn into a release. Only the
+# final diff may produce 1.
 do_compare() {
   local a="${1}" b="${2}"
   [[ -f "${a}" ]] || die "no such tarball: ${a}"
   [[ -f "${b}" ]] || die "no such tarball: ${b}"
 
   local work
-  work="$(mktemp -d)"
-  trap 'rm -rf "${work}"' RETURN
+  mktempdir; work="${MKTEMP_DIR}"
 
-  local side path f
+  local side src path f
   for side in a b; do
-    mkdir -p "${work}/${side}"
+    mkdir -p "${work}/${side}" || die "could not create ${work}/${side}"
+    if [[ "${side}" == "b" ]]; then src="${b}"; else src="${a}"; fi
     # npm tarballs root everything under package/; --strip-components=1 drops it so
     # the two trees compare directly.
-    tar -xzf "$([[ "${side}" == a ]] && printf '%s' "${a}" || printf '%s' "${b}")" \
-      -C "${work}/${side}" --strip-components=1
+    tar -xzf "${src}" -C "${work}/${side}" --strip-components=1 \
+      || die "could not extract ${src}"
     for f in "${VERSIONED_FILES[@]}"; do
       path="${work}/${side}/${f}"
       [[ -f "${path}" ]] || continue
@@ -135,7 +226,7 @@ do_compare() {
         const doc = JSON.parse(fs.readFileSync(p, "utf8"));
         doc.version = "0.0.0-normalized";
         fs.writeFileSync(p, JSON.stringify(doc, null, 2) + "\n");
-      ' "${path}"
+      ' "${path}" || die "could not normalise ${f} in ${src}"
     done
   done
 
@@ -143,7 +234,9 @@ do_compare() {
     return 0
   fi
   # The human-readable report goes to stderr so callers can still parse stdout.
-  diff -r "${work}/a" "${work}/b" >&2 || true
+  # --brief: the payload is a 34KB index.js and a full unified diff of it helps
+  # nobody in a workflow log.
+  diff -rq "${work}/a" "${work}/b" >&2 || true
   return 1
 }
 

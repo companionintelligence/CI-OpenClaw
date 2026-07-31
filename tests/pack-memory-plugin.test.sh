@@ -37,11 +37,27 @@ assert_eq() {
 }
 
 # run_status CMD... — run, capturing status without tripping set -e.
+assert_contains() {
+  local label="$1" needle="$2" haystack="$3"
+  if grep -qF -- "${needle}" <<<"${haystack}"; then
+    echo "  ✓ ${label}"
+    PASS=$((PASS + 1))
+  else
+    echo "  ✗ ${label}"
+    echo "    expected output to contain: ${needle}"
+    echo "    got: ${haystack}"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 run_status() {
   local status=0
   "$@" >/dev/null 2>&1 || status=$?
   printf '%s' "${status}"
 }
+
+TREE_PKG_VERSION="$(node -e 'console.log(require(process.argv[1]).version)' "${PLUGIN_DIR}/package.json")"
+TREE_MANIFEST_VERSION="$(node -e 'console.log(require(process.argv[1]).version)' "${PLUGIN_DIR}/openclaw.plugin.json")"
 
 echo "pack-memory-plugin.sh"
 
@@ -72,9 +88,38 @@ assert_eq "openclaw.plugin.json is stamped too" "2026.8.1" \
   "$(tar -xzOf "${TGZ_A}" package/openclaw.plugin.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).version))')"
 
 # Staging must not write to the checkout: a publish job that mutates the tree it
-# just tested is a tree nobody reviewed.
-assert_eq "the working tree is left unstamped" "1.0.0" \
+# just tested is a tree nobody reviewed. Captured before/after rather than compared
+# to a literal, so a legitimate version bump in the tree does not fail this for a
+# reason that has nothing to do with what it is testing.
+assert_eq "package.json in the working tree is untouched" "${TREE_PKG_VERSION}" \
   "$(node -e 'console.log(require(process.argv[1]).version)' "${PLUGIN_DIR}/package.json")"
+assert_eq "openclaw.plugin.json in the working tree is untouched" "${TREE_MANIFEST_VERSION}" \
+  "$(node -e 'console.log(require(process.argv[1]).version)' "${PLUGIN_DIR}/openclaw.plugin.json")"
+# `private: true` is what stops a stray `npm publish` from the plugin directory
+# burning a version and moving the `latest` dist-tag the change-guard reads.
+assert_eq "the working tree keeps private: true" "true" \
+  "$(node -e 'console.log(require(process.argv[1]).private)' "${PLUGIN_DIR}/package.json")"
+assert_eq "the published tarball drops private" "undefined" \
+  "$(tar -xzOf "${TGZ_A}" package/package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(String(JSON.parse(s).private)))')"
+
+echo "the files allowlist covers the plugin directory"
+# The guard that stops the worst failure this script can produce. `files` is a
+# hand-maintained allowlist while the appliance image copies the whole directory, so
+# a new module that nobody adds to `files` ships in the image, is absent from the
+# tarball, and makes every future release compare as "identical" and skip — leaving
+# npm users importing a module that is not there, on a permanently green pipeline.
+STRAY="${PLUGIN_DIR}/__packaging_probe.js"
+printf 'export const probe = 1;\n' >"${STRAY}"
+STRAY_STATUS="$(run_status "${SCRIPT}" --pack --version 2026.8.2 --out "${WORK}/stray")"
+STRAY_OUT="$("${SCRIPT}" --pack --version 2026.8.2 --out "${WORK}/stray" 2>&1 || true)"
+rm -f "${STRAY}"
+assert_eq "an unlisted file in the plugin dir fails the pack" "2" "${STRAY_STATUS}"
+assert_contains "and names the offending file" "__packaging_probe.js" "${STRAY_OUT}"
+
+# The excluded set must still not trip it, or every pack fails and the guard gets
+# deleted by the next person in a hurry.
+assert_eq "the plugin's own test files do not trip it" "0" \
+  "$(run_status "${SCRIPT}" --pack --version 2026.8.3 --out "${WORK}/ok")"
 
 echo "comparing"
 TGZ_B="$("${SCRIPT}" --pack --version 2026.9.9 --out "${WORK}/b")"
@@ -90,6 +135,18 @@ tar -czf "${WORK}/changed.tgz" -C "${CHANGED}" package
 assert_eq "a changed plugin compares unequal" "1" "$(run_status "${SCRIPT}" --compare "${TGZ_A}" "${WORK}/changed.tgz")"
 
 assert_eq "a missing tarball is a setup error" "2" "$(run_status "${SCRIPT}" --compare "${TGZ_A}" "${WORK}/nope.tgz")"
+
+# Exit 1 means exactly one thing to the publish workflow: "the plugin changed, ship
+# it". An internal failure that surfaced as 1 would silently become a release, so a
+# corrupt input must be 2 and never 1.
+printf 'not a tarball\n' >"${WORK}/corrupt.tgz"
+assert_eq "a corrupt tarball is a setup error, not a difference" "2" \
+  "$(run_status "${SCRIPT}" --compare "${TGZ_A}" "${WORK}/corrupt.tgz")"
+
+# A version carrying JSON or regex metacharacters must be refused rather than
+# silently producing a valid-looking tarball with a corrupt manifest.
+assert_eq "a hostile --version is refused" "2" \
+  "$(run_status "${SCRIPT}" --pack --version '1.0.0-x&y' --out "${WORK}/hostile")"
 assert_eq "no mode is a usage error" "2" "$(run_status "${SCRIPT}")"
 
 echo

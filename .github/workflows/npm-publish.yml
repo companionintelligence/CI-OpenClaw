@@ -40,12 +40,12 @@ name: Publish memory plugin to npm
 # NPM_CONFIG_PROVENANCE=false. Not adopted here because it is unverified for this
 # repo's shape; the token path above is known to work.
 on:
-  # Release tags only, matching docker-publish.yml. Every real release tag is
-  # YYYY.M.D[.N], so it starts with a digit — a `*` pattern would publish from the
-  # runbook's own "push a test tag to verify" recipe.
   push:
     tags:
-      - "[0-9]*"
+      # Release tags are YYYY.M.D with an optional same-day suffix. Tighter than
+      # docker-publish.yml's `[0-9]*`, which also matches `1-scratch` and would burn a
+      # full CI gate before the version mapper rejected it.
+      - "[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
     inputs:
       tag:
@@ -92,17 +92,65 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          # Tags are needed so the next step can prove the dispatch input names a real
+          # tag rather than a branch.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Resolve the release tag and npm version
-        id: version
+      - name: Require the NPM_TOKEN secret
+        # Fail here with an actionable message rather than 15 minutes later with a raw
+        # npm E401, after the whole CI gate and the pack have run. Mirrors ci.yml's
+        # CI_HUB_READ_TOKEN preflight.
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          if [[ -z "${NPM_TOKEN}" ]]; then
+            echo "::error::NPM_TOKEN is not set. See the header of this workflow for how to create it (Packages and scopes -> @companionintelligence -> Read and write; NOT the Organizations permission)."
+            exit 1
+          fi
+
+      - name: Resolve the release tag and npm version
+        id: version
+        # INPUT_TAG and INPUT_DRY_RUN come through env rather than a ${{ }}
+        # interpolation: the dispatch inputs are user-supplied, and interpolating them
+        # into the script body would let a crafted value break out of the quoting and
+        # run arbitrary commands in a job that holds the npm token. docker-publish.yml
+        # documents the same rule.
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${INPUT_TAG}"
+            # Without this, `ref: <input>` happily checks out a BRANCH. Anyone with
+            # write access could push a branch named 9999.1.1, dispatch, and publish
+            # its contents as the newest version — npm would make it `latest`.
+            git rev-parse -q --verify "refs/tags/${tag}" >/dev/null \
+              || { echo "::error::${tag} is not a tag in this repository"; exit 1; }
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+
+          # Resolved in bash rather than as `${{ !inputs.dry_run }}` on the publish
+          # step. GitHub expressions treat any non-empty string as truthy, and a
+          # boolean input arrives as the STRING "false" when the run is started
+          # through the API or `gh workflow run -f`. That would skip the publish while
+          # leaving the job green — a release that silently shipped nothing. Only an
+          # explicit dry-run request suppresses publishing.
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${INPUT_DRY_RUN}" == "true" ]]; then
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::dry run — packing and comparing without publishing"
+          else
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
           # A 4-segment same-day tag (2026.7.7.2) is not semver; the script maps it.
           version="$(scripts/pack-memory-plugin.sh --npm-version "${tag}")"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
@@ -119,10 +167,22 @@ jobs:
           candidate="$(scripts/pack-memory-plugin.sh --pack --version "${VERSION}" --out "${RUNNER_TEMP}/candidate")"
           echo "Packed ${candidate}"
 
-          # `npm view` exits non-zero when the package has never been published. That
-          # is the first-publish case, not an error — hence `|| true` and an empty
-          # check rather than a status check.
-          published_latest="$(npm view "${PACKAGE}" version 2>/dev/null || true)"
+          # `npm view` exits non-zero when the package has never been published, which
+          # is the first-publish case rather than an error. But a bare `|| true` would
+          # ALSO swallow a 5xx or a registry misconfiguration and treat it as "never
+          # published" — skipping the already-published guard below and turning a
+          # flaky rerun into a duplicate-version publish failure. So look at what
+          # actually went wrong.
+          view_err=""
+          published_latest="$(npm view "${PACKAGE}" version 2>"${RUNNER_TEMP}/view.err")" || {
+            view_err="$(cat "${RUNNER_TEMP}/view.err")"
+            if ! grep -qiE 'E404|is not in this registry|404 Not Found' <<<"${view_err}"; then
+              echo "::error::could not query the registry for ${PACKAGE}"
+              echo "${view_err}"
+              exit 1
+            fi
+            published_latest=""
+          }
           if [[ -z "${published_latest}" ]]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
             echo "::notice::${PACKAGE} has never been published; publishing ${VERSION}."
@@ -160,6 +220,13 @@ jobs:
             1)
               echo "publish=true" >> "$GITHUB_OUTPUT"
               echo "::notice::Plugin changed since ${published_latest}; publishing ${VERSION}."
+              # npm publish always claims the `latest` dist-tag. Republishing an OLD
+              # tag by dispatch therefore repoints `latest` at older plugin code. Not
+              # blocked (it is occasionally what you want), but never silent.
+              newest="$(printf '%s\n%s\n' "${published_latest}" "${VERSION}" | sort -V | tail -n1)"
+              if [[ "${newest}" != "${VERSION}" ]]; then
+                echo "::warning::${VERSION} sorts below the currently published ${published_latest}. Publishing will move the npm 'latest' tag BACKWARDS to this older release."
+              fi
               ;;
             *)
               echo "::error::comparison failed with status ${status}"
@@ -168,7 +235,7 @@ jobs:
           esac
 
       - name: Publish
-        if: steps.decide.outputs.publish == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        if: steps.decide.outputs.publish == 'true' && steps.version.outputs.dry_run == 'false'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -182,7 +249,7 @@ jobs:
           echo "Published ${VERSION}"
 
       - name: Confirm the version is on the registry
-        if: steps.decide.outputs.publish == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        if: steps.decide.outputs.publish == 'true' && steps.version.outputs.dry_run == 'false'
         env:
           PACKAGE: "@companionintelligence/openclaw-memory"
           VERSION: ${{ steps.version.outputs.version }}
@@ -202,6 +269,6 @@ jobs:
           exit 1
 
       - name: Dry run summary
-        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        if: steps.version.outputs.dry_run == 'true'
         run: |
           echo "Dry run: would publish=${{ steps.decide.outputs.publish }} version=${{ steps.version.outputs.version }}"
