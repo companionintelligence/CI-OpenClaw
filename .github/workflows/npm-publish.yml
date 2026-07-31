@@ -1,0 +1,171 @@
+name: Publish memory plugin to npm
+
+# Same trigger as docker-publish.yml, deliberately: a release tag is the release, and
+# the plugin and the image are two artifacts of it. One ritual — push the tag, verify
+# the artifacts — rather than a second, dispatch-only mechanism nobody remembers.
+#
+# Most release tags do NOT change the plugin (an openclaw pin bump, a wrapper fix).
+# Publishing an npm version per image release would bury the versions that mean
+# something in a stream of identical ones, so this workflow compares the packed
+# plugin against what is already published and skips when nothing changed. A skip is
+# always logged; it is never silent.
+on:
+  # Release tags only, matching docker-publish.yml. Every real release tag is
+  # YYYY.M.D[.N], so it starts with a digit — a `*` pattern would publish from the
+  # runbook's own "push a test tag to verify" recipe.
+  push:
+    tags:
+      - "[0-9]*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish (for example 2026.8.1)"
+        required: true
+        type: string
+      dry_run:
+        description: "Pack and compare, but do not publish"
+        required: false
+        default: false
+        type: boolean
+
+# Keyed on the tag, like docker-publish.yml, and never cancel-in-progress: a
+# cancelled publish leaves a tag whose artifacts are half-there, which is the state
+# this repo has been burned by before.
+concurrency:
+  group: npm-publish-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Gate on the same suite that gates PRs and image publishes, run against the exact
+  # ref being published — so a red suite cannot ship a package, and the tested tree
+  # and the packed tree are the same commit by construction.
+  test:
+    name: Tests
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+    secrets:
+      CI_HUB_READ_TOKEN: ${{ secrets.CI_HUB_READ_TOKEN }}
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+  publish:
+    needs: test
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout the tag being published
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Resolve the release tag and npm version
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          # A 4-segment same-day tag (2026.7.7.2) is not semver; the script maps it.
+          version="$(scripts/pack-memory-plugin.sh --npm-version "${tag}")"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Release tag ${tag} publishes as ${version}"
+
+      - name: Decide whether this release changes the plugin
+        id: decide
+        env:
+          PACKAGE: "@companionintelligence/openclaw-memory"
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          candidate="$(scripts/pack-memory-plugin.sh --pack --version "${VERSION}" --out "${RUNNER_TEMP}/candidate")"
+          echo "Packed ${candidate}"
+
+          # `npm view` exits non-zero when the package has never been published. That
+          # is the first-publish case, not an error — hence `|| true` and an empty
+          # check rather than a status check.
+          published_latest="$(npm view "${PACKAGE}" version 2>/dev/null || true)"
+          if [[ -z "${published_latest}" ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${PACKAGE} has never been published; publishing ${VERSION}."
+            exit 0
+          fi
+
+          # A rerun of an already-published tag must be a no-op rather than a failed
+          # publish: npm rejects a duplicate version, and that failure would read as a
+          # broken release rather than "already done".
+          if npm view "${PACKAGE}@${VERSION}" version >/dev/null 2>&1; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${PACKAGE}@${VERSION} is already published; nothing to do."
+            exit 0
+          fi
+
+          npm pack "${PACKAGE}@${published_latest}" --silent --pack-destination "${RUNNER_TEMP}/published" >/dev/null
+          published_tgz="$(find "${RUNNER_TEMP}/published" -name '*.tgz' -print -quit)"
+
+          # --compare ignores the stamped version fields, so this answers "did the
+          # plugin change", not "is this a different release". Exit 0 = same, 1 =
+          # differs; anything else is a real error and must not read as "same".
+          status=0
+          scripts/pack-memory-plugin.sh --compare "${published_tgz}" "${candidate}" || status=$?
+          case "${status}" in
+            0)
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::Plugin is byte-identical to ${PACKAGE}@${published_latest}; skipping the npm publish for ${{ steps.version.outputs.tag }}. This is an image-only release."
+              ;;
+            1)
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::Plugin changed since ${published_latest}; publishing ${VERSION}."
+              ;;
+            *)
+              echo "::error::comparison failed with status ${status}"
+              exit "${status}"
+              ;;
+          esac
+
+      - name: Publish
+        if: steps.decide.outputs.publish == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Publish the tarball that was compared, not a fresh pack — the artifact
+          # that goes to the registry is then exactly the one the decision was made
+          # about.
+          tarball="$(find "${RUNNER_TEMP}/candidate" -name '*.tgz' -print -quit)"
+          npm publish "${tarball}" --access public
+          echo "Published ${VERSION}"
+
+      - name: Confirm the version is on the registry
+        if: steps.decide.outputs.publish == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        env:
+          PACKAGE: "@companionintelligence/openclaw-memory"
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # A tag must never imply an artifact that failed to appear. This repo has
+          # shipped a release tag with no image before; the same trap applies here.
+          for attempt in 1 2 3 4 5; do
+            if npm view "${PACKAGE}@${VERSION}" version >/dev/null 2>&1; then
+              echo "Confirmed ${PACKAGE}@${VERSION} on the registry."
+              exit 0
+            fi
+            echo "Not visible yet (attempt ${attempt}); waiting for registry propagation."
+            sleep 10
+          done
+          echo "::error::${PACKAGE}@${VERSION} did not appear on the registry after publishing."
+          exit 1
+
+      - name: Dry run summary
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: |
+          echo "Dry run: would publish=${{ steps.decide.outputs.publish }} version=${{ steps.version.outputs.version }}"

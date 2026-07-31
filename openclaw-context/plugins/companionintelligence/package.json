@@ -1,8 +1,29 @@
 {
-  "name": "ci-openclaw-plugin-companionintelligence",
+  "name": "@companionintelligence/openclaw-memory",
   "version": "1.0.0",
-  "private": true,
+  "description": "Companion Intelligence memory provider for OpenClaw — passive capture and recall against a self-hosted Companion Memory server.",
+  "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/companionintelligence/CI-OpenClaw.git",
+    "directory": "openclaw-context/plugins/companionintelligence"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "memory",
+    "companion-intelligence"
+  ],
+  "files": [
+    "index.js",
+    "intentCatalog.js",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "test": "node --test"
   },

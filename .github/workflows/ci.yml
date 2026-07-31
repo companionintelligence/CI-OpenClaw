@@ -276,3 +276,120 @@ jobs:
       - name: Check for drift
         if: steps.scope.outputs.run == 'true'
         run: ./scripts/check-ci-hub-plugin-drift.sh --check --ci-hub ci-hub
+
+  plugin-package:
+    # The memory plugin is published to npm so a stock OpenClaw install can add it the
+    # way OpenClaw adds any plugin: `openclaw plugins install npm:<package>`. This job
+    # runs that exact path on every PR — pack the plugin, install the tarball into a
+    # throwaway HOME with the real CLI, and assert it registers and loads.
+    #
+    # Verified by hand before this job existed, and the reason it exists: the npm form
+    # registers under the MANIFEST id (companionintelligence), not the package name,
+    # and it does NOT claim plugins.slots.memory the way a path install does. Both are
+    # load-bearing for the published install instructions, and neither is stated
+    # anywhere in OpenClaw's own docs — so both are asserted here rather than trusted.
+    name: npm package installs into stock openclaw
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Resolve the openclaw version
+        id: resolve
+        run: |
+          set -euo pipefail
+          # The Dockerfile pin is the single source of truth, so the plugin is proven
+          # against the same CLI the shipped image runs.
+          version="$(scripts/openclaw-pin.sh)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Installing against openclaw@${version}"
+
+      - name: Cache the global openclaw install
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm-global
+          # Same key as the schema gate, so only one job pays the ~88MB download.
+          key: openclaw-${{ runner.os }}-${{ steps.resolve.outputs.version }}
+
+      - name: Install openclaw@${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          npm config set prefix "$HOME/.npm-global"
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+          if [[ "${{ steps.cache.outputs.cache-hit }}" != "true" ]]; then
+            npm install -g "openclaw@${{ steps.resolve.outputs.version }}"
+          fi
+
+      - name: Pack the plugin
+        id: pack
+        run: |
+          set -euo pipefail
+          tarball="$(scripts/pack-memory-plugin.sh --pack --version 2026.1.1 --out "${RUNNER_TEMP}/pack")"
+          echo "tarball=${tarball}" >> "$GITHUB_OUTPUT"
+          echo "Packed ${tarball}"
+          tar -tzf "${tarball}"
+
+      - name: Install the tarball into a throwaway openclaw home
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          # A dedicated HOME, because OPENCLAW_DATA_DIR does NOT isolate the CLI's
+          # config — `openclaw plugins install` writes to the real ~/.openclaw
+          # regardless of it. HOME is the isolation that works.
+          export HOME="${RUNNER_TEMP}/openclaw-home"
+          mkdir -p "${HOME}/.openclaw"
+          openclaw plugins install "npm-pack:${TARBALL}"
+
+          node - <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const cfgPath = path.join(process.env.HOME, ".openclaw", "openclaw.json");
+          const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+          const entry = cfg.plugins?.entries?.companionintelligence;
+          if (!entry?.enabled) {
+            console.error("plugin did not register under the manifest id 'companionintelligence'");
+            console.error(JSON.stringify(cfg, null, 2));
+            process.exit(1);
+          }
+          console.log("registered under the manifest id, enabled");
+          // Documented behaviour, asserted so it cannot change silently: the npm form
+          // leaves the memory slot alone, which is why the install instructions tell
+          // users to set plugins.slots.memory themselves.
+          const slot = cfg.plugins?.slots?.memory;
+          console.log(`memory slot after install: ${slot ?? "(unset)"}`);
+          NODE
+
+      - name: Confirm the installed plugin loads
+        run: |
+          set -euo pipefail
+          export HOME="${RUNNER_TEMP}/openclaw-home"
+          # Selecting the slot is the user's documented step; do it here so the check
+          # covers the state the install instructions actually produce.
+          node -e '
+            const fs = require("node:fs"), path = require("node:path");
+            const p = path.join(process.env.HOME, ".openclaw", "openclaw.json");
+            const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
+            cfg.plugins.slots = { ...(cfg.plugins.slots ?? {}), memory: "companionintelligence" };
+            fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+          '
+          openclaw plugins inspect companionintelligence --json > "${RUNNER_TEMP}/inspect.json"
+          node -e '
+            const doc = require(process.env.RUNNER_TEMP + "/inspect.json").plugin;
+            const problems = [];
+            if (doc.status !== "loaded") problems.push(`status is ${doc.status}, expected loaded`);
+            if (!doc.activated) problems.push("plugin did not activate");
+            if (doc.packageName !== "@companionintelligence/openclaw-memory") {
+              problems.push(`packageName is ${doc.packageName}`);
+            }
+            if (problems.length) { console.error(problems.join("\n")); process.exit(1); }
+            console.log(`loaded ${doc.packageName} as ${doc.id} (${doc.activationReason})`);
+          '
