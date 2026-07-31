@@ -9,6 +9,36 @@ name: Publish memory plugin to npm
 # something in a stream of identical ones, so this workflow compares the packed
 # plugin against what is already published and skips when nothing changed. A skip is
 # always logged; it is never silent.
+#
+# ── ONE-TIME SETUP: the NPM_TOKEN secret ─────────────────────────────────────────
+#
+# This workflow cannot publish until `NPM_TOKEN` exists under
+# Settings → Secrets and variables → Actions.
+#
+# npm tokens are owned by a USER, not by an organisation. Create it from an account
+# that is a member of the `companionintelligence` org with publish rights to the
+# scope. On npmjs.com: avatar → Access Tokens → Generate New Token → Granular Access
+# Token, then:
+#
+#   * Packages and scopes → "Only select packages and scopes" → @companionintelligence
+#     → **Read and write**.  ← this is the permission that allows publishing
+#   * Organizations → leave at No access. npm's own docs: a token given access to an
+#     organisation "can only be used for managing organization settings and teams or
+#     users" — NOT for publishing that org's packages. Granting only this is the
+#     obvious-looking mistake, and it fails at publish time with a 403.
+#   * Tick the 2FA bypass option, or an interactive 2FA prompt will hang the job.
+#   * Expiration is mandatory on granular tokens, so this needs a calendar reminder
+#     to rotate. A classic "Automation" token is the no-expiry alternative — it also
+#     bypasses 2FA, but it cannot be scope-limited, so it is the weaker choice.
+#
+# Alternative worth evaluating once: npm trusted publishing (OIDC, GA since
+# 2025-07-31) removes the stored token entirely, using `id-token: write` and npm CLI
+# >= 11.5.1 (newer than the npm that ships with Node 22, so it needs an explicit
+# upgrade step). Its interaction with a PRIVATE source repo is the open question:
+# provenance attestations are definitely unavailable from private repos, and since
+# trusted publishing generates provenance automatically, it would at minimum need
+# NPM_CONFIG_PROVENANCE=false. Not adopted here because it is unverified for this
+# repo's shape; the token path above is known to work.
 on:
   # Release tags only, matching docker-publish.yml. Every real release tag is
   # YYYY.M.D[.N], so it starts with a digit — a `*` pattern would publish from the
