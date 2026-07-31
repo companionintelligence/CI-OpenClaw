@@ -113,7 +113,7 @@ npm_version() {
 # module that is not there. It never self-heals and the job stays green throughout.
 assert_files_cover_plugin_dir() {
   local tarball="${1}"
-  local shipped expected missing=()
+  local shipped missing=()
   shipped="$(tar -tzf "${tarball}" | sed 's|^package/||' | grep -v '/$' | LC_ALL=C sort)" \
     || die "could not list ${tarball}"
 
@@ -214,6 +214,32 @@ do_pack() {
   printf '%s\n' "${outdir%/}/${tarball}"
 }
 
+# Refuse a tarball whose member names could be written outside the extraction
+# directory, before unpacking it.
+#
+# Not a theoretical concern to the extent that tar is already careful: GNU tar 1.35
+# refuses a `..` member outright ("Member name contains '..'", exit 2) and strips a
+# leading `/`, and `do_compare` dies on that non-zero exit. But bsdtar on macOS skips
+# such members and still exits 0, which hands the comparison a partial tree that reads
+# as "the plugin changed" — and one of the two tarballs comes from the registry, the
+# only input here this script does not produce itself. Check it rather than depend on
+# which tar happens to be installed.
+assert_tarball_members_safe() {
+  local tarball="${1}" listing member unsafe=()
+  listing="$(tar -tzf "${tarball}")" || die "could not list ${tarball}"
+  while IFS= read -r member; do
+    case "${member}" in
+      /*|../*|*/../*|*/..|..) unsafe+=("${member}") ;;
+    esac
+  done <<<"${listing}"
+  if [[ "${#unsafe[@]}" -gt 0 ]]; then
+    printf 'Refusing %s — these member names would escape the extraction directory:\n' \
+      "${tarball}" >&2
+    printf '  %s\n' "${unsafe[@]}" >&2
+    die "unsafe tarball member names"
+  fi
+}
+
 # Compare two packed tarballs, ignoring the stamped version fields.
 #
 # Network-free by design: the publish workflow downloads the published tarball with
@@ -238,6 +264,7 @@ do_compare() {
     if [[ "${side}" == "b" ]]; then src="${b}"; else src="${a}"; fi
     # npm tarballs root everything under package/; --strip-components=1 drops it so
     # the two trees compare directly.
+    assert_tarball_members_safe "${src}"
     tar -xzf "${src}" -C "${work}/${side}" --strip-components=1 \
       || die "could not extract ${src}"
     for f in "${VERSIONED_FILES[@]}"; do

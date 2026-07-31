@@ -157,6 +157,23 @@ tar -czf "${WORK}/flat2.tgz" -C "${WORK}/flat" plugin.yaml
 assert_eq "two empty extractions are not called identical" "2" \
   "$(run_status "${SCRIPT}" --compare "${WORK}/flat1.tgz" "${WORK}/flat2.tgz")"
 
+# One of the two tarballs is fetched from the registry, so its member names are the
+# only input here this script does not produce itself. A member resolving outside the
+# extraction directory must be a setup error (2), never a difference (1) — and must not
+# rely on the local tar refusing it, since GNU tar errors out where bsdtar skips the
+# member and still exits 0.
+mkdir -p "${WORK}/evil/sub/package"
+printf 'x\n' >"${WORK}/evil/ESCAPED"
+printf 'x\n' >"${WORK}/evil/sub/package/index.js"
+# -P keeps the `..` that tar would otherwise strip while writing the archive.
+( cd "${WORK}/evil/sub" && tar -cPzf "${WORK}/traverse.tgz" package ../ESCAPED ) 2>/dev/null
+# Assert the fixture itself, or a tar that strips `..` at create time would make the
+# check below pass for entirely the wrong reason.
+assert_contains "the traversal fixture really carries a .. member" "../ESCAPED" \
+  "$(tar -tzf "${WORK}/traverse.tgz" 2>/dev/null)"
+assert_eq "a path-traversing tarball is a setup error" "2" \
+  "$(run_status "${SCRIPT}" --compare "${TGZ_A}" "${WORK}/traverse.tgz")"
+
 assert_eq "no mode is a usage error" "2" "$(run_status "${SCRIPT}")"
 
 echo
