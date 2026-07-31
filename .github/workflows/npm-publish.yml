@@ -138,8 +138,14 @@ jobs:
             exit 0
           fi
 
+          # `npm pack --pack-destination` does NOT create a missing directory: it
+          # exits 254 and, under --silent, prints nothing at all. Without this mkdir
+          # the FIRST publish would succeed (it returns early above, never reaching
+          # here) and every subsequent one would die here with no diagnostic.
+          mkdir -p "${RUNNER_TEMP}/published"
           npm pack "${PACKAGE}@${published_latest}" --silent --pack-destination "${RUNNER_TEMP}/published" >/dev/null
           published_tgz="$(find "${RUNNER_TEMP}/published" -name '*.tgz' -print -quit)"
+          [[ -n "${published_tgz}" ]] || { echo "::error::could not download ${PACKAGE}@${published_latest}"; exit 1; }
 
           # --compare ignores the stamped version fields, so this answers "did the
           # plugin change", not "is this a different release". Exit 0 = same, 1 =
