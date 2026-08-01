@@ -18,10 +18,20 @@ name: ci-hub plugin bundle resync
 #   * CI_HUB_SYNC_TOKEN — this repo (CI-OpenClaw) Contents: write + Pull requests: write. Pushes the
 #     re-sync branch and opens the PR; needed so the PR triggers CI (a GITHUB_TOKEN-made PR would not).
 
+# >>> ci-local:gated original triggers below, restore with `ci-local restore`
+# on:
+#   schedule:
+#     # Daily freshness sweep against CI-Hub dev (an hour after the openclaw-release-pr sweep).
+#     - cron: "0 7 * * *"
+#   workflow_dispatch:
+#     inputs:
+#       ref:
+#         description: "CI-Hub ref to rebuild from (the freshness target)."
+#         type: string
+#         required: false
+#         default: "dev"
+# <<< ci-local:gated
 on:
-  schedule:
-    # Daily freshness sweep against CI-Hub dev (an hour after the openclaw-release-pr sweep).
-    - cron: "0 7 * * *"
   workflow_dispatch:
     inputs:
       ref:
