@@ -25,6 +25,8 @@ This creates a seamless one-click install experience for OpenClaw on the CI mark
 
 CI-OpenClaw ships with a bundled OpenClaw memory plugin named `companionintelligence`. When CI-Server credentials are available, startup selects it as OpenClaw's active memory backend and routes memory reads/writes through CI-Server.
 
+The same plugin is published to npm as [`@companionintelligence/openclaw-memory`](https://www.npmjs.com/package/@companionintelligence/openclaw-memory), so anyone running a stock `openclaw` can add it with `openclaw plugins install npm:@companionintelligence/openclaw-memory` — no appliance and no fork. Its user-facing documentation lives with the source, in [`openclaw-context/plugins/companionintelligence/README.md`](openclaw-context/plugins/companionintelligence/README.md); releases are cut by `.github/workflows/npm-publish.yml` off the same tags that publish the image.
+
 ### Required CI-Server configuration
 
 Provide these environment variables to the OpenClaw container:

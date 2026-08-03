@@ -1,0 +1,347 @@
+name: Publish memory plugin to npm
+
+# Same trigger as docker-publish.yml, deliberately: a release tag is the release, and
+# the plugin and the image are two artifacts of it. One ritual — push the tag, verify
+# the artifacts — rather than a second, dispatch-only mechanism nobody remembers.
+#
+# Most release tags do NOT change the plugin (an openclaw pin bump, a wrapper fix).
+# Publishing an npm version per image release would bury the versions that mean
+# something in a stream of identical ones, so this workflow compares the packed
+# plugin against what is already published and skips when nothing changed. A skip is
+# always logged; it is never silent.
+#
+# ── ONE-TIME SETUP: the NPM_TOKEN secret ─────────────────────────────────────────
+#
+# This workflow cannot publish until `NPM_TOKEN` exists under
+# Settings → Secrets and variables → Actions.
+#
+# npm tokens are owned by a USER, not by an organisation. Create it from an account
+# that is a member of the `companionintelligence` org with publish rights to the
+# scope. On npmjs.com: avatar → Access Tokens → Generate New Token → Granular Access
+# Token, then:
+#
+#   * Packages and scopes → "Only select packages and scopes" → @companionintelligence
+#     → **Read and write**.  ← this is the permission that allows publishing
+#   * Organizations → leave at No access. npm's own docs: a token given access to an
+#     organisation "can only be used for managing organization settings and teams or
+#     users" — NOT for publishing that org's packages. Granting only this is the
+#     obvious-looking mistake, and it fails at publish time with a 403.
+#   * Tick the 2FA bypass option, or an interactive 2FA prompt will hang the job.
+#   * Expiration is mandatory on granular tokens, so this needs a calendar reminder
+#     to rotate. A classic "Automation" token is the no-expiry alternative — it also
+#     bypasses 2FA, but it cannot be scope-limited, so it is the weaker choice.
+#
+# Alternative worth evaluating once: npm trusted publishing (OIDC, GA since
+# 2025-07-31) removes the stored token entirely, using `id-token: write` and npm CLI
+# >= 11.5.1 (newer than the npm that ships with Node 22, so it needs an explicit
+# upgrade step). Its interaction with a PRIVATE source repo is the open question:
+# provenance attestations are definitely unavailable from private repos, and since
+# trusted publishing generates provenance automatically, it would at minimum need
+# NPM_CONFIG_PROVENANCE=false. Not adopted here because it is unverified for this
+# repo's shape; the token path above is known to work.
+on:
+  push:
+    tags:
+      # Release tags are YYYY.M.D with an optional same-day suffix. Tighter than
+      # docker-publish.yml's `[0-9]*`, which also matches `1-scratch` and would burn a
+      # full CI gate before the version mapper rejected it.
+      - "[0-9]*.[0-9]*.[0-9]*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish (for example 2026.8.1)"
+        required: true
+        type: string
+      dry_run:
+        description: "Pack and compare, but do not publish"
+        required: false
+        default: false
+        type: boolean
+
+# Keyed on the tag, like docker-publish.yml, and never cancel-in-progress: a
+# cancelled publish leaves a tag whose artifacts are half-there, which is the state
+# this repo has been burned by before.
+concurrency:
+  group: npm-publish-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Gate on the same suite that gates PRs and image publishes, run against the exact
+  # ref being published — so a red suite cannot ship a package, and the tested tree
+  # and the packed tree are the same commit by construction.
+  test:
+    name: Tests
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+    secrets:
+      CI_HUB_READ_TOKEN: ${{ secrets.CI_HUB_READ_TOKEN }}
+    with:
+      # refs/tags/... rather than a bare name: actions/checkout resolves a bare ref as
+      # a branch before it tries a tag, so a branch shadowing a tag would be tested and
+      # published while the rev-parse guard below still confirmed the tag exists.
+      ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+
+  publish:
+    needs: test
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout the tag being published
+        uses: actions/checkout@v4
+        with:
+          # refs/tags/... rather than a bare name — see the note on the test job.
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+          # Tags are needed so the rev-parse guard below can run at all.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Require the NPM_TOKEN secret
+        # Skipped for an explicit dry run: dry_run packs and compares without
+        # publishing, so demanding a publish credential would block the one check
+        # worth running BEFORE the token exists. Both forms are matched because a
+        # boolean input arrives as a string over the API.
+        if: >-
+          github.event_name != 'workflow_dispatch'
+          || !(inputs.dry_run == true || inputs.dry_run == 'true')
+        # Fail here with an actionable message rather than 15 minutes later with a raw
+        # npm E401, after the whole CI gate and the pack have run. Mirrors ci.yml's
+        # CI_HUB_READ_TOKEN preflight.
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NPM_TOKEN}" ]]; then
+            echo "::error::NPM_TOKEN is not set. See the header of this workflow for how to create it (Packages and scopes -> @companionintelligence -> Read and write; NOT the Organizations permission)."
+            exit 1
+          fi
+
+      - name: Resolve the release tag and npm version
+        id: version
+        # INPUT_TAG and INPUT_DRY_RUN come through env rather than a ${{ }}
+        # interpolation: the dispatch inputs are user-supplied, and interpolating them
+        # into the script body would let a crafted value break out of the quoting and
+        # run arbitrary commands in a job that holds the npm token. docker-publish.yml
+        # documents the same rule.
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${INPUT_TAG}"
+            # Without this, `ref: <input>` happily checks out a BRANCH. Anyone with
+            # write access could push a branch named 9999.1.1, dispatch, and publish
+            # its contents as the newest version — npm would make it `latest`.
+            git rev-parse -q --verify "refs/tags/${tag}" >/dev/null \
+              || { echo "::error::${tag} is not a tag in this repository"; exit 1; }
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+
+          # Resolved in bash rather than as `${{ !inputs.dry_run }}` on the publish
+          # step. GitHub expressions treat any non-empty string as truthy, and a
+          # boolean input arrives as the STRING "false" when the run is started
+          # through the API or `gh workflow run -f`. That would skip the publish while
+          # leaving the job green — a release that silently shipped nothing. Only an
+          # explicit dry-run request suppresses publishing.
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${INPUT_DRY_RUN}" == "true" ]]; then
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::dry run — packing and comparing without publishing"
+          else
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # A 4-segment same-day tag (2026.7.7.2) is not semver; the script maps it.
+          version="$(scripts/pack-memory-plugin.sh --npm-version "${tag}")"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Release tag ${tag} publishes as ${version}"
+
+      - name: Decide whether this release changes the plugin
+        id: decide
+        env:
+          PACKAGE: "@companionintelligence/openclaw-memory"
+          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          candidate="$(scripts/pack-memory-plugin.sh --pack --version "${VERSION}" --out "${RUNNER_TEMP}/candidate")"
+          echo "Packed ${candidate}"
+
+          # `npm view` exits non-zero when the package has never been published, which
+          # is the first-publish case rather than an error. But a bare `|| true` would
+          # ALSO swallow a 5xx or a registry misconfiguration and treat it as "never
+          # published" — skipping the already-published guard below and turning a
+          # flaky rerun into a duplicate-version publish failure. So look at what
+          # actually went wrong.
+          view_err=""
+          published_latest="$(npm view "${PACKAGE}" version 2>"${RUNNER_TEMP}/view.err")" || {
+            view_err="$(cat "${RUNNER_TEMP}/view.err")"
+            if ! grep -qiE 'E404|is not in this registry|404 Not Found' <<<"${view_err}"; then
+              echo "::error::could not query the registry for ${PACKAGE}"
+              echo "${view_err}"
+              exit 1
+            fi
+            published_latest=""
+          }
+          if [[ -z "${published_latest}" ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${PACKAGE} has never been published; publishing ${VERSION}."
+            exit 0
+          fi
+
+          # A rerun of an already-published tag must be a no-op rather than a failed
+          # publish: npm rejects a duplicate version, and that failure would read as a
+          # broken release rather than "already done".
+          # Same discrimination as above rather than `>/dev/null 2>&1`: swallowing a
+          # 5xx here would read as "not published yet" and turn a rerun of a finished
+          # release into a duplicate-version publish failure — the exact outcome this
+          # guard exists to prevent.
+          if npm view "${PACKAGE}@${VERSION}" version >/dev/null 2>"${RUNNER_TEMP}/view2.err"; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${PACKAGE}@${VERSION} is already published; nothing to do."
+            exit 0
+          elif ! grep -qiE 'E404|is not in this registry|404 Not Found' "${RUNNER_TEMP}/view2.err"; then
+            echo "::error::could not query the registry for ${PACKAGE}@${VERSION}"
+            cat "${RUNNER_TEMP}/view2.err"
+            exit 1
+          fi
+
+          # `npm pack --pack-destination` does NOT create a missing directory: it
+          # exits 254 and, under --silent, prints nothing at all. Without this mkdir
+          # the FIRST publish would succeed (it returns early above, never reaching
+          # here) and every subsequent one would die here with no diagnostic.
+          mkdir -p "${RUNNER_TEMP}/published"
+          npm pack "${PACKAGE}@${published_latest}" --silent --pack-destination "${RUNNER_TEMP}/published" >/dev/null
+          published_tgz="$(find "${RUNNER_TEMP}/published" -name '*.tgz' -print -quit)"
+          [[ -n "${published_tgz}" ]] || { echo "::error::could not download ${PACKAGE}@${published_latest}"; exit 1; }
+
+          # --compare ignores the stamped version fields, so this answers "did the
+          # plugin change", not "is this a different release". Exit 0 = same, 1 =
+          # differs; anything else is a real error and must not read as "same".
+          status=0
+          scripts/pack-memory-plugin.sh --compare "${published_tgz}" "${candidate}" || status=$?
+          case "${status}" in
+            0)
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::Plugin is byte-identical to ${PACKAGE}@${published_latest}; skipping the npm publish for ${RELEASE_TAG}. This is an image-only release."
+              ;;
+            1)
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::Plugin changed since ${published_latest}; publishing ${VERSION}."
+              # npm publish always claims the `latest` dist-tag. Republishing an OLD
+              # tag by dispatch therefore repoints `latest` at older plugin code. Not
+              # blocked (it is occasionally what you want), but never silent.
+              #
+              # Compared with semver precedence, not `sort -V`. They disagree on exactly
+              # the versions this repo mints: `sort -V` ranks 2026.7.7-2 ABOVE 2026.7.7,
+              # semver ranks it below. That inverted the warning on the same-day-suffix
+              # case the version mapper exists to support — silent when `latest` really
+              # did move backwards, noisy when it did not.
+              newest="$(VERSION="${VERSION}" PUBLISHED="${published_latest}" node -e '
+                const parse = (v) => {
+                  const s = String(v);
+                  // Split on the FIRST hyphen only: a prerelease may itself contain
+                  // hyphens (2026.8.1-rc-1), and split("-", 2) would drop the tail.
+                  const i = s.indexOf("-");
+                  const core = (i < 0 ? s : s.slice(0, i)).split(".").map(Number);
+                  return { core, pre: i < 0 ? undefined : s.slice(i + 1) };
+                };
+                // Semver rank for the prerelease part. This scheme mints a plain
+                // number there (2026.7.7.10 becomes 2026.7.7-10), and a string
+                // compare is backwards for exactly that case: 10 sorts under 2.
+                const cmpPre = (a, b) => {
+                  const A = a.split("."), B = b.split(".");
+                  for (let i = 0; i < Math.max(A.length, B.length); i++) {
+                    // A longer identifier list outranks a shorter one when every
+                    // preceding identifier is equal.
+                    if (A[i] === undefined) return -1;
+                    if (B[i] === undefined) return 1;
+                    const na = /^[0-9]+$/.test(A[i]), nb = /^[0-9]+$/.test(B[i]);
+                    if (na && nb) {
+                      if (Number(A[i]) !== Number(B[i])) return Number(A[i]) < Number(B[i]) ? -1 : 1;
+                    } else if (na !== nb) {
+                      // Numeric identifiers always rank below alphanumeric ones.
+                      return na ? -1 : 1;
+                    } else if (A[i] !== B[i]) {
+                      return A[i] < B[i] ? -1 : 1;
+                    }
+                  }
+                  return 0;
+                };
+                const cmp = (a, b) => {
+                  const x = parse(a), y = parse(b);
+                  for (let i = 0; i < 3; i++) {
+                    if ((x.core[i] || 0) !== (y.core[i] || 0)) return (x.core[i] || 0) - (y.core[i] || 0);
+                  }
+                  // A release outranks any prerelease of the same core version.
+                  if (x.pre === undefined && y.pre !== undefined) return 1;
+                  if (x.pre !== undefined && y.pre === undefined) return -1;
+                  if (x.pre === y.pre) return 0;
+                  return cmpPre(String(x.pre), String(y.pre));
+                };
+                const v = process.env.VERSION, p = process.env.PUBLISHED;
+                console.log(cmp(v, p) >= 0 ? v : p);
+              ')"
+              if [[ "${newest}" != "${VERSION}" ]]; then
+                echo "::warning::${VERSION} sorts below the currently published ${published_latest}. Publishing will move the npm 'latest' tag BACKWARDS to this older release."
+              fi
+              ;;
+            *)
+              echo "::error::comparison failed with status ${status}"
+              exit "${status}"
+              ;;
+          esac
+
+      - name: Publish
+        if: steps.decide.outputs.publish == 'true' && steps.version.outputs.dry_run == 'false'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Publish the tarball that was compared, not a fresh pack — the artifact
+          # that goes to the registry is then exactly the one the decision was made
+          # about.
+          tarball="$(find "${RUNNER_TEMP}/candidate" -name '*.tgz' -print -quit)"
+          # Guarded like the published-tarball lookup above. `npm publish ""` does not
+          # fail cleanly: npm resolves the empty spec to the registry package literally
+          # named `undefined` and tries to publish that.
+          [[ -n "${tarball}" ]] || { echo "::error::no packed tarball in ${RUNNER_TEMP}/candidate"; exit 1; }
+          npm publish "${tarball}" --access public
+          echo "Published ${VERSION}"
+
+      - name: Confirm the version is on the registry
+        if: steps.decide.outputs.publish == 'true' && steps.version.outputs.dry_run == 'false'
+        env:
+          PACKAGE: "@companionintelligence/openclaw-memory"
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # A tag must never imply an artifact that failed to appear. This repo has
+          # shipped a release tag with no image before; the same trap applies here.
+          for attempt in 1 2 3 4 5; do
+            if npm view "${PACKAGE}@${VERSION}" version >/dev/null 2>&1; then
+              echo "Confirmed ${PACKAGE}@${VERSION} on the registry."
+              exit 0
+            fi
+            echo "Not visible yet (attempt ${attempt}); waiting for registry propagation."
+            sleep 10
+          done
+          echo "::error::${PACKAGE}@${VERSION} did not appear on the registry after publishing."
+          exit 1
+
+      - name: Dry run summary
+        if: steps.version.outputs.dry_run == 'true'
+        run: |
+          echo "Dry run: would publish=${{ steps.decide.outputs.publish }} version=${{ steps.version.outputs.version }}"
