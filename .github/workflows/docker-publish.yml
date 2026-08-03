@@ -66,7 +66,11 @@ jobs:
     secrets:
       CI_HUB_READ_TOKEN: ${{ secrets.CI_HUB_READ_TOKEN }}
     with:
-      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      # refs/tags/... rather than a bare name, matching npm-publish.yml: actions/checkout
+      # resolves a bare ref as a branch before it tries a tag, so a branch shadowing a
+      # tag would be tested and published while the rev-parse guard in the build job
+      # still confirmed the tag exists.
+      ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
   build:
     needs: test
@@ -80,7 +84,8 @@ jobs:
       - name: Checkout the tag being published
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          # refs/tags/... rather than a bare name — see the note on the test job.
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -173,9 +178,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           if [[ -z "${newest}" ]]; then
-            # Reachable: the push trigger is `[0-9]*`, which is wider than the
-            # release-tag shape. Publish the tag, but never let a non-release
-            # claim :latest.
+            # Reachable: the push glob is coarser than the release-tag regex in
+            # scripts/newest-release-tag.sh — a glob is not a regex, so `1-scratch.0.0`
+            # and the zero-padded `2026.08.01` both clear it. Publish the tag, but never
+            # let a non-release claim :latest.
             echo "::notice::no tag matching YYYY.M.D[.N] exists — publishing ${TAG} without :latest"
           elif [[ "${TAG}" == "${newest}" ]]; then
             echo "${TAG} is the newest release tag — :latest will point at it"

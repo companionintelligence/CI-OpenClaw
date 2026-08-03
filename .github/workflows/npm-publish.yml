@@ -42,9 +42,9 @@ name: Publish memory plugin to npm
 on:
   push:
     tags:
-      # Release tags are YYYY.M.D with an optional same-day suffix. Tighter than
-      # docker-publish.yml's `[0-9]*`, which also matches `1-scratch` and would burn a
-      # full CI gate before the version mapper rejected it.
+      # Release tags are YYYY.M.D with an optional same-day suffix. Identical to
+      # docker-publish.yml's glob, so a release tag means the same thing to both and
+      # a tag either produces both artifacts or neither.
       - "[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
     inputs:

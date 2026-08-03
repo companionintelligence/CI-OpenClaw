@@ -19,10 +19,10 @@
 # The caller must have fetched tags first; this only inspects local refs.
 set -euo pipefail
 
-# Exactly the shape scripts/next-release-tag.sh allocates, and deliberately
-# narrower than the `[0-9]*` push trigger in docker-publish.yml: any other
-# digit-leading tag that reaches the publish is not a release and must not win
-# `:latest`.
+# Exactly the shape scripts/next-release-tag.sh allocates, and deliberately narrower
+# than the push trigger in docker-publish.yml — that trigger is a glob, not a regex, so
+# tags like `1-scratch.0.0` and the zero-padded `2026.08.01` still reach the publish.
+# Any such tag is not a release and must not win `:latest`.
 #
 # Components are unpadded ([1-9][0-9]? — never 07) because git's version sort
 # cannot rank a padded one. `--sort=v:refname` uses strverscmp semantics, where a

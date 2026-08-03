@@ -49,9 +49,13 @@ echo "newest-release-tag.sh"
 # No tags at all must be empty output and exit 0, not a failed pipeline.
 check "no tags -> empty, exit 0" ""
 
-# Digit-leading tags that are not releases still reach the publish (the push
-# trigger is `[0-9]*`), and must not win :latest.
+# Tags that are not releases must not win :latest. `1.2.3` and the zero-padded
+# `2026.08.01` still reach the publish — the push trigger is the glob
+# `[0-9]*.[0-9]*.[0-9]*`, which is coarser than RELEASE_TAG_RE. `2026.7` and
+# `test-publish-1` no longer match that glob, but the script must still ignore any
+# local tag it is handed.
 git tag 1.2.3
+git tag 2026.08.01
 git tag 2026.7
 git tag test-publish-1
 check "no release tags -> empty" ""
