@@ -1,4 +1,4 @@
-// Opt-in error reporting. MUST stay the first require + call in this file: the
+// Opt-out error reporting. MUST stay the first require + call in this file: the
 // Sentry SDK patches Node internals (http, child_process, …) on init, and
 // instrumentation applied after those modules are loaded misses everything they
 // wired up at import time. With no SENTRY_DSN this initialises nothing, requires

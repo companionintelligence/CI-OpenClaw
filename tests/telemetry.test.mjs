@@ -27,7 +27,7 @@ const {
 const DSN = "https://abc123@o1.ingest.us.sentry.io/9999999";
 
 // ---------------------------------------------------------------------------
-// The opt-in gate.
+// The telemetry gate. Reporting is opt-out: a configured DSN means on.
 //
 // Contract: no DSN -> nothing initialises and no packet leaves the container.
 // Two kill switches beat a DSN that was baked into an image or injected by the

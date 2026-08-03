@@ -1,11 +1,12 @@
 /**
- * Opt-in error reporting (Sentry) for the CI-OpenClaw wrapper.
+ * Opt-out error reporting (Sentry) for the CI-OpenClaw wrapper.
  *
- * Reporting is **opt-in and off by default**: with no `SENTRY_DSN` nothing is
- * initialised, `@sentry/node` is never even required, and the process makes no
- * outbound connection. Two kill switches disable it even when a DSN has been
- * baked into an image or injected by the Hub, so an operator can always turn it
- * off without a rebuild:
+ * Reporting is **opt-out** — on wherever a DSN is configured, and the user turns
+ * it off. With no `SENTRY_DSN` nothing is initialised, `@sentry/node` is never
+ * even required, and the process makes no outbound connection: that is the
+ * absence of configuration, not a privacy setting. Two kill switches disable it
+ * even when a DSN has been baked into an image or injected by the Hub, so an
+ * operator can always turn it off without a rebuild:
  *
  *   - `CI_TELEMETRY=off`   — explicit opt-out
  *   - `CI_LOCAL_ONLY=true` — local-only mode must mean zero phone-home
@@ -30,7 +31,7 @@
  * is an upstream binary in its own process and reports nothing. */
 const COMPONENT = "ci-openclaw-wrapper";
 
-// ── The opt-in gate ─────────────────────────────────────────────────────────
+// ── The telemetry gate ──────────────────────────────────────────────────────
 
 const FALSEY = new Set(["off", "false", "0", "no", "disabled"]);
 const TRUTHY = new Set(["on", "true", "1", "yes", "enabled"]);
@@ -378,8 +379,10 @@ function scrubEvent(event) {
  * CI-Server, which does not shell out to an agent CLI.)
  *
  * `ProcessSession`: release-health sends a session envelope on every container
- * start even when nothing has gone wrong, and sessions do not pass through
- * `beforeSend`. Opt-in *error* reporting should not include an uptime heartbeat.
+ * start even when nothing has gone wrong, and sessions do **not** pass through
+ * `beforeSend`. Every other payload this process emits is scrubbed on the way
+ * out; a stream that bypasses the scrubber is the one thing the privacy posture
+ * cannot vouch for, so reporting stays strictly error-driven.
  */
 const DISABLED_INTEGRATIONS = new Set([
   "OnUncaughtException",

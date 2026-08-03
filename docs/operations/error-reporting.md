@@ -1,9 +1,21 @@
 # Error reporting (Sentry)
 
-CI-OpenClaw's wrapper can report its own crashes to [Sentry](https://sentry.io).
-It is **opt-in and off by default**: with no DSN configured, no Sentry code
-initialises, `@sentry/node` is never even `require`d, and the container makes no
-outbound connection.
+CI-OpenClaw's wrapper reports its own crashes to [Sentry](https://sentry.io). It
+is **opt-out**: on any build configured with a DSN, reporting is **on by
+default**, and the user turns it off with the **Share crash reports** toggle in
+the app store (or `CI_TELEMETRY=off` directly).
+
+Two statements are both true here and easy to conflate:
+
+- **Configured with a DSN → reporting is on** unless the user turns it off. That
+  is the shipped appliance: release images carry a DSN.
+- **No DSN → nothing initialises**, `@sentry/node` is never even `require`d, and
+  the container makes no outbound connection. That is a source checkout, a local
+  `docker compose up`, or any build made without `SENTRY_DSN`. It is the absence
+  of configuration, not a privacy setting.
+
+So "opt-out" describes what a user of the appliance experiences. It does not
+mean a DSN-less build quietly reports — it cannot.
 
 This follows the fleet contract set by CI-Server
 (`backend/apps/api/src/common/telemetry/`), which CI-Import-Tools and
@@ -33,17 +45,26 @@ keys, so reporting is deliberately narrower than a default Sentry install:
 | `includeLocalVariables` | `false` | Frame locals here are gateway tokens, `APP_SEED`, and proxied request headers. |
 | `beforeSend` | `scrubEvent` | See below. |
 
-Two kill switches disable reporting even when a DSN has been injected by the Hub
-or baked into an image, so an operator can turn it off without a rebuild:
+## Turning it off
 
-| Variable | Effect |
+Three ways, in the order most users will reach for them. All of them work
+against a DSN injected by the Hub or baked into an image, so reporting can
+always be stopped without a rebuild:
+
+| How | Effect |
 |---|---|
-| `CI_TELEMETRY=off` | Explicit opt-out (also `false`, `0`, `no`, `disabled`). |
+| **Share crash reports** toggle in the app store | The user-facing control. Sets `CI_TELEMETRY` on the container. |
+| `CI_TELEMETRY=off` | The same switch, set directly (also `false`, `0`, `no`, `disabled`). |
 | `CI_LOCAL_ONLY=true` | Local-only mode means zero phone-home (also `1`, `yes`, `on`, `enabled`). |
 
 `CI_LOCAL_ONLY` takes precedence over `CI_TELEMETRY`, which takes precedence over
 the DSN. The reported `disabledReason` names the strongest reason, so the startup
 log says the *operator's* choice rather than the incidental absence of a DSN.
+`GET /__ci_telemetry/config` (below) reports which one is in effect.
+
+Because the only Sentry SDK here runs in the container, the toggle applies
+directly — there is no build-time DSN compiled into a bundle that a kill switch
+could fail to reach.
 
 ## What gets scrubbed
 
@@ -101,7 +122,7 @@ shapes are matched on their own: `sk-…` (OpenAI / Anthropic / OpenRouter),
 |---|---|
 | `OnUncaughtException`, `OnUnhandledRejection` | `server.cjs` registers its own handlers that deliberately **log and keep serving** — the wrapper surviving a stray throw is what keeps the whole app from dropping. The SDK's versions can terminate the process, which would let error reporting change crash behaviour. |
 | `Console` | Console breadcrumbs would capture `openclaw doctor` stderr relayed through `execAsync`'s error message — the diagnostic output of the user's own agent, including its config. (Deviation from CI-Server, which does not shell out to an agent CLI.) |
-| `ProcessSession` | Release health sends a session envelope on every container start even when nothing went wrong, and session envelopes do **not** pass through `beforeSend`. Opt-in *error* reporting should not include an uptime heartbeat. |
+| `ProcessSession` | Release health sends a session envelope on every container start even when nothing went wrong, and session envelopes do **not** pass through `beforeSend`. Every other payload this process emits is scrubbed on the way out; a stream that bypasses the scrubber is the one thing the privacy posture above cannot vouch for, so reporting stays strictly error-driven. |
 
 The filter is by integration name, so `filterIntegrations` warns when a name
 matched nothing — an upstream rename must not silently restore a
@@ -159,7 +180,7 @@ sentry issue list companion-intelligence/ci-openclaw --query "is:unresolved"
 ## Enabling it
 
 ```bash
-# .env — all optional, all off by default
+# .env — a source checkout has no DSN, so set one to report from local runs
 SENTRY_DSN=https://<key>@o<org>.ingest.us.sentry.io/<project-id>
 SENTRY_ENV=production
 CI_OPENCLAW_VERSION=2026.7.1-2
@@ -167,9 +188,14 @@ CI_OPENCLAW_VERSION=2026.7.1-2
 
 `docker-compose.yml` passes `SENTRY_DSN`, `SENTRY_ENV`, `CI_OPENCLAW_VERSION`,
 `CI_TELEMETRY` and `CI_LOCAL_ONLY` through with empty defaults, so setting them in
-`.env` is enough and leaving them unset keeps reporting off. The DSN is a
-**runtime** value — deliberately not a Docker build `ARG`, so no DSN is ever baked
-into the published image.
+`.env` is enough. Leaving `SENTRY_DSN` unset is not a privacy setting — it is a
+build with no reporting configured, and nothing initialises.
+
+The DSN is a **runtime** value — deliberately not a Docker build `ARG`, so no DSN
+is baked into the published image. On an appliance it arrives as injected env
+(see *Not wired up yet*), which is what makes it revocable: the `CI_TELEMETRY`
+kill switch always reaches it, with no rebuild and no compiled-in DSN to work
+around.
 
 Turning it off again:
 
@@ -206,9 +232,13 @@ is never loaded at all, which is the strongest form of "no outbound traffic".
 ## Not wired up yet
 
 - **Marketplace plumbing.** `CI-Marketplace/apps/ci-openclaw/docker-compose.json`
-  passes only `APP_SEED`, so a Hub-installed app gets no `SENTRY_DSN` and no
-  "Share crash reports" form field. Both are one-line manifest additions in that
-  repo; nothing in this repo needs to change for them.
+  passes only `APP_SEED`, so a Hub-installed app today gets no `SENTRY_DSN` and
+  no **Share crash reports** form field. Both are one-line manifest additions in
+  that repo; nothing in this repo needs to change for them. Until they land, an
+  installed app is in the no-DSN state and reports nothing — and the opt-out
+  posture only becomes real for users once the DSN and the toggle ship
+  **together**. Shipping the DSN without the toggle would mean on-by-default with
+  no user-facing way to turn it off.
 - **Release + source map upload in CI.** `docker-publish.yml` does not pass
   `SENTRY_RELEASE` or upload source maps. Not needed while the wrapper ships
   unbundled CommonJS.
