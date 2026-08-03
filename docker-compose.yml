@@ -9,15 +9,18 @@ services:
       APP_SEED: ${APP_SEED:-dev} # Provided by CI marketplace; fallback for local dev
       CI_SERVER_URL: ${CI_SERVER_URL}
       CI_SERVER_TOKEN: ${CI_SERVER_TOKEN}
-      # Opt-in error reporting. Empty (the default) means nothing initialises and
+      # Opt-out error reporting: on wherever a DSN is set. This is the local-dev
+      # compose, which has no DSN of its own — empty means nothing initialises and
       # the container makes no outbound Sentry connection. Passed through rather
       # than left commented out so `SENTRY_DSN=… docker compose up` actually
-      # reaches the wrapper; the empty default is what keeps reporting off.
+      # reaches the wrapper. To turn reporting off on a build that HAS a DSN, use
+      # the kill switches below, not this. docs/operations/error-reporting.md
       SENTRY_DSN: ${SENTRY_DSN:-}
       SENTRY_ENV: ${SENTRY_ENV:-}
       CI_OPENCLAW_VERSION: ${CI_OPENCLAW_VERSION:-}
-      # Kill switches, both of which beat a DSN: CI_TELEMETRY=off (explicit
-      # opt-out) and CI_LOCAL_ONLY=true (no phone-home at all).
+      # Kill switches, both of which beat a DSN: CI_TELEMETRY=off (the user's
+      # opt-out, and what the "Share crash reports" toggle sets) and
+      # CI_LOCAL_ONLY=true (no phone-home at all). Unset leaves the DSN in charge.
       CI_TELEMETRY: ${CI_TELEMETRY:-}
       CI_LOCAL_ONLY: ${CI_LOCAL_ONLY:-}
     ports:

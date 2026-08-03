@@ -188,9 +188,12 @@ npm run test:sh     # the bootstrap shell scripts (tests/*.test.sh)
 
 #### Error reporting
 
-`telemetry.cjs` is opt-in Sentry reporting for the wrapper, **off by default**: with no
-`SENTRY_DSN` nothing initialises, `@sentry/node` is never even required, and the container
-makes no outbound connection. `CI_TELEMETRY=off` and `CI_LOCAL_ONLY=true` disable it even
+`telemetry.cjs` is Sentry reporting for the wrapper, and it is **opt-out**: wherever a
+`SENTRY_DSN` is configured, reporting is on until the user turns it off. With no
+`SENTRY_DSN` — a source checkout, a local `docker compose up` — nothing initialises,
+`@sentry/node` is never even required, and the container makes no outbound connection;
+that is the absence of configuration, not a privacy setting. The app store's **Share
+crash reports** toggle, `CI_TELEMETRY=off` and `CI_LOCAL_ONLY=true` turn it off even
 when a DSN is configured. `tests/telemetry.test.mjs` covers the gate and every redaction
 rule (the Hub identity headers, bare provider API keys, gateway tokens in URLs, home
 paths, breadcrumbs, stack frames) — dependency-free, like the rest of the suite.
