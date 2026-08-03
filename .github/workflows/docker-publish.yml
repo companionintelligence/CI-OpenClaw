@@ -1,38 +1,21 @@
 name: Docker Build and Push
-# >>> ci-local:gated original triggers below, restore with `ci-local restore`
-# on:
-#   # Release tags only. This was `"*"`, which meant the runbook's own
-#   # "push a test tag to verify" recipe published a real image and moved
-#   # :latest onto it. Every real release tag is YYYY.M.D[.N], so it starts
-#   # with a digit.
-#   push:
-#     tags:
-#       - "[0-9]*"
-#   workflow_dispatch:
-#     inputs:
-#       tag:
-#         description: "Existing release tag to (re)publish (for example 2026.6.1)"
-#         required: true
-#         type: string
-#       dry_run:
-#         description: "Build without pushing to GHCR or touching the Release"
-#         required: false
-#         default: false
-#         type: boolean
-#
-# # Keyed on the tag being published, so two releases never contend. An unkeyed
-# # group would be actively harmful here: a group holds only one pending entry,
-# # so a third release arriving would cancel the queued second one — and a
-# # cancelled release build leaves a tag with no image, which is exactly the
-# # state 2026.7.1 is in. Same-tag reruns still serialize, which is the case
-# # worth serializing.
-# #
-# # github.ref_name, not github.ref: the dispatch input is a bare tag name, so
-# # keying the push side on `refs/tags/X` would put a dispatch republish of X in a
-# # different group from the original push of X and let the two build the same tag
-# # at once.
-# <<< ci-local:gated
 on:
+  # Release tags only. This was `"*"`, which meant the runbook's own
+  # "push a test tag to verify" recipe published a real image and moved
+  # :latest onto it.
+  #
+  # Narrowed further to three segments, matching npm-publish.yml so a release tag
+  # means the same thing to both. The earlier `[0-9]*` also matched `1-scratch`,
+  # which would start a full CI gate (this workflow calls ci.yml) before anything
+  # rejected it. Checked against all 22 tags this repo has ever had: every one is
+  # YYYY.M.D and matches, so nothing that ever released is excluded. The trailing
+  # `*` absorbs a same-day `.N` suffix.
+  #
+  # Still a coarse filter, not validation — a glob is not a regex, so `1-scratch.0.0`
+  # gets through. It only limits how much machinery a junk tag can start.
+  push:
+    tags:
+      - "[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
     inputs:
       tag:
@@ -83,7 +66,11 @@ jobs:
     secrets:
       CI_HUB_READ_TOKEN: ${{ secrets.CI_HUB_READ_TOKEN }}
     with:
-      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      # refs/tags/... rather than a bare name, matching npm-publish.yml: actions/checkout
+      # resolves a bare ref as a branch before it tries a tag, so a branch shadowing a
+      # tag would be tested and published while the rev-parse guard in the build job
+      # still confirmed the tag exists.
+      ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
   build:
     needs: test
@@ -97,7 +84,8 @@ jobs:
       - name: Checkout the tag being published
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          # refs/tags/... rather than a bare name — see the note on the test job.
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -190,9 +178,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           if [[ -z "${newest}" ]]; then
-            # Reachable: the push trigger is `[0-9]*`, which is wider than the
-            # release-tag shape. Publish the tag, but never let a non-release
-            # claim :latest.
+            # Reachable: the push glob is coarser than the release-tag regex in
+            # scripts/newest-release-tag.sh — a glob is not a regex, so `1-scratch.0.0`
+            # and the zero-padded `2026.08.01` both clear it. Publish the tag, but never
+            # let a non-release claim :latest.
             echo "::notice::no tag matching YYYY.M.D[.N] exists — publishing ${TAG} without :latest"
           elif [[ "${TAG}" == "${newest}" ]]; then
             echo "${TAG} is the newest release tag — :latest will point at it"

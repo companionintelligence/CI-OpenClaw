@@ -62,7 +62,10 @@ gate. Do not re-inline the grep: the pattern it replaced stopped at a hyphen, so
 ## What The Workflow Does
 
 The workflow runs when:
-- a release tag is pushed (tags starting with a digit)
+- a release tag is pushed — the glob is `[0-9]*.[0-9]*.[0-9]*`, so a tag needs at least
+  three dot-separated segments starting with a digit. `2026.8.1` and `2026.8.1.2` match;
+  `2026.8` and `test-publish-1` do not, and produce no run at all — no red X, no
+  notification. If nothing appears in Actions after a tag push, check the tag shape first.
 - manually via `workflow_dispatch` (requires a `tag` input naming an existing tag; optional
   `dry_run` builds without pushing)
 
