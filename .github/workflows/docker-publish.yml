@@ -1,38 +1,12 @@
 name: Docker Build and Push
-# >>> ci-local:gated original triggers below, restore with `ci-local restore`
-# on:
-#   # Release tags only. This was `"*"`, which meant the runbook's own
-#   # "push a test tag to verify" recipe published a real image and moved
-#   # :latest onto it. Every real release tag is YYYY.M.D[.N], so it starts
-#   # with a digit.
-#   push:
-#     tags:
-#       - "[0-9]*"
-#   workflow_dispatch:
-#     inputs:
-#       tag:
-#         description: "Existing release tag to (re)publish (for example 2026.6.1)"
-#         required: true
-#         type: string
-#       dry_run:
-#         description: "Build without pushing to GHCR or touching the Release"
-#         required: false
-#         default: false
-#         type: boolean
-#
-# # Keyed on the tag being published, so two releases never contend. An unkeyed
-# # group would be actively harmful here: a group holds only one pending entry,
-# # so a third release arriving would cancel the queued second one — and a
-# # cancelled release build leaves a tag with no image, which is exactly the
-# # state 2026.7.1 is in. Same-tag reruns still serialize, which is the case
-# # worth serializing.
-# #
-# # github.ref_name, not github.ref: the dispatch input is a bare tag name, so
-# # keying the push side on `refs/tags/X` would put a dispatch republish of X in a
-# # different group from the original push of X and let the two build the same tag
-# # at once.
-# <<< ci-local:gated
 on:
+  # Release tags only. This was `"*"`, which meant the runbook's own
+  # "push a test tag to verify" recipe published a real image and moved
+  # :latest onto it. Every real release tag is YYYY.M.D[.N], so it starts
+  # with a digit.
+  push:
+    tags:
+      - "[0-9]*"
   workflow_dispatch:
     inputs:
       tag:
