@@ -336,15 +336,43 @@ jobs:
           set -euo pipefail
           # A tag must never imply an artifact that failed to appear. This repo has
           # shipped a release tag with no image before; the same trap applies here.
-          for attempt in 1 2 3 4 5; do
+          #
+          # Two things are checked, cheapest and fastest-propagating first:
+          #
+          #   1. the version tarball, which is the URL the README hands users and the
+          #      one `plugins install` ultimately downloads;
+          #   2. the packument via `npm view`, which is what resolves the `npm:` install
+          #      spec in the first place.
+          #
+          # The window is 5 minutes, not the 50 seconds this used to allow. On the
+          # 2026.8.3 release the publish itself succeeded and this step still failed:
+          # the packument for a FIRST publish under a new scope took minutes to become
+          # readable, and `npm view` is also what the change-guard above calls, so its
+          # 404s were well cached by the time the publish landed. The tarball answered
+          # almost immediately. A green publish followed by a red confirmation is worse
+          # than useless — it marks a good release as broken and invites a rerun.
+          tarball_url="https://registry.npmjs.org/${PACKAGE}/-/${PACKAGE##*/}-${VERSION}.tgz"
+          saw_tarball=false
+          for attempt in $(seq 1 20); do
+            if [[ "${saw_tarball}" == "false" ]] && curl -sfI "${tarball_url}" >/dev/null 2>&1; then
+              saw_tarball=true
+              echo "Tarball is fetchable: ${tarball_url}"
+            fi
             if npm view "${PACKAGE}@${VERSION}" version >/dev/null 2>&1; then
-              echo "Confirmed ${PACKAGE}@${VERSION} on the registry."
+              echo "Confirmed ${PACKAGE}@${VERSION} resolves on the registry."
               exit 0
             fi
-            echo "Not visible yet (attempt ${attempt}); waiting for registry propagation."
-            sleep 10
+            echo "Not resolvable yet (attempt ${attempt}/20); waiting for registry propagation."
+            sleep 15
           done
-          echo "::error::${PACKAGE}@${VERSION} did not appear on the registry after publishing."
+
+          # Deliberately not a silent pass. But the message has to stop the obvious
+          # next move, because the publish DID succeed and npm versions are immutable:
+          # re-running this job republishes an existing version and dies on E403.
+          echo "::error::${PACKAGE}@${VERSION} did not resolve within 5 minutes. The publish step itself succeeded, so the version is almost certainly on the registry already — DO NOT re-run this job, it will fail with E403 cannot publish over an existing version. Check https://www.npmjs.com/package/${PACKAGE} and, if the version is there, this release is fine."
+          if [[ "${saw_tarball}" == "true" ]]; then
+            echo "::error::The tarball at ${tarball_url} WAS fetchable, so the artifact exists and only the packument is lagging."
+          fi
           exit 1
 
       - name: Dry run summary
