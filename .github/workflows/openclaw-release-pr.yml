@@ -1,8 +1,12 @@
 name: CI-OpenClaw Release PR
 
+# >>> ci-local:gated original triggers below, restore with `ci-local restore`
+# on:
+#   schedule:
+#     - cron: "0 6 * * *"
+#   workflow_dispatch:
+# <<< ci-local:gated
 on:
-  schedule:
-    - cron: "0 6 * * *"
   workflow_dispatch:
 
 jobs:

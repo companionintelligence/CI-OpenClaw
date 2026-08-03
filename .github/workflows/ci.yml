@@ -1,13 +1,35 @@
 name: CI
 
+# >>> ci-local:gated original triggers below, restore with `ci-local restore`
+# on:
+#   pull_request:
+#   push:
+#     branches: [master, main]
+#   schedule:
+#     # Advisory nightly run that also validates against openclaw@latest, so an upstream
+#     # schema tightening surfaces before the version-bump PR lands.
+#     - cron: "0 5 * * *"
+#   workflow_dispatch:
+#   # Called by docker-publish.yml so a red suite cannot ship an image.
+#   workflow_call:
+#     inputs:
+#       ref:
+#         description: >-
+#           Ref to test. The publish workflow passes the exact ref it is about to check
+#           out and build — the release tag — so the gate and the build can never
+#           disagree about the tree. Leave empty to test the ref that triggered the run.
+#         type: string
+#         required: false
+#         default: ""
+#     secrets:
+#       CI_HUB_READ_TOKEN:
+#         description: >-
+#           Fine-grained PAT with CI-Hub Contents: read, used by the plugin-integrity job to
+#           rebuild the vendored bundle from source. Passed explicitly by docker-publish.yml
+#           (not `secrets: inherit`) so only this one secret crosses into the called workflow.
+#         required: false
+# <<< ci-local:gated
 on:
-  pull_request:
-  push:
-    branches: [master, main]
-  schedule:
-    # Advisory nightly run that also validates against openclaw@latest, so an upstream
-    # schema tightening surfaces before the version-bump PR lands.
-    - cron: "0 5 * * *"
   workflow_dispatch:
   # Called by docker-publish.yml so a red suite cannot ship an image.
   workflow_call:
@@ -152,6 +174,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
+          retention-days: 7
           name: openclaw-configs-${{ matrix.channel }}
           path: ${{ runner.temp }}/schema-gate/
           if-no-files-found: ignore
