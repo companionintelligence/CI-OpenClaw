@@ -10,6 +10,7 @@
     "check:ci-hub-plugin-drift": "scripts/check-ci-hub-plugin-drift.sh --check"
   },
   "dependencies": {
+    "@sentry/node": "^10.69.0",
     "node-pty": "^1.0.0",
     "ws": "^8.18.0"
   }
