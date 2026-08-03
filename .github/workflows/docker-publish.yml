@@ -213,6 +213,20 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      # Advisory only — a missing secret must never fail the publish. Without it
+      # the build arg below expands to empty, the Dockerfile ARG default wins,
+      # and we ship the same DSN-less image we always did.
+      - name: Check Sentry DSN availability
+        shell: bash
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          if [ -z "${SENTRY_DSN}" ]; then
+            echo "::notice::SENTRY_DSN secret is not set — publishing an image with no DSN compiled in. Error reporting stays inert (disabledReason: no-dsn)."
+          else
+            echo "SENTRY_DSN is set — baking it into ${IMAGE_NAME}:${TAG}."
+          fi
+
       - name: Build and push multi-arch image
         uses: docker/build-push-action@v7
         with:
@@ -220,6 +234,14 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ env.PUSH_IMAGE == 'true' }}
           tags: ${{ steps.refs.outputs.tags }}
+          # telemetry.cjs reads SENTRY_DSN from the container env at start-up,
+          # but nothing supplies one to a marketplace install — so until now
+          # every published image reported nothing. Baked here and re-exported
+          # as ENV by the Dockerfile. Empty when the secret is unset, which
+          # resolveTelemetrySettings already treats as "no-dsn".
+          build-args: |
+            SENTRY_DSN=${{ secrets.SENTRY_DSN }}
+            SENTRY_RELEASE=ci-openclaw-server@${{ env.TAG }}
           # The bundled openclaw version rides along as a label rather than in
           # the tag name, so a running container is self-describing without
           # overloading the release-tag namespace.
