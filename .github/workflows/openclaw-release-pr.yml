@@ -9,6 +9,10 @@ name: CI-OpenClaw Release PR
 on:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   check-and-pr:
     runs-on: ubuntu-latest
