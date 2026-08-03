@@ -148,6 +148,12 @@ jobs:
             tag="${GITHUB_REF_NAME}"
           fi
 
+          # Every tag cut before this workflow merged predates scripts/, so the publish
+          # would die on a missing file. Say so plainly rather than failing on a raw
+          # `No such file or directory`. Matches the guard in CI-Hermes.
+          [[ -x scripts/pack-memory-plugin.sh ]] \
+            || { echo "::error::${tag} predates scripts/pack-memory-plugin.sh; only tags cut after this workflow merged can be published."; exit 1; }
+
           # Resolved in bash rather than as `${{ !inputs.dry_run }}` on the publish
           # step. GitHub expressions treat any non-empty string as truthy, and a
           # boolean input arrives as the STRING "false" when the run is started

@@ -353,7 +353,24 @@ jobs:
             npm install -g "openclaw@${{ steps.resolve.outputs.version }}"
           fi
 
+      - name: Does this ref have the packaging script?
+        id: packaging
+        # A workflow_dispatch republish of an older release tag checks out that tag,
+        # and every tag cut before the npm packaging merged has no scripts/
+        # pack-memory-plugin.sh. Without this the job died on `No such file or
+        # directory` with exit 127 and no indication of why. There is no packaging on
+        # such a ref, so there is nothing here to verify — say so and skip.
+        run: |
+          set -euo pipefail
+          if [[ -x scripts/pack-memory-plugin.sh ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${GITHUB_REF_NAME} predates scripts/pack-memory-plugin.sh, so there is no npm packaging on this ref to check. Skipping."
+          fi
+
       - name: Pack the plugin
+        if: steps.packaging.outputs.present == 'true'
         id: pack
         run: |
           set -euo pipefail
@@ -363,6 +380,7 @@ jobs:
           tar -tzf "${tarball}"
 
       - name: Install the tarball into a throwaway openclaw home
+        if: steps.packaging.outputs.present == 'true'
         env:
           TARBALL: ${{ steps.pack.outputs.tarball }}
         run: |
@@ -402,6 +420,7 @@ jobs:
           NODE
 
       - name: Confirm the installed plugin loads
+        if: steps.packaging.outputs.present == 'true'
         run: |
           set -euo pipefail
           export HOME="${RUNNER_TEMP}/openclaw-home"
