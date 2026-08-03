@@ -56,6 +56,12 @@ COPY --chown=node:node server.cjs /app/setup-server.cjs
 COPY --chown=node:node config-reconcile.cjs /app/config-reconcile.cjs
 COPY --chown=node:node proxy-headers.cjs /app/proxy-headers.cjs
 COPY --chown=node:node memory-gate.cjs /app/memory-gate.cjs
+# Error reporting is opt-in at RUNTIME (SENTRY_DSN / CI_TELEMETRY / CI_LOCAL_ONLY
+# in the container env) — deliberately NOT a build ARG, so no DSN is ever baked
+# into the image and an operator can turn reporting off without a rebuild. With
+# no DSN this module initialises nothing and never even requires @sentry/node.
+# See docs/operations/error-reporting.md.
+COPY --chown=node:node telemetry.cjs /app/telemetry.cjs
 COPY --chown=node:node setup.html /app/setup.html
 COPY --chown=node:node logo.webp /app/logo.webp
 COPY --chown=node:node assets /app/assets

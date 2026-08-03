@@ -184,6 +184,17 @@ npm run test:unit   # config reconciler + CI memory plugin (node --test)
 npm run test:sh     # the bootstrap shell scripts (tests/*.test.sh)
 ```
 
+#### Error reporting
+
+`telemetry.cjs` is opt-in Sentry reporting for the wrapper, **off by default**: with no
+`SENTRY_DSN` nothing initialises, `@sentry/node` is never even required, and the container
+makes no outbound connection. `CI_TELEMETRY=off` and `CI_LOCAL_ONLY=true` disable it even
+when a DSN is configured. `tests/telemetry.test.mjs` covers the gate and every redaction
+rule (the Hub identity headers, bare provider API keys, gateway tokens in URLs, home
+paths, breadcrumbs, stack frames) — dependency-free, like the rest of the suite.
+
+See [docs/operations/error-reporting.md](docs/operations/error-reporting.md).
+
 #### Config reconciliation
 
 `config-reconcile.cjs` owns `openclaw.json`. OpenClaw's config schema is strict:

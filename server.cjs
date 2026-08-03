@@ -1,3 +1,11 @@
+// Opt-in error reporting. MUST stay the first require + call in this file: the
+// Sentry SDK patches Node internals (http, child_process, …) on init, and
+// instrumentation applied after those modules are loaded misses everything they
+// wired up at import time. With no SENTRY_DSN this initialises nothing, requires
+// no SDK, and makes no outbound connection — see telemetry.cjs.
+const telemetry = require("./telemetry.cjs");
+telemetry.initTelemetry();
+
 const http = require("http");
 const net = require("net");
 const fs = require("fs");
@@ -638,7 +646,35 @@ async function handleMemoryAction(req, res) {
   return true;
 }
 
+// ── Error-reporting consent ────────────────────────────────────────────────
+// Reports whether THIS process is reporting errors and, if not, why — so the
+// CI_TELEMETRY / CI_LOCAL_ONLY kill switches (and the marketplace "Share crash
+// reports" toggle that sets them) are observable without shelling into the
+// container. Unauthenticated by design: it exposes no secret — never the DSN —
+// and when reporting is off there is nothing to expose at all.
+//
+// Namespaced under /__ci_* like the memory gate rather than sitting at the
+// fleet-standard /api/config/telemetry, because everything this wrapper does not
+// claim is proxied straight to OpenClaw: a wrapper-owned path under /api/ would
+// silently shadow an upstream route the moment the weekly openclaw bump adds
+// one. See docs/operations/error-reporting.md.
+const TELEMETRY_CONFIG_PATH = "/__ci_telemetry/config";
+
 const server = http.createServer(async (req, res) => {
+  if ((req.url || "").split("?")[0] === TELEMETRY_CONFIG_PATH) {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      res.writeHead(405, { Allow: "GET, HEAD", "Content-Type": "text/plain" });
+      res.end("Method Not Allowed");
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    });
+    res.end(JSON.stringify(telemetry.getTelemetryStatus()));
+    return;
+  }
+
   // Serve static assets for setup UI
   if (req.url === "/logo.webp") {
     res.writeHead(200, {
@@ -861,6 +897,7 @@ server.on("upgrade", (req, socket, head) => {
     // Defense in depth: never let an upgrade-handler throw escape as an uncaught
     // exception (which would crash the wrapper). Reject the socket and move on.
     console.error("[ci-memory] upgrade handler error:", err && err.message ? err.message : err);
+    telemetry.captureException(err);
     try {
       socket.destroy();
     } catch {
@@ -889,11 +926,20 @@ server.listen(PORT, "0.0.0.0", () => {
 // Last-resort backstop: keep a stray throw/rejection (e.g. from an event
 // handler outside a request's try/catch) from hard-crashing the wrapper and
 // dropping the whole app. Log and keep serving.
+//
+// The Sentry capture is deliberately additive: telemetry.cjs drops the SDK's own
+// OnUncaughtException/OnUnhandledRejection integrations, which can terminate the
+// process, so reporting cannot change the fact that the wrapper survives here.
+// With no DSN both calls are no-ops on an uninitialised module.
 process.on("uncaughtException", (err) => {
   console.error("[ci-memory] uncaughtException:", err && err.stack ? err.stack : err);
+  telemetry.captureException(err);
 });
 process.on("unhandledRejection", (reason) => {
   console.error("[ci-memory] unhandledRejection:", reason);
+  telemetry.captureException(
+    reason instanceof Error ? reason : new Error(String(reason ?? "Unknown unhandled rejection")),
+  );
 });
 
 // Graceful shutdown: Docker sends SIGTERM on stop/restart/update.
@@ -910,4 +956,8 @@ process.on("SIGTERM", () => {
     openclawProcess.kill("SIGTERM");
   }
   server.close();
+  // Ship anything still buffered, bounded to 2s and unref'd. Returns an already
+  // resolved promise when reporting is off, so with no DSN the shutdown path is
+  // exactly what it was — telemetry can never delay a container stop.
+  void telemetry.flushTelemetry(2000);
 });
