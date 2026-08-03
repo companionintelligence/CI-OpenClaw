@@ -56,12 +56,25 @@ COPY --chown=node:node server.cjs /app/setup-server.cjs
 COPY --chown=node:node config-reconcile.cjs /app/config-reconcile.cjs
 COPY --chown=node:node proxy-headers.cjs /app/proxy-headers.cjs
 COPY --chown=node:node memory-gate.cjs /app/memory-gate.cjs
-# Error reporting is opt-out, configured at RUNTIME (SENTRY_DSN / CI_TELEMETRY /
-# CI_LOCAL_ONLY in the container env) — deliberately NOT a build ARG, so no DSN is
-# ever baked into the image and the kill switches can always turn reporting off
-# without a rebuild. With no DSN in the env this module initialises nothing and
-# never even requires @sentry/node.
+# Error reporting is opt-out. The DSN is read from the container env at runtime —
+# there is no web bundle here, so nothing is compiled in the way the fleet's Vite
+# apps are. But nothing supplies it at runtime either: the marketplace runs this
+# published image as-is, which is why reporting has been inert since telemetry
+# landed. Released images are therefore built with `--build-arg SENTRY_DSN=…`,
+# re-exported as ENV below, so a marketplace install reports out of the box.
+#
+# Built without the arg (local `docker build`, PR CI) the ARG default is empty,
+# which resolveTelemetrySettings already treats as unset: this module initialises
+# nothing and never even requires @sentry/node.
+#
+# Baking the DSN does not weaken the kill switches — CI_TELEMETRY=off and
+# CI_LOCAL_ONLY=true are separate runtime vars, both still beat a baked-in DSN,
+# and a runtime `-e SENTRY_DSN=…` still overrides this value.
 # See docs/operations/error-reporting.md.
+ARG SENTRY_DSN=""
+ARG SENTRY_RELEASE=""
+ENV SENTRY_DSN=${SENTRY_DSN} \
+    SENTRY_RELEASE=${SENTRY_RELEASE}
 COPY --chown=node:node telemetry.cjs /app/telemetry.cjs
 COPY --chown=node:node setup.html /app/setup.html
 COPY --chown=node:node logo.webp /app/logo.webp
