@@ -734,6 +734,47 @@ for (const path of [
   });
 }
 
+// The memory directory itself, with no file under it, is still a blocked target —
+// but only when the parameter IS that path, not when a string merely contains it.
+for (const path of [
+  "/data/.openclaw/memory",
+  "~/.openclaw/memory",
+  "C:\\Users\\hanzl\\.openclaw\\memory",
+  "/home/u/.openclaw/memory/",
+]) {
+  test(`before_tool_call blocks the local-memory directory ${path}`, () => {
+    const api = register();
+    const res = api._handlers["before_tool_call"]({ toolName: "write_file", params: { path } }, CI_ACTIVE);
+    assert.equal(res?.block, true, `path ${path} should be blocked`);
+    clearFlags();
+  });
+}
+
+// Prose that merely NAMES the memory directory is not a write to it. The guard
+// scans every string reachable from `params`, `content` included, so a rule that
+// matched the bare directory anywhere in a string would refuse edits to this
+// repo's own docs (and to the plugin's guidance text) with a reason naming files
+// the agent never touched.
+for (const content of [
+  "If OpenClaw tries to write `USER.md`, `MEMORY.md`, or `/data/.openclaw/memory/main.sqlite`, the CI memory plugin should block that path.",
+  "State lives under ~/.openclaw/memory/ on your machine.\n",
+  "the ~/.openclaw/memory dir holds OpenClaw's own index",
+  "Do not inspect OpenClaw's local memory SQLite files — the .openclaw/memory directory.",
+]) {
+  test(`before_tool_call does NOT block documentation content: ${content.slice(0, 40)}…`, () => {
+    const api = register();
+    assert.equal(
+      api._handlers["before_tool_call"](
+        { toolName: "write_file", params: { path: "README.md", content } },
+        CI_ACTIVE,
+      ),
+      undefined,
+      "documenting the memory path is not writing to it",
+    );
+    clearFlags();
+  });
+}
+
 for (const path of [
   "USER_notes.md",
   "src/memory.txt",

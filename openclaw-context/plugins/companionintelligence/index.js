@@ -66,15 +66,25 @@ function isBlockedLocalMemoryReference(value) {
   const basename = path.split("/").pop();
   if (basename === "user.md" || basename === "memory.md") return true;
   if (/(^|\/)memory\/[^/]+\.md(?:\s|$|["'])/u.test(path)) return true;
-  // OpenClaw's own memory state directory, wherever it lives. The leading `/` in
-  // the prefix class is what makes this fire on an ABSOLUTE path — the packaged
-  // app's `/data/.openclaw/memory`, a native Windows install's
-  // `C:\Users\<u>\.openclaw\memory` (backslashes already normalized above), and
-  // `/home/<u>`, `/Users/<u>`, `~/` alike. Anchoring only to start-of-string,
-  // whitespace or a quote — as this did — matched the container path and
-  // essentially nothing a stock install actually reports, so the guard silently
-  // never fired off-appliance.
-  if (/(^|[\s"'/])\.openclaw\/memory(?:[/\s"']|$)/u.test(path)) return true;
+  // The packaged app's own memory directory, matched anywhere in a string so a
+  // shell command that touches it is caught too.
+  if (/(^|\s|["'])\/data\/\.openclaw\/memory(?:\/|\s|$|["'])/u.test(path)) return true;
+  // OpenClaw's memory database wherever OpenClaw's state directory lives. The
+  // leading `/` in the prefix class is what makes this fire on an ABSOLUTE path —
+  // a native Windows install's `C:\Users\<u>\.openclaw\memory\main.sqlite`
+  // (backslashes already normalized above), and `/home/<u>`, `/Users/<u>`, `~/`
+  // alike. Anchoring only to start-of-string, whitespace or a quote — as this did
+  // — matched the container path and essentially nothing a stock install actually
+  // reports, so the guard silently never fired off-appliance.
+  //
+  // The `.sqlite`/`.sqlite3` filename stays required here. This rule runs against
+  // EVERY string reachable from a tool's params, `content` included, so dropping
+  // it would hard-block any edit whose text merely names the directory in prose —
+  // this repo's README, and the plugin's own guidance above, both do.
+  if (/(^|[\s"'/])\.openclaw\/memory\/[^"'\s]+\.sqlite3?(?:[\s"']|$)/u.test(path)) return true;
+  // The memory directory itself, on any install. Whole-string only: a parameter
+  // that IS this path is a write target, whereas a sentence containing it is not.
+  if (/^(?:[^"'\s]*\/)?\.openclaw\/memory\/?$/u.test(path)) return true;
   return false;
 }
 
