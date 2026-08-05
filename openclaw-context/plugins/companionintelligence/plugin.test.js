@@ -728,6 +728,9 @@ for (const path of [
   // A shell operator glued to the filename is still a shell command touching the
   // database. Anchoring the boundary on whitespace alone let every one of these
   // through a guard whose whole purpose is to read command strings.
+  // A flag glues the path on with `=` and no space, so the match has to be able to
+  // START there as well as end at an operator.
+  "sqlite3 --db=.openclaw/memory/main.sqlite --readonly",
   "cat ~/.openclaw/memory/main.sqlite|head",
   "sqlite3 /home/u/.openclaw/memory/main.sqlite;rm -f /tmp/x",
   "test -f ~/.openclaw/memory/main.sqlite&&echo yes",

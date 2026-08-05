@@ -89,7 +89,10 @@ function isBlockedLocalMemoryReference(value) {
   // ordinary prose, and a BACKTICK is how markdown closes an inline code span — this
   // repo's README writes the path that way, so admitting any of them re-breaks
   // editing the docs that name it. Caught by the negative tests, not by inspection.
-  if (/(^|[\s"'/])\.openclaw\/memory\/[^"'\s]+\.sqlite3?(?:[\s"'|;&><]|$)/u.test(path)) return true;
+  // `=` opens the match for the same reason the operators close it: `--db=.openclaw/…`
+  // attaches the path to a flag with no space, and a boundary that only knows about
+  // whitespace never sees the start of it.
+  if (/(^|[\s"'/=])\.openclaw\/memory\/[^"'\s]+\.sqlite3?(?:[\s"'|;&><]|$)/u.test(path)) return true;
   // The memory directory itself, on any install. Whole-string only: a parameter
   // that IS this path is a write target, whereas a sentence containing it is not.
   if (/^(?:[^"'\s]*\/)?\.openclaw\/memory\/?$/u.test(path)) return true;
