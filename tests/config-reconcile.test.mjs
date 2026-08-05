@@ -46,7 +46,14 @@ import {
 // that hides genuine breakage from anyone developing on Windows.
 function assertPrivateFileMode(filePath, message) {
   if (process.platform === "win32") {
-    assert.ok(fs.existsSync(filePath), message ?? `${filePath} must exist`);
+    // isFile(), not just existsSync: a directory at this path satisfies "exists"
+    // while meaning the write went somewhere quite different from a config file.
+    // Short-circuited so a missing path reports as a failed assertion rather than
+    // an ENOENT thrown out of statSync.
+    assert.ok(
+      fs.existsSync(filePath) && fs.statSync(filePath).isFile(),
+      message ?? `${filePath} must exist as a regular file`,
+    );
     return;
   }
   assert.strictEqual(fs.statSync(filePath).mode & 0o777, 0o600, message);
