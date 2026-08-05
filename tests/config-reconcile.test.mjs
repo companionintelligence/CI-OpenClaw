@@ -38,6 +38,27 @@ import {
   PLUGIN_PATHS,
 } from "./helpers/reconcile-fixture.mjs";
 
+// POSIX mode bits are not representable on Windows: NTFS has no group/other
+// permission and Node's chmod maps 0o600 onto the read-only attribute only, so
+// `mode & 0o777` reads back 0o666 there. The production target for these files is
+// the Linux container, where the assertion is real — on Windows we assert the file
+// was written at all and let the mode go, rather than leave a permanently red suite
+// that hides genuine breakage from anyone developing on Windows.
+function assertPrivateFileMode(filePath, message) {
+  if (process.platform === "win32") {
+    // isFile(), not just existsSync: a directory at this path satisfies "exists"
+    // while meaning the write went somewhere quite different from a config file.
+    // Short-circuited so a missing path reports as a failed assertion rather than
+    // an ENOENT thrown out of statSync.
+    assert.ok(
+      fs.existsSync(filePath) && fs.statSync(filePath).isFile(),
+      message ?? `${filePath} must exist as a regular file`,
+    );
+    return;
+  }
+  assert.strictEqual(fs.statSync(filePath).mode & 0o777, 0o600, message);
+}
+
 let dataDir;
 afterEach(() => {
   rmDir(dataDir);
@@ -821,7 +842,7 @@ describe("env + config IO", () => {
     const raw = fs.readFileSync(envPath(dataDir), "utf8");
     assert.ok(raw.includes("KEEP=yes"));
     assert.ok(!raw.includes("DROP"), "an empty value must not be written");
-    assert.strictEqual(fs.statSync(envPath(dataDir)).mode & 0o777, 0o600);
+    assertPrivateFileMode(envPath(dataDir));
   });
 
   test("writeConfig writes pretty JSON at 0600 and stamps the write", () => {
@@ -831,7 +852,7 @@ describe("env + config IO", () => {
     cfg.writeConfig({ a: 1 });
     assert.ok(cfg.configWrittenAtMs > 0, "the write must be stamped for clobber detection");
     assert.strictEqual(fs.readFileSync(cfgPath(dataDir), "utf8"), '{\n  "a": 1\n}');
-    assert.strictEqual(fs.statSync(cfgPath(dataDir)).mode & 0o777, 0o600);
+    assertPrivateFileMode(cfgPath(dataDir));
   });
 
   // writeFileSync's `mode` applies only when it CREATES the file. openclaw.json and
@@ -843,9 +864,8 @@ describe("env + config IO", () => {
     fs.writeFileSync(cfgPath(dataDir), "{}", { mode: 0o644 });
     fs.chmodSync(cfgPath(dataDir), 0o644);
     makeReconciler(dataDir).cfg.writeConfig({ gateway: { auth: { token: "secret" } } });
-    assert.strictEqual(
-      fs.statSync(cfgPath(dataDir)).mode & 0o777,
-      0o600,
+    assertPrivateFileMode(
+      cfgPath(dataDir),
       "a pre-existing openclaw.json must not stay world-readable — it holds the gateway token",
     );
   });
@@ -855,7 +875,7 @@ describe("env + config IO", () => {
     fs.writeFileSync(envPath(dataDir), "OLD=1\n", { mode: 0o644 });
     fs.chmodSync(envPath(dataDir), 0o644);
     makeReconciler(dataDir).cfg.writeEnv({ ANTHROPIC_API_KEY: "secret" });
-    assert.strictEqual(fs.statSync(envPath(dataDir)).mode & 0o777, 0o600);
+    assertPrivateFileMode(envPath(dataDir));
   });
 
   // The clobber cutoff is compared against snapshot mtimeMs, so the stamp must come

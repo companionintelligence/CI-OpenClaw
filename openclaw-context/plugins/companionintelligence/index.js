@@ -20,7 +20,7 @@ const CI_MEMORY_BOOTSTRAP_GUIDANCE = [
   "Companion Intelligence is the active OpenClaw memory backend.",
   "For user profile facts, preferences, durable notes, decisions, prior-project context, and explicit remember/save requests, use the `memory_store` tool.",
   "Do not create or edit `USER.md`, `MEMORY.md`, or `memory/*.md` for memory storage while this backend is active.",
-  "Do not inspect, query, edit, or write OpenClaw's local memory SQLite files such as `/data/.openclaw/memory/main.sqlite`; they are internal cache/index storage, not the Companion Intelligence memory system.",
+  "Do not inspect, query, edit, or write OpenClaw's local memory SQLite files — the `.openclaw/memory` directory wherever OpenClaw's state directory lives (`/data/.openclaw/memory` in the packaged app, `~/.openclaw/memory` or `%USERPROFILE%\\.openclaw\\memory` on your own install); they are internal cache/index storage, not the Companion Intelligence memory system.",
   "Use `memory_search` for topical recall and `memory_get` with `ci-server://profile` for the CI-Server profile block.",
 ].join("\n");
 
@@ -66,13 +66,47 @@ function isBlockedLocalMemoryReference(value) {
   const basename = path.split("/").pop();
   if (basename === "user.md" || basename === "memory.md") return true;
   if (/(^|\/)memory\/[^/]+\.md(?:\s|$|["'])/u.test(path)) return true;
+  // The packaged app's own memory directory, matched anywhere in a string so a
+  // shell command that touches it is caught too.
   if (/(^|\s|["'])\/data\/\.openclaw\/memory(?:\/|\s|$|["'])/u.test(path)) return true;
-  if (/(^|\s|["'])\/data\/\.openclaw\/memory\/[^"'\s]+\.sqlite3?(?:\s|$|["'])/u.test(path)) {
+  // OpenClaw's memory database wherever OpenClaw's state directory lives. The
+  // leading `/` in the prefix class is what makes this fire on an ABSOLUTE path —
+  // a native Windows install's `C:\Users\<u>\.openclaw\memory\main.sqlite`
+  // (backslashes already normalized above), and `/home/<u>`, `/Users/<u>`, `~/`
+  // alike. Anchoring only to start-of-string, whitespace or a quote — as this did
+  // — matched the container path and essentially nothing a stock install actually
+  // reports, so the guard silently never fired off-appliance.
+  //
+  // The `.sqlite`/`.sqlite3` filename stays required here. This rule runs against
+  // EVERY string reachable from a tool's params, `content` included, so dropping
+  // it would hard-block any edit whose text merely names the directory in prose —
+  // this repo's README, and the plugin's own guidance above, both do.
+  // `=` opens the match for the same reason a space does: `--db=.openclaw/…` attaches
+  // the path to a flag, and a boundary that only knows about whitespace never sees the
+  // start of it.
+  if (/(^|[\s"'/=])\.openclaw\/memory\/[^"'\s]+\.sqlite3?(?:[\s"']|$)/u.test(path)) return true;
+
+  // Shell operators terminate the filename too — but ONLY for a string that could
+  // itself be a command. Without this, `sqlite3 ~/.openclaw/memory/main.sqlite|head`
+  // and `…main.sqlite;rm -f …` walk through a guard whose purpose is reading shell
+  // commands, because the filename is followed by an operator rather than a space.
+  //
+  // The single-line restriction is what stops that widening from firing on prose. A
+  // `content` parameter is a whole file and effectively always multi-line, and any
+  // file may legitimately QUOTE such a command: this very comment does, and admitting
+  // `|` unconditionally made the plugin refuse to let anything edit its own source —
+  // the same over-blocking the `.sqlite` requirement above exists to prevent. A real
+  // command is one line; a document that mentions one is not.
+  if (!path.includes("\n") && /(^|[\s"'/=])\.openclaw\/memory\/[^"'\s]+\.sqlite3?[|;&><]/u.test(path)) {
     return true;
   }
-  if (/(^|\s|["'])\.openclaw\/memory\/[^"'\s]+\.sqlite3?(?:\s|$|["'])/u.test(path)) {
-    return true;
-  }
+
+  // Any path UNDER the memory directory, whole-string only. The `.sqlite` rules above
+  // miss OpenClaw's default store, which is lancedb: `~/.openclaw/memory/lancedb/…`
+  // holds `.lance` files, not sqlite ones, so requiring that extension left the real
+  // memory backend of a stock install unguarded. Whole-string keeps this safe against
+  // prose, since a sentence mentioning the path is never equal to it.
+  if (/^(?:[^"'\s]*\/)?\.openclaw\/memory(?:\/[^"'\s]*)?$/u.test(path)) return true;
   return false;
 }
 
@@ -97,11 +131,29 @@ function getToolMemoryReferences(event) {
   return strings;
 }
 
+// Locate the workspace AGENTS.md entry.
+//
+// Exact case first, then case-insensitively. The fallback is what Windows and macOS
+// need: their filesystems are case-insensitive, so `agents.md` on disk IS the file
+// every other consumer calls AGENTS.md, and an exact-only find would miss it and push
+// a second synthetic entry aliasing the same file — leaving the user's real content
+// without the guidance.
+//
+// The exact pass first is what keeps that off Linux, where the two are genuinely
+// different files and can both exist. Preferring whichever merely came first in the
+// array would have quietly moved the write to the other one.
+function findAgentsFile(bootstrapFiles) {
+  return (
+    bootstrapFiles.find((file) => normalizeString(file?.name) === "AGENTS.md") ??
+    bootstrapFiles.find((file) => normalizeString(file?.name).toLowerCase() === "agents.md")
+  );
+}
+
 // Ensure the bootstrap memory guidance is present in AGENTS.md. Synchronous and
 // idempotent: appends to an existing AGENTS.md (unless already present) or
 // creates one.
 function injectBootstrapGuidance(context) {
-  const agentsFile = context.bootstrapFiles.find((file) => file?.name === "AGENTS.md");
+  const agentsFile = findAgentsFile(context.bootstrapFiles);
   if (agentsFile) {
     const content = typeof agentsFile.content === "string" ? agentsFile.content : "";
     if (!content.includes("Companion Intelligence is the active OpenClaw memory backend.")) {
@@ -153,7 +205,7 @@ function appendUserContextBlock(context, block) {
     "",
   ].join("\n");
 
-  const agentsFile = context.bootstrapFiles.find((file) => file?.name === "AGENTS.md");
+  const agentsFile = findAgentsFile(context.bootstrapFiles);
   if (agentsFile) {
     const content = typeof agentsFile.content === "string" ? agentsFile.content : "";
     if (content.includes(CI_MEMORY_USER_CONTEXT_MARKER)) return;
@@ -493,7 +545,7 @@ function buildPromptSection({ availableTools }) {
     lines.push(
       "Use memory_store for explicit remember/save requests or durable facts the user clearly wants retained.",
       "Do not write memory facts to USER.md, MEMORY.md, or memory/*.md; store them with memory_store so CI-Server can ingest them.",
-      "Do not inspect or write /data/.openclaw/memory/*.sqlite; those files are OpenClaw internals, not the CI memory database.",
+      "Do not inspect or write the *.sqlite files in OpenClaw's own `.openclaw/memory` state directory, wherever it lives on this machine; those are OpenClaw internals, not the CI memory database.",
     );
   }
   if (lines.length > 0) lines.push("");

@@ -713,7 +713,109 @@ for (const path of [
   });
 }
 
-for (const path of ["USER_notes.md", "src/memory.txt", "/data/.openclaw/cache/x.sqlite"]) {
+// The guard has to fire on an ABSOLUTE path to OpenClaw's memory dir, not just
+// the packaged app's /data one. These are the forms a stock install actually
+// reports — every one of them slipped through before, so the hard block never
+// fired anywhere except inside the container.
+for (const path of [
+  "C:\\Users\\hanzl\\.openclaw\\memory\\main.sqlite",
+  "C:/Users/hanzl/.openclaw/memory/main.sqlite",
+  "/home/u/.openclaw/memory/main.sqlite",
+  "/Users/u/.openclaw/memory/main.sqlite",
+  "~/.openclaw/memory/main.sqlite",
+  ".openclaw/memory/main.sqlite",
+  "sqlite3 C:/Users/hanzl/.openclaw/memory/main.sqlite .tables",
+  // A shell operator glued to the filename is still a shell command touching the
+  // database. Anchoring the boundary on whitespace alone let every one of these
+  // through a guard whose whole purpose is to read command strings.
+  // A flag glues the path on with `=` and no space, so the match has to be able to
+  // START there as well as end at an operator.
+  "sqlite3 --db=.openclaw/memory/main.sqlite --readonly",
+  // OpenClaw's DEFAULT memory backend is lancedb, not sqlite: the shipped CLI's own
+  // default is `~/.openclaw/memory/lancedb`, whose files are `.lance`. Requiring a
+  // sqlite extension left the real store of a stock install completely unguarded —
+  // found by running the guard against this machine's actual paths, not in the suite.
+  "C:\\Users\\hanzl\\.openclaw\\memory\\lancedb\\data.lance",
+  "/home/u/.openclaw/memory/lancedb/data.lance",
+  "~/.openclaw/memory/index.bin",
+  "cat ~/.openclaw/memory/main.sqlite|head",
+  "sqlite3 /home/u/.openclaw/memory/main.sqlite;rm -f /tmp/x",
+  "test -f ~/.openclaw/memory/main.sqlite&&echo yes",
+  "cp ~/.openclaw/memory/main.sqlite>/tmp/copy",
+  "sqlite3 ~/.openclaw/memory/main.sqlite<query.sql",
+]) {
+  test(`before_tool_call blocks the absolute local-memory path ${path}`, () => {
+    const api = register();
+    const res = api._handlers["before_tool_call"]({ toolName: "write_file", params: { path } }, CI_ACTIVE);
+    assert.equal(res?.block, true, `path ${path} should be blocked`);
+    clearFlags();
+  });
+}
+
+// The memory directory itself, with no file under it, is still a blocked target —
+// but only when the parameter IS that path, not when a string merely contains it.
+for (const path of [
+  "/data/.openclaw/memory",
+  "~/.openclaw/memory",
+  "C:\\Users\\hanzl\\.openclaw\\memory",
+  "/home/u/.openclaw/memory/",
+]) {
+  test(`before_tool_call blocks the local-memory directory ${path}`, () => {
+    const api = register();
+    const res = api._handlers["before_tool_call"]({ toolName: "write_file", params: { path } }, CI_ACTIVE);
+    assert.equal(res?.block, true, `path ${path} should be blocked`);
+    clearFlags();
+  });
+}
+
+// Prose that merely NAMES the memory directory is not a write to it. The guard
+// scans every string reachable from `params`, `content` included, so a rule that
+// matched the bare directory anywhere in a string would refuse edits to this
+// repo's own docs (and to the plugin's guidance text) with a reason naming files
+// the agent never touched.
+for (const content of [
+  "If OpenClaw tries to write `USER.md`, `MEMORY.md`, or `/data/.openclaw/memory/main.sqlite`, the CI memory plugin should block that path.",
+  "State lives under ~/.openclaw/memory/ on your machine.\n",
+  "the ~/.openclaw/memory dir holds OpenClaw's own index",
+  "Do not inspect OpenClaw's local memory SQLite files — the .openclaw/memory directory.",
+]) {
+  test(`before_tool_call does NOT block documentation content: ${content.slice(0, 40)}…`, () => {
+    const api = register();
+    assert.equal(
+      api._handlers["before_tool_call"](
+        { toolName: "write_file", params: { path: "README.md", content } },
+        CI_ACTIVE,
+      ),
+      undefined,
+      "documenting the memory path is not writing to it",
+    );
+    clearFlags();
+  });
+}
+
+for (const path of [
+  "USER_notes.md",
+  "src/memory.txt",
+  "/data/.openclaw/cache/x.sqlite",
+  // Widening the prefix must not start matching a directory that merely ENDS in
+  // ".openclaw", nor a sibling of the memory dir.
+  "C:/Users/hanzl/my.openclaw/memory/main.sqlite",
+  "C:/Users/hanzl/.openclaw/memory-backup/main.sqlite",
+  // Prose punctuation is NOT a shell operator. Admitting `,` `.` or `)` as a
+  // boundary is what would re-break editing the docs that name this path — which is
+  // the defect the previous commit existed to fix, so it stays covered here.
+  // NOTE: an unquoted `/data/.openclaw/memory/...` in prose IS still blocked, by the
+  // appliance rule above. That is inherited behaviour, not a gap this list covers.
+  "The database lives at ~/.openclaw/memory/main.sqlite, which is internal.",
+  "Internal storage (/home/u/.openclaw/memory/main.sqlite) is off limits.",
+  "Documented as `~/.openclaw/memory/main.sqlite` in the README.",
+  // A DOCUMENT that quotes a shell command is not a shell command. This plugin's own
+  // source contains exactly this line, and admitting `|` unconditionally made the
+  // guard refuse to let anything edit it — caught by running the guard over the real
+  // file, never by the suite, because no test passed a multi-line document before.
+  "// them `sqlite3 ~/.openclaw/memory/main.sqlite|head` and `...main.sqlite;rm -f ...`\n// walk straight through a guard\n",
+  "Run `sqlite3 ~/.openclaw/memory/main.sqlite|head` to inspect it.\nThat is internal storage.\n",
+]) {
   test(`before_tool_call does NOT block unrelated ${path}`, () => {
     const api = register();
     assert.equal(

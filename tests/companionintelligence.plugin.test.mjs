@@ -8,18 +8,18 @@
 
 import http from "node:http";
 import assert from "node:assert";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const PLUGIN = path.join(
-  HERE,
-  "..",
-  "openclaw-context",
-  "plugins",
-  "companionintelligence",
-  "index.js",
-);
+// `pathToFileURL`, not the bare path. A dynamic `import()` of an ABSOLUTE path
+// works on POSIX by accident — the leading `/` reads as a URL path — but on
+// Windows `C:\...` is parsed as a URL with scheme `c:` and Node rejects the whole
+// module with ERR_UNSUPPORTED_ESM_URL_SCHEME. That took this entire suite out on
+// any Windows checkout: it failed at load, so every test below silently never ran.
+const PLUGIN = pathToFileURL(
+  path.join(HERE, "..", "openclaw-context", "plugins", "companionintelligence", "index.js"),
+).href;
 
 let PASS = 0;
 let FAIL = 0;
@@ -279,6 +279,46 @@ await test("agent:bootstrap respects injectUserContext:false opt-out (guidance o
     assert.ok(agents.content.includes("Companion Intelligence is the active OpenClaw memory backend."), "guidance present");
     assert.ok(!agents.content.includes("<!-- ci-memory:user-context -->"), "no profile block when opted out");
     assert.ok(!cap.some((c) => c.url === "/api/memory/context"), "no context fetch when opted out");
+  }));
+
+// Windows and macOS filesystems are case-insensitive, so the bootstrap entry for
+// the workspace agents file can arrive as `agents.md`. An exact-case lookup would
+// miss it and push a SECOND entry aliasing the same file on disk, leaving the
+// user's real content without the guidance.
+await test("agent:bootstrap appends to an existing lowercase agents.md rather than duplicating it", () =>
+  withCiServer(contextServer("# User Context\n- Name: Test User"), async (port) => {
+    const { api, regHooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kf" });
+    plugin.register(api);
+    const existing = { name: "agents.md", path: "agents.md", missing: false, content: "# My project rules\n" };
+    const context = { cfg: CI_MEMORY_ACTIVE_CFG, bootstrapFiles: [existing] };
+    await regHooks["agent:bootstrap"]({ context });
+    assert.equal(context.bootstrapFiles.length, 1, "no duplicate agents file entry");
+    assert.ok(existing.content.includes("# My project rules"), "original content preserved");
+    assert.ok(
+      existing.content.includes("Companion Intelligence is the active OpenClaw memory backend."),
+      "guidance appended to the existing file",
+    );
+    assert.ok(existing.content.includes("<!-- ci-memory:user-context -->"), "user context appended too");
+  }));
+
+// On Linux the two names ARE two files and can both exist. The case-insensitive
+// fallback above must not become "whichever happens to be first in the array", or the
+// guidance quietly moves to the file the rest of the ecosystem does not read.
+await test("agent:bootstrap prefers an exact AGENTS.md over a lowercase sibling", () =>
+  withCiServer(contextServer("# User Context"), async (port) => {
+    const { api, regHooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kg" });
+    plugin.register(api);
+    const lower = { name: "agents.md", path: "agents.md", missing: false, content: "# lower\n" };
+    const exact = { name: "AGENTS.md", path: "AGENTS.md", missing: false, content: "# exact\n" };
+    // Lowercase listed FIRST, so array order alone would pick the wrong one.
+    const context = { cfg: CI_MEMORY_ACTIVE_CFG, bootstrapFiles: [lower, exact] };
+    await regHooks["agent:bootstrap"]({ context });
+    assert.equal(context.bootstrapFiles.length, 2, "neither entry duplicated");
+    assert.ok(
+      exact.content.includes("Companion Intelligence is the active OpenClaw memory backend."),
+      "guidance went to AGENTS.md",
+    );
+    assert.equal(lower.content, "# lower\n", "the lowercase sibling is left alone");
   }));
 
 await test("agent:bootstrap is a no-op when CI memory is not the active backend", () =>
