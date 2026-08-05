@@ -725,6 +725,14 @@ for (const path of [
   "~/.openclaw/memory/main.sqlite",
   ".openclaw/memory/main.sqlite",
   "sqlite3 C:/Users/hanzl/.openclaw/memory/main.sqlite .tables",
+  // A shell operator glued to the filename is still a shell command touching the
+  // database. Anchoring the boundary on whitespace alone let every one of these
+  // through a guard whose whole purpose is to read command strings.
+  "cat ~/.openclaw/memory/main.sqlite|head",
+  "sqlite3 /home/u/.openclaw/memory/main.sqlite;rm -f /tmp/x",
+  "test -f ~/.openclaw/memory/main.sqlite&&echo yes",
+  "cp ~/.openclaw/memory/main.sqlite>/tmp/copy",
+  "sqlite3 ~/.openclaw/memory/main.sqlite<query.sql",
 ]) {
   test(`before_tool_call blocks the absolute local-memory path ${path}`, () => {
     const api = register();
@@ -783,6 +791,14 @@ for (const path of [
   // ".openclaw", nor a sibling of the memory dir.
   "C:/Users/hanzl/my.openclaw/memory/main.sqlite",
   "C:/Users/hanzl/.openclaw/memory-backup/main.sqlite",
+  // Prose punctuation is NOT a shell operator. Admitting `,` `.` or `)` as a
+  // boundary is what would re-break editing the docs that name this path — which is
+  // the defect the previous commit existed to fix, so it stays covered here.
+  // NOTE: an unquoted `/data/.openclaw/memory/...` in prose IS still blocked, by the
+  // appliance rule above. That is inherited behaviour, not a gap this list covers.
+  "The database lives at ~/.openclaw/memory/main.sqlite, which is internal.",
+  "Internal storage (/home/u/.openclaw/memory/main.sqlite) is off limits.",
+  "Documented as `~/.openclaw/memory/main.sqlite` in the README.",
 ]) {
   test(`before_tool_call does NOT block unrelated ${path}`, () => {
     const api = register();

@@ -81,7 +81,15 @@ function isBlockedLocalMemoryReference(value) {
   // EVERY string reachable from a tool's params, `content` included, so dropping
   // it would hard-block any edit whose text merely names the directory in prose —
   // this repo's README, and the plugin's own guidance above, both do.
-  if (/(^|[\s"'/])\.openclaw\/memory\/[^"'\s]+\.sqlite3?(?:[\s"']|$)/u.test(path)) return true;
+  // Shell operators count as a terminator alongside whitespace and quotes. Without
+  // them `sqlite3 ~/.openclaw/memory/main.sqlite|head` and `...main.sqlite;rm -f ...`
+  // walk straight through a guard that exists to read shell commands — the filename
+  // is followed by an operator rather than a space, so the boundary never matches.
+  // Deliberately only the unambiguous ones. `,` `.` and `)` follow a filename in
+  // ordinary prose, and a BACKTICK is how markdown closes an inline code span — this
+  // repo's README writes the path that way, so admitting any of them re-breaks
+  // editing the docs that name it. Caught by the negative tests, not by inspection.
+  if (/(^|[\s"'/])\.openclaw\/memory\/[^"'\s]+\.sqlite3?(?:[\s"'|;&><]|$)/u.test(path)) return true;
   // The memory directory itself, on any install. Whole-string only: a parameter
   // that IS this path is a write target, whereas a sentence containing it is not.
   if (/^(?:[^"'\s]*\/)?\.openclaw\/memory\/?$/u.test(path)) return true;
