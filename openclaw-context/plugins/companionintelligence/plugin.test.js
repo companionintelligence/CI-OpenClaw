@@ -713,7 +713,36 @@ for (const path of [
   });
 }
 
-for (const path of ["USER_notes.md", "src/memory.txt", "/data/.openclaw/cache/x.sqlite"]) {
+// The guard has to fire on an ABSOLUTE path to OpenClaw's memory dir, not just
+// the packaged app's /data one. These are the forms a stock install actually
+// reports — every one of them slipped through before, so the hard block never
+// fired anywhere except inside the container.
+for (const path of [
+  "C:\\Users\\hanzl\\.openclaw\\memory\\main.sqlite",
+  "C:/Users/hanzl/.openclaw/memory/main.sqlite",
+  "/home/u/.openclaw/memory/main.sqlite",
+  "/Users/u/.openclaw/memory/main.sqlite",
+  "~/.openclaw/memory/main.sqlite",
+  ".openclaw/memory/main.sqlite",
+  "sqlite3 C:/Users/hanzl/.openclaw/memory/main.sqlite .tables",
+]) {
+  test(`before_tool_call blocks the absolute local-memory path ${path}`, () => {
+    const api = register();
+    const res = api._handlers["before_tool_call"]({ toolName: "write_file", params: { path } }, CI_ACTIVE);
+    assert.equal(res?.block, true, `path ${path} should be blocked`);
+    clearFlags();
+  });
+}
+
+for (const path of [
+  "USER_notes.md",
+  "src/memory.txt",
+  "/data/.openclaw/cache/x.sqlite",
+  // Widening the prefix must not start matching a directory that merely ENDS in
+  // ".openclaw", nor a sibling of the memory dir.
+  "C:/Users/hanzl/my.openclaw/memory/main.sqlite",
+  "C:/Users/hanzl/.openclaw/memory-backup/main.sqlite",
+]) {
   test(`before_tool_call does NOT block unrelated ${path}`, () => {
     const api = register();
     assert.equal(

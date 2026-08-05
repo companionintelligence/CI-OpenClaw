@@ -20,7 +20,7 @@ const CI_MEMORY_BOOTSTRAP_GUIDANCE = [
   "Companion Intelligence is the active OpenClaw memory backend.",
   "For user profile facts, preferences, durable notes, decisions, prior-project context, and explicit remember/save requests, use the `memory_store` tool.",
   "Do not create or edit `USER.md`, `MEMORY.md`, or `memory/*.md` for memory storage while this backend is active.",
-  "Do not inspect, query, edit, or write OpenClaw's local memory SQLite files such as `/data/.openclaw/memory/main.sqlite`; they are internal cache/index storage, not the Companion Intelligence memory system.",
+  "Do not inspect, query, edit, or write OpenClaw's local memory SQLite files — the `.openclaw/memory` directory wherever OpenClaw's state directory lives (`/data/.openclaw/memory` in the packaged app, `~/.openclaw/memory` or `%USERPROFILE%\\.openclaw\\memory` on your own install); they are internal cache/index storage, not the Companion Intelligence memory system.",
   "Use `memory_search` for topical recall and `memory_get` with `ci-server://profile` for the CI-Server profile block.",
 ].join("\n");
 
@@ -66,13 +66,15 @@ function isBlockedLocalMemoryReference(value) {
   const basename = path.split("/").pop();
   if (basename === "user.md" || basename === "memory.md") return true;
   if (/(^|\/)memory\/[^/]+\.md(?:\s|$|["'])/u.test(path)) return true;
-  if (/(^|\s|["'])\/data\/\.openclaw\/memory(?:\/|\s|$|["'])/u.test(path)) return true;
-  if (/(^|\s|["'])\/data\/\.openclaw\/memory\/[^"'\s]+\.sqlite3?(?:\s|$|["'])/u.test(path)) {
-    return true;
-  }
-  if (/(^|\s|["'])\.openclaw\/memory\/[^"'\s]+\.sqlite3?(?:\s|$|["'])/u.test(path)) {
-    return true;
-  }
+  // OpenClaw's own memory state directory, wherever it lives. The leading `/` in
+  // the prefix class is what makes this fire on an ABSOLUTE path — the packaged
+  // app's `/data/.openclaw/memory`, a native Windows install's
+  // `C:\Users\<u>\.openclaw\memory` (backslashes already normalized above), and
+  // `/home/<u>`, `/Users/<u>`, `~/` alike. Anchoring only to start-of-string,
+  // whitespace or a quote — as this did — matched the container path and
+  // essentially nothing a stock install actually reports, so the guard silently
+  // never fired off-appliance.
+  if (/(^|[\s"'/])\.openclaw\/memory(?:[/\s"']|$)/u.test(path)) return true;
   return false;
 }
 
@@ -493,7 +495,7 @@ function buildPromptSection({ availableTools }) {
     lines.push(
       "Use memory_store for explicit remember/save requests or durable facts the user clearly wants retained.",
       "Do not write memory facts to USER.md, MEMORY.md, or memory/*.md; store them with memory_store so CI-Server can ingest them.",
-      "Do not inspect or write /data/.openclaw/memory/*.sqlite; those files are OpenClaw internals, not the CI memory database.",
+      "Do not inspect or write the *.sqlite files in OpenClaw's own `.openclaw/memory` state directory, wherever it lives on this machine; those are OpenClaw internals, not the CI memory database.",
     );
   }
   if (lines.length > 0) lines.push("");
