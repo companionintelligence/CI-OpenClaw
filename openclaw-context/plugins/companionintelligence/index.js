@@ -99,11 +99,19 @@ function getToolMemoryReferences(event) {
   return strings;
 }
 
+// Locate the workspace AGENTS.md entry. Matched case-insensitively because
+// Windows and macOS filesystems are case-insensitive: `agents.md` on disk is the
+// same file every other consumer sees as AGENTS.md, and an exact-case find would
+// miss it and push a second synthetic entry aliasing the same file.
+function findAgentsFile(bootstrapFiles) {
+  return bootstrapFiles.find((file) => normalizeString(file?.name).toLowerCase() === "agents.md");
+}
+
 // Ensure the bootstrap memory guidance is present in AGENTS.md. Synchronous and
 // idempotent: appends to an existing AGENTS.md (unless already present) or
 // creates one.
 function injectBootstrapGuidance(context) {
-  const agentsFile = context.bootstrapFiles.find((file) => file?.name === "AGENTS.md");
+  const agentsFile = findAgentsFile(context.bootstrapFiles);
   if (agentsFile) {
     const content = typeof agentsFile.content === "string" ? agentsFile.content : "";
     if (!content.includes("Companion Intelligence is the active OpenClaw memory backend.")) {
@@ -155,7 +163,7 @@ function appendUserContextBlock(context, block) {
     "",
   ].join("\n");
 
-  const agentsFile = context.bootstrapFiles.find((file) => file?.name === "AGENTS.md");
+  const agentsFile = findAgentsFile(context.bootstrapFiles);
   if (agentsFile) {
     const content = typeof agentsFile.content === "string" ? agentsFile.content : "";
     if (content.includes(CI_MEMORY_USER_CONTEXT_MARKER)) return;
