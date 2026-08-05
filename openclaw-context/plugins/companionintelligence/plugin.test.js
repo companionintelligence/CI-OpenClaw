@@ -731,6 +731,13 @@ for (const path of [
   // A flag glues the path on with `=` and no space, so the match has to be able to
   // START there as well as end at an operator.
   "sqlite3 --db=.openclaw/memory/main.sqlite --readonly",
+  // OpenClaw's DEFAULT memory backend is lancedb, not sqlite: the shipped CLI's own
+  // default is `~/.openclaw/memory/lancedb`, whose files are `.lance`. Requiring a
+  // sqlite extension left the real store of a stock install completely unguarded —
+  // found by running the guard against this machine's actual paths, not in the suite.
+  "C:\\Users\\hanzl\\.openclaw\\memory\\lancedb\\data.lance",
+  "/home/u/.openclaw/memory/lancedb/data.lance",
+  "~/.openclaw/memory/index.bin",
   "cat ~/.openclaw/memory/main.sqlite|head",
   "sqlite3 /home/u/.openclaw/memory/main.sqlite;rm -f /tmp/x",
   "test -f ~/.openclaw/memory/main.sqlite&&echo yes",
@@ -802,6 +809,12 @@ for (const path of [
   "The database lives at ~/.openclaw/memory/main.sqlite, which is internal.",
   "Internal storage (/home/u/.openclaw/memory/main.sqlite) is off limits.",
   "Documented as `~/.openclaw/memory/main.sqlite` in the README.",
+  // A DOCUMENT that quotes a shell command is not a shell command. This plugin's own
+  // source contains exactly this line, and admitting `|` unconditionally made the
+  // guard refuse to let anything edit it — caught by running the guard over the real
+  // file, never by the suite, because no test passed a multi-line document before.
+  "// them `sqlite3 ~/.openclaw/memory/main.sqlite|head` and `...main.sqlite;rm -f ...`\n// walk straight through a guard\n",
+  "Run `sqlite3 ~/.openclaw/memory/main.sqlite|head` to inspect it.\nThat is internal storage.\n",
 ]) {
   test(`before_tool_call does NOT block unrelated ${path}`, () => {
     const api = register();

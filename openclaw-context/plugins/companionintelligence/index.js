@@ -81,21 +81,32 @@ function isBlockedLocalMemoryReference(value) {
   // EVERY string reachable from a tool's params, `content` included, so dropping
   // it would hard-block any edit whose text merely names the directory in prose —
   // this repo's README, and the plugin's own guidance above, both do.
-  // Shell operators count as a terminator alongside whitespace and quotes. Without
-  // them `sqlite3 ~/.openclaw/memory/main.sqlite|head` and `...main.sqlite;rm -f ...`
-  // walk straight through a guard that exists to read shell commands — the filename
-  // is followed by an operator rather than a space, so the boundary never matches.
-  // Deliberately only the unambiguous ones. `,` `.` and `)` follow a filename in
-  // ordinary prose, and a BACKTICK is how markdown closes an inline code span — this
-  // repo's README writes the path that way, so admitting any of them re-breaks
-  // editing the docs that name it. Caught by the negative tests, not by inspection.
-  // `=` opens the match for the same reason the operators close it: `--db=.openclaw/…`
-  // attaches the path to a flag with no space, and a boundary that only knows about
-  // whitespace never sees the start of it.
-  if (/(^|[\s"'/=])\.openclaw\/memory\/[^"'\s]+\.sqlite3?(?:[\s"'|;&><]|$)/u.test(path)) return true;
-  // The memory directory itself, on any install. Whole-string only: a parameter
-  // that IS this path is a write target, whereas a sentence containing it is not.
-  if (/^(?:[^"'\s]*\/)?\.openclaw\/memory\/?$/u.test(path)) return true;
+  // `=` opens the match for the same reason a space does: `--db=.openclaw/…` attaches
+  // the path to a flag, and a boundary that only knows about whitespace never sees the
+  // start of it.
+  if (/(^|[\s"'/=])\.openclaw\/memory\/[^"'\s]+\.sqlite3?(?:[\s"']|$)/u.test(path)) return true;
+
+  // Shell operators terminate the filename too — but ONLY for a string that could
+  // itself be a command. Without this, `sqlite3 ~/.openclaw/memory/main.sqlite|head`
+  // and `…main.sqlite;rm -f …` walk through a guard whose purpose is reading shell
+  // commands, because the filename is followed by an operator rather than a space.
+  //
+  // The single-line restriction is what stops that widening from firing on prose. A
+  // `content` parameter is a whole file and effectively always multi-line, and any
+  // file may legitimately QUOTE such a command: this very comment does, and admitting
+  // `|` unconditionally made the plugin refuse to let anything edit its own source —
+  // the same over-blocking the `.sqlite` requirement above exists to prevent. A real
+  // command is one line; a document that mentions one is not.
+  if (!path.includes("\n") && /(^|[\s"'/=])\.openclaw\/memory\/[^"'\s]+\.sqlite3?[|;&><]/u.test(path)) {
+    return true;
+  }
+
+  // Any path UNDER the memory directory, whole-string only. The `.sqlite` rules above
+  // miss OpenClaw's default store, which is lancedb: `~/.openclaw/memory/lancedb/…`
+  // holds `.lance` files, not sqlite ones, so requiring that extension left the real
+  // memory backend of a stock install unguarded. Whole-string keeps this safe against
+  // prose, since a sentence mentioning the path is never equal to it.
+  if (/^(?:[^"'\s]*\/)?\.openclaw\/memory(?:\/[^"'\s]*)?$/u.test(path)) return true;
   return false;
 }
 
