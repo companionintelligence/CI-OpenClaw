@@ -301,6 +301,26 @@ await test("agent:bootstrap appends to an existing lowercase agents.md rather th
     assert.ok(existing.content.includes("<!-- ci-memory:user-context -->"), "user context appended too");
   }));
 
+// On Linux the two names ARE two files and can both exist. The case-insensitive
+// fallback above must not become "whichever happens to be first in the array", or the
+// guidance quietly moves to the file the rest of the ecosystem does not read.
+await test("agent:bootstrap prefers an exact AGENTS.md over a lowercase sibling", () =>
+  withCiServer(contextServer("# User Context"), async (port) => {
+    const { api, regHooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kg" });
+    plugin.register(api);
+    const lower = { name: "agents.md", path: "agents.md", missing: false, content: "# lower\n" };
+    const exact = { name: "AGENTS.md", path: "AGENTS.md", missing: false, content: "# exact\n" };
+    // Lowercase listed FIRST, so array order alone would pick the wrong one.
+    const context = { cfg: CI_MEMORY_ACTIVE_CFG, bootstrapFiles: [lower, exact] };
+    await regHooks["agent:bootstrap"]({ context });
+    assert.equal(context.bootstrapFiles.length, 2, "neither entry duplicated");
+    assert.ok(
+      exact.content.includes("Companion Intelligence is the active OpenClaw memory backend."),
+      "guidance went to AGENTS.md",
+    );
+    assert.equal(lower.content, "# lower\n", "the lowercase sibling is left alone");
+  }));
+
 await test("agent:bootstrap is a no-op when CI memory is not the active backend", () =>
   withCiServer(contextServer("# User Context"), async (port, cap) => {
     const { api, regHooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kd" });

@@ -99,12 +99,22 @@ function getToolMemoryReferences(event) {
   return strings;
 }
 
-// Locate the workspace AGENTS.md entry. Matched case-insensitively because
-// Windows and macOS filesystems are case-insensitive: `agents.md` on disk is the
-// same file every other consumer sees as AGENTS.md, and an exact-case find would
-// miss it and push a second synthetic entry aliasing the same file.
+// Locate the workspace AGENTS.md entry.
+//
+// Exact case first, then case-insensitively. The fallback is what Windows and macOS
+// need: their filesystems are case-insensitive, so `agents.md` on disk IS the file
+// every other consumer calls AGENTS.md, and an exact-only find would miss it and push
+// a second synthetic entry aliasing the same file — leaving the user's real content
+// without the guidance.
+//
+// The exact pass first is what keeps that off Linux, where the two are genuinely
+// different files and can both exist. Preferring whichever merely came first in the
+// array would have quietly moved the write to the other one.
 function findAgentsFile(bootstrapFiles) {
-  return bootstrapFiles.find((file) => normalizeString(file?.name).toLowerCase() === "agents.md");
+  return (
+    bootstrapFiles.find((file) => normalizeString(file?.name) === "AGENTS.md") ??
+    bootstrapFiles.find((file) => normalizeString(file?.name).toLowerCase() === "agents.md")
+  );
 }
 
 // Ensure the bootstrap memory guidance is present in AGENTS.md. Synchronous and
