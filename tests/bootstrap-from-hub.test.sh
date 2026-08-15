@@ -190,6 +190,21 @@ assert_contains "CI_LLM_NUM_CTX overwritten from Hub via fallback" "CI_LLM_NUM_C
 assert_not_contains "stale CI_LLM_NUM_CTX dropped" "CI_LLM_NUM_CTX=8192" "${data_dir}/.env"
 rm -rf "${data_dir}" "${fixture}"
 
+# ─── Test 10: CI_CLOUD_* keys persist via hardcoded fallback (no header) ─────
+echo "test: CI_CLOUD_* keys are in the hardcoded fallback and are written from Hub"
+data_dir="$(setup_data)"
+printf 'CI_CLOUD_OPENAI_API_KEY=stale-oai\nANTHROPIC_API_KEY=user-secret\n' > "${data_dir}/.env"
+fixture="$(write_fixture $'OPENAI_API_BASE=http://hub/v1\nCI_CLOUD_OPENAI_API_KEY=sk-oai\nCI_CLOUD_OPENAI_BASE_URL=https://api.openai.com/v1\nCI_CLOUD_ANTHROPIC_API_KEY=sk-ant\n')"
+OPENCLAW_DATA_DIR="${data_dir}" \
+BOOTSTRAP_FIXTURE_FILE="${fixture}" \
+  "${SCRIPT}" >/dev/null 2>&1
+assert_contains "CI_CLOUD_OPENAI_API_KEY overwritten from Hub" "CI_CLOUD_OPENAI_API_KEY=sk-oai" "${data_dir}/.env"
+assert_contains "CI_CLOUD_OPENAI_BASE_URL written" "CI_CLOUD_OPENAI_BASE_URL=https://api.openai.com/v1" "${data_dir}/.env"
+assert_contains "CI_CLOUD_ANTHROPIC_API_KEY written" "CI_CLOUD_ANTHROPIC_API_KEY=sk-ant" "${data_dir}/.env"
+assert_contains "user ANTHROPIC_API_KEY preserved (alias not in fallback)" "ANTHROPIC_API_KEY=user-secret" "${data_dir}/.env"
+assert_not_contains "stale cloud OpenAI key dropped" "CI_CLOUD_OPENAI_API_KEY=stale-oai" "${data_dir}/.env"
+rm -rf "${data_dir}" "${fixture}"
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 echo
 echo "Results: ${PASS} passed, ${FAIL} failed"
