@@ -55,6 +55,40 @@ const HOOKS_WAKE_TOKEN_ENV_REF = "${HUB_WAKE_SECRET}";
 // token left behind by a prior install whose data dir survived an incomplete
 // uninstall. For these keys the live container env wins, so an updated Hub
 // config propagates on restart instead of the gateway re-reading the old token.
+// Hub Settings → AI cloud tokens. Additive — never replace models.providers.ci-hub.
+// Do not persist `hubManaged` on these entries: OpenClaw's schema rejects unknown
+// keys and quarantines the whole file. Hub owns these four provider ids.
+const HUB_CLOUD_PROVIDER_SPECS = [
+  {
+    id: "openai",
+    api: "openai-completions",
+    key: "CI_CLOUD_OPENAI_API_KEY",
+    base: "CI_CLOUD_OPENAI_BASE_URL",
+    model: "CI_CLOUD_OPENAI_MODEL",
+  },
+  {
+    id: "anthropic",
+    api: "anthropic-messages",
+    key: "CI_CLOUD_ANTHROPIC_API_KEY",
+    base: "CI_CLOUD_ANTHROPIC_BASE_URL",
+    model: "CI_CLOUD_ANTHROPIC_MODEL",
+  },
+  {
+    id: "google",
+    api: "openai-completions",
+    key: "CI_CLOUD_GOOGLE_API_KEY",
+    base: "CI_CLOUD_GOOGLE_BASE_URL",
+    model: "CI_CLOUD_GOOGLE_MODEL",
+  },
+  {
+    id: "github-copilot",
+    api: "openai-completions",
+    key: "CI_CLOUD_GITHUB_COPILOT_API_KEY",
+    base: "CI_CLOUD_GITHUB_COPILOT_BASE_URL",
+    model: "CI_CLOUD_GITHUB_COPILOT_MODEL",
+  },
+];
+
 const HUB_AUTHORITATIVE_ENV_KEYS = [
   "CI_SERVER_URL",
   "CI_SERVER_TOKEN",
@@ -844,6 +878,65 @@ function createConfigReconciler({
     );
   }
 
+  function resolveEnvValue(env, key) {
+    return String(env[key] || containerEnv[key] || "").trim();
+  }
+
+  /**
+   * Register every Hub-saved cloud provider alongside ci-hub. Local Ollama/vLLM
+   * stays models.providers.ci-hub. Schema-safe fields only — no hubManaged.
+   */
+  function syncCloudProviders(config, env, providers) {
+    let changed = false;
+    for (const spec of HUB_CLOUD_PROVIDER_SPECS) {
+      const apiKey = resolveEnvValue(env, spec.key);
+      const current = isPlainObject(providers.node[spec.id])
+        ? providers.node[spec.id]
+        : null;
+      if (!apiKey) {
+        if (current) {
+          delete providers.node[spec.id];
+          changed = true;
+          log.log(
+            `Patched config: removed ${spec.id} cloud provider (Hub key absent)`,
+          );
+        }
+        continue;
+      }
+      const baseUrl = resolveEnvValue(env, spec.base);
+      const modelId = resolveEnvValue(env, spec.model);
+      const models = modelId
+        ? [
+            {
+              id: modelId,
+              name: modelId,
+              input: ["text"],
+              contextWindow: 200000,
+              maxTokens: 8192,
+              compat: { supportsTools: true },
+            },
+          ]
+        : [];
+      const next = {
+        apiKey,
+        ...(baseUrl ? { baseUrl } : {}),
+        api: spec.api,
+        models,
+      };
+      const comparable = current
+        ? Object.fromEntries(
+            Object.entries(current).filter(([key]) => key !== "hubManaged"),
+          )
+        : null;
+      if (JSON.stringify(comparable) !== JSON.stringify(next)) {
+        providers.node[spec.id] = next;
+        changed = true;
+        log.log(`Patched config: synced ${spec.id} cloud provider`);
+      }
+    }
+    return changed;
+  }
+
   // Hardware-aware context window injected by the Hub (CI_LLM_NUM_CTX). Caps both
   // the agent's token budget and the native Ollama num_ctx so OpenClaw doesn't pack
   // to Ollama's oversized memory-based default (e.g. 262144 on unified-memory APUs).
@@ -1386,6 +1479,10 @@ function createConfigReconciler({
       );
     }
 
+    if (syncCloudProviders(config, env, providers)) {
+      changed = true;
+    }
+
     if (defaultModel && !config.agents?.defaults?.model?.primary) {
       const model = ensureRecordPathTracked(config, ["agents", "defaults", "model"]);
       changed = model.replaced || changed;
@@ -1478,6 +1575,7 @@ module.exports = {
   DEFAULT_GATEWAY_PORT,
   MEMORY_EMBEDDING_PROVIDER,
   HUB_AUTHORITATIVE_ENV_KEYS,
+  HUB_CLOUD_PROVIDER_SPECS,
   CI_PLUGIN_ID,
   CI_MEMORY_PLUGIN_ID,
   CI_HUB_PLUGIN_ID,

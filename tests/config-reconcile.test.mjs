@@ -1491,6 +1491,88 @@ describe("reconcileConfig (end to end)", () => {
       assertNoIndexKeys(readCfg(dataDir));
     });
   });
+
+  test("registers every CI_CLOUD_* provider alongside ci-hub and does not flip the default", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: {},
+        env: {
+          OLLAMA_HOST: baseUrl,
+          DEFAULT_MODEL: "llama3.1:8b",
+          CI_CLOUD_OPENAI_API_KEY: "sk-oai",
+          CI_CLOUD_OPENAI_BASE_URL: "https://api.openai.com/v1",
+          CI_CLOUD_OPENAI_MODEL: "gpt-4o",
+          CI_CLOUD_ANTHROPIC_API_KEY: "sk-ant",
+          CI_CLOUD_ANTHROPIC_BASE_URL: "https://api.anthropic.com/v1",
+          CI_CLOUD_ANTHROPIC_MODEL: "claude-opus-4",
+          CI_CLOUD_GOOGLE_API_KEY: "g-key",
+          CI_CLOUD_GOOGLE_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai",
+          CI_CLOUD_GOOGLE_MODEL: "gemini-2.5-pro",
+          CI_CLOUD_GITHUB_COPILOT_API_KEY: "gh-key",
+          CI_CLOUD_GITHUB_COPILOT_BASE_URL: "https://api.githubcopilot.com",
+          CI_CLOUD_GITHUB_COPILOT_MODEL: "gpt-4o",
+        },
+      });
+      const { cfg, patches } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+
+      const config = readCfg(dataDir);
+      assert.strictEqual(config.models.providers["ci-hub"].api, "ollama");
+      assert.strictEqual(config.agents.defaults.model.primary, "ci-hub/llama3.1:8b");
+      assert.strictEqual(config.models.providers.openai.apiKey, "sk-oai");
+      assert.strictEqual(config.models.providers.openai.api, "openai-completions");
+      assert.strictEqual(config.models.providers.anthropic.api, "anthropic-messages");
+      assert.strictEqual(config.models.providers.google.apiKey, "g-key");
+      assert.strictEqual(config.models.providers["github-copilot"].apiKey, "gh-key");
+      for (const id of ["openai", "anthropic", "google", "github-copilot"]) {
+        assert.ok(
+          !("hubManaged" in config.models.providers[id]),
+          `${id} must not carry hubManaged (schema-invalid)`,
+        );
+      }
+      assert.ok(patches().some((line) => line.includes("synced openai cloud provider")));
+
+      const first = JSON.stringify(config);
+      await cfg.reconcileConfig();
+      assert.strictEqual(JSON.stringify(readCfg(dataDir)), first, "cloud provider sync is idempotent");
+    });
+  });
+
+  test("removes a cloud provider when its Hub key is gone and strips leftover hubManaged", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: {
+          models: {
+            providers: {
+              openai: {
+                hubManaged: true,
+                apiKey: "stale",
+                api: "openai-completions",
+                models: [],
+              },
+              anthropic: {
+                apiKey: "sk-ant",
+                api: "anthropic-messages",
+                models: [],
+              },
+            },
+          },
+        },
+        env: {
+          OLLAMA_HOST: baseUrl,
+          CI_CLOUD_ANTHROPIC_API_KEY: "sk-ant",
+        },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+
+      const providers = readCfg(dataDir).models.providers;
+      assert.strictEqual(providers.openai, undefined);
+      assert.strictEqual(providers.anthropic.apiKey, "sk-ant");
+      assert.ok(!("hubManaged" in providers.anthropic));
+      assert.strictEqual(providers["ci-hub"].api, "ollama");
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
