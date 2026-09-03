@@ -183,7 +183,7 @@ sentry issue list companion-intelligence/ci-openclaw --query "is:unresolved"
 # .env — a source checkout has no DSN, so set one to report from local runs
 SENTRY_DSN=https://<key>@o<org>.ingest.us.sentry.io/<project-id>
 SENTRY_ENV=production
-CI_OPENCLAW_VERSION=2026.7.1-2
+CI_OPENCLAW_VERSION=2026.9.1
 ```
 
 `docker-compose.yml` passes `SENTRY_DSN`, `SENTRY_ENV`, `CI_OPENCLAW_VERSION`,

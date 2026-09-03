@@ -11,8 +11,10 @@ ENV HOME=/data
 WORKDIR /data
 RUN mkdir -p /data && chown node:node /data
 
-# Install OpenClaw globally from npm
-RUN npm install -g openclaw@2026.7.1-2
+# Install OpenClaw globally from npm.
+# Keep @openclaw/duckduckgo-plugin on the same version when bumping this pin —
+# it is unpacked into /app/openclaw-context/plugins/duckduckgo after COPY below.
+RUN npm install -g openclaw@2026.9.1
 
 # Redirect future npm global installs to persistent volume
 ENV NPM_CONFIG_PREFIX=/data/.npm-global
@@ -81,6 +83,15 @@ COPY --chown=node:node logo.webp /app/logo.webp
 COPY --chown=node:node assets /app/assets
 COPY --chown=node:node bootstrap-from-hub.sh bootstrap-ci-memory.sh bootstrap-ci-hub-mcp.sh entrypoint.sh /app/
 COPY openclaw-context /app/openclaw-context
+# Vendor the keyless DuckDuckGo search plugin into the image (not into /data) so
+# upgrades and existing volumes still get free web_search via reconcile. Version
+# must match the openclaw@ pin above.
+RUN sudo mkdir -p /app/openclaw-context/plugins/duckduckgo \
+  && npm pack @openclaw/duckduckgo-plugin@2026.9.1 --pack-destination /tmp \
+  && sudo tar -xzf /tmp/openclaw-duckduckgo-plugin-2026.9.1.tgz \
+       -C /app/openclaw-context/plugins/duckduckgo --strip-components=1 \
+  && sudo chown -R node:node /app/openclaw-context/plugins/duckduckgo \
+  && rm -f /tmp/openclaw-duckduckgo-plugin-2026.9.1.tgz
 RUN sudo chmod +x /app/bootstrap-from-hub.sh /app/bootstrap-ci-memory.sh /app/bootstrap-ci-hub-mcp.sh /app/entrypoint.sh
 
 # Move home to skeleton

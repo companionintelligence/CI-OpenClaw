@@ -45,6 +45,8 @@ export const PLUGIN_PATHS = {
   ciRuntime: path.join(REPO, "openclaw-context", "plugins", "ci-runtime"),
   ciMemory: path.join(REPO, "openclaw-context", "plugins", "companionintelligence"),
   ciHub: path.join(REPO, "openclaw-context", "plugins", "ci-hub"),
+  // Placeholder dir in-repo; image build unpacks @openclaw/duckduckgo-plugin here.
+  duckduckgo: path.join(REPO, "openclaw-context", "plugins", "duckduckgo"),
 };
 
 /**

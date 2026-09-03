@@ -29,7 +29,11 @@ Homebrew state is persisted by the app packaging. Prefer user-space installs and
 
 ## Browser Automation
 
-Chromium is installed in the app image for headless browser tasks. Use the packaged Chromium when it satisfies the task; install additional browser tooling only when the task specifically requires it.
+Chromium is installed in the app image for headless browser tasks. The setup server enables the OpenClaw `browser` tool by default and points it at `/usr/bin/chromium` with `headless` and `noSandbox` for the container.
+
+Free web search is also enabled by default via the baked-in DuckDuckGo plugin (`tools.web.search.provider=duckduckgo`). Page reading uses OpenClaw's built-in `web_fetch` (no API key). Onboarding skips the interactive search wizard; reconcile owns these defaults.
+
+Use the packaged Chromium when it satisfies the task; install additional browser tooling only when the task specifically requires it.
 
 ## Networking
 

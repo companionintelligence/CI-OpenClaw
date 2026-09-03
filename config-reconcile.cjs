@@ -33,12 +33,16 @@ const DEFAULT_GATEWAY_PORT = 18790;
 const CI_PLUGIN_ID = "ci-runtime";
 const CI_MEMORY_PLUGIN_ID = "companionintelligence";
 const CI_HUB_PLUGIN_ID = "ci-hub";
+const DUCKDUCKGO_PLUGIN_ID = "duckduckgo";
+const BROWSER_PLUGIN_ID = "browser";
+const CHROMIUM_EXECUTABLE_PATH = "/usr/bin/chromium";
 
 /** Where the vendored plugins live inside the built image (see Dockerfile). */
 const DEFAULT_PLUGIN_PATHS = {
   ciRuntime: "/app/openclaw-context/plugins/ci-runtime",
   ciMemory: "/app/openclaw-context/plugins/companionintelligence",
   ciHub: "/app/openclaw-context/plugins/ci-hub",
+  duckduckgo: "/app/openclaw-context/plugins/duckduckgo",
 };
 
 // Treats the embeddings endpoint as an OpenAI-compatible /v1 server (which Ollama
@@ -311,6 +315,8 @@ function createConfigReconciler({
   const CI_PLUGIN_PATH = pluginPaths.ciRuntime;
   const CI_MEMORY_PLUGIN_PATH = pluginPaths.ciMemory;
   const CI_HUB_PLUGIN_PATH = pluginPaths.ciHub;
+  const DUCKDUCKGO_PLUGIN_PATH =
+    pluginPaths.duckduckgo || DEFAULT_PLUGIN_PATHS.duckduckgo;
 
   // When we last wrote openclaw.json. warnIfConfigClobbered uses this as the cutoff
   // so it catches a quarantine by ANY openclaw invocation after our write, not just
@@ -643,30 +649,39 @@ function createConfigReconciler({
     return changed;
   }
 
-  function ensureMemoryConversationAccess(config) {
-    // The CI memory plugin's agent_end turn-sync is a conversation hook; a
-    // path-loaded (non-bundled) plugin only receives it when its entry opts in
-    // via hooks.allowConversationAccess.
+  /**
+   * Opt a path-loaded (non-bundled) plugin into conversation hooks.
+   *
+   * OpenClaw 2.0+ blocks hooks like `before_prompt_build` / `agent_end` for
+   * non-bundled plugins unless `plugins.entries.<id>.hooks.allowConversationAccess`
+   * is true. `plugins.allow` only gates load — it does not grant this.
+   */
+  function ensurePluginConversationAccess(config, pluginId, label) {
     const { node: entries, replaced } = ensureRecordPathTracked(config, [
       "plugins",
       "entries",
     ]);
     let changed = replaced;
 
-    const entry = isPlainObject(entries[CI_MEMORY_PLUGIN_ID])
-      ? entries[CI_MEMORY_PLUGIN_ID]
-      : {};
+    const entry = isPlainObject(entries[pluginId]) ? entries[pluginId] : {};
     const hooks = isPlainObject(entry.hooks) ? entry.hooks : {};
     if (hooks.allowConversationAccess !== true) {
       hooks.allowConversationAccess = true;
       entry.hooks = hooks;
-      entries[CI_MEMORY_PLUGIN_ID] = entry;
+      entries[pluginId] = entry;
       changed = true;
-      log.log(
-        "Patched config: enabled conversation access for CI memory turn-sync",
-      );
+      log.log(`Patched config: enabled conversation access for ${label}`);
     }
     return changed;
+  }
+
+  function ensureMemoryConversationAccess(config) {
+    // The CI memory plugin's agent_end turn-sync is a conversation hook.
+    return ensurePluginConversationAccess(
+      config,
+      CI_MEMORY_PLUGIN_ID,
+      "CI memory turn-sync",
+    );
   }
 
   /**
@@ -752,6 +767,137 @@ function createConfigReconciler({
       );
     }
     return true;
+  }
+
+  /**
+   * Appliance FUX: free web search + page reading without the onboarding search wizard.
+   *
+   * CI setup intentionally passes `--skip-search` so QuickStart stays API-key-only.
+   * OpenClaw never auto-selects key-free search providers, so we:
+   *   1. Path-load the image-baked DuckDuckGo plugin
+   *   2. Set tools.web.search.provider=duckduckgo when unset (do not clobber Brave/etc.)
+   *   3. Enable the bundled browser tool (outside the coding profile by default) and
+   *      point it at the image Chromium with Docker-safe headless/noSandbox flags
+   *
+   * web_fetch stays on OpenClaw's built-in keyless reader; we do not force Firecrawl.
+   */
+  function ensureWebAccessDefaults(config) {
+    let changed = false;
+
+    changed =
+      ensureOpenClawPlugin(
+        config,
+        DUCKDUCKGO_PLUGIN_ID,
+        DUCKDUCKGO_PLUGIN_PATH,
+        "DuckDuckGo search",
+      ) || changed;
+
+    const search = ensureRecordPathTracked(config, ["tools", "web", "search"]);
+    changed = search.replaced || changed;
+    if (search.node.enabled !== true) {
+      search.node.enabled = true;
+      changed = true;
+      log.log("Patched config: enabled tools.web.search");
+    }
+    const provider = search.node.provider;
+    if (provider == null || provider === "") {
+      search.node.provider = DUCKDUCKGO_PLUGIN_ID;
+      changed = true;
+      log.log("Patched config: set tools.web.search.provider=duckduckgo (free default)");
+    }
+
+    const fetch = ensureRecordPathTracked(config, ["tools", "web", "fetch"]);
+    changed = fetch.replaced || changed;
+    if (fetch.node.enabled !== true) {
+      fetch.node.enabled = true;
+      changed = true;
+      log.log("Patched config: enabled tools.web.fetch");
+    }
+
+    const { node: tools, replaced: toolsReplaced } = ensureRecordPathTracked(
+      config,
+      ["tools"],
+    );
+    changed = toolsReplaced || changed;
+    if (!Array.isArray(tools.alsoAllow)) {
+      tools.alsoAllow = [];
+      changed = true;
+    }
+    if (!tools.alsoAllow.includes("browser")) {
+      tools.alsoAllow.push("browser");
+      changed = true;
+      log.log("Patched config: allowed browser tool via tools.alsoAllow");
+    }
+    // tools.allow is exclusive — only extend an allowlist the operator already keeps.
+    if (Array.isArray(tools.allow) && !tools.allow.includes("browser")) {
+      tools.allow.push("browser");
+      changed = true;
+      log.log("Patched config: added browser to existing tools.allow");
+    }
+
+    const browser = ensureRecordPathTracked(config, ["browser"]);
+    changed = browser.replaced || changed;
+    if (browser.node.enabled !== true) {
+      browser.node.enabled = true;
+      changed = true;
+      log.log("Patched config: enabled browser");
+    }
+    if (
+      browser.node.executablePath == null ||
+      browser.node.executablePath === ""
+    ) {
+      browser.node.executablePath = CHROMIUM_EXECUTABLE_PATH;
+      changed = true;
+      log.log(`Patched config: browser.executablePath=${CHROMIUM_EXECUTABLE_PATH}`);
+    }
+    if (browser.node.headless !== true) {
+      browser.node.headless = true;
+      changed = true;
+      log.log("Patched config: browser.headless=true");
+    }
+    if (browser.node.noSandbox !== true) {
+      browser.node.noSandbox = true;
+      changed = true;
+      log.log("Patched config: browser.noSandbox=true (container)");
+    }
+
+    const { node: plugins, replaced: pluginsReplaced } = ensureRecordPathTracked(
+      config,
+      ["plugins"],
+    );
+    changed = pluginsReplaced || changed;
+    if (plugins.enabled !== true) {
+      plugins.enabled = true;
+      changed = true;
+      log.log("Patched config: enabled plugins");
+    }
+
+    const { node: entries, replaced: entriesReplaced } = ensureRecordPathTracked(
+      config,
+      ["plugins", "entries"],
+    );
+    changed = entriesReplaced || changed;
+    const browserEntry = isPlainObject(entries[BROWSER_PLUGIN_ID])
+      ? entries[BROWSER_PLUGIN_ID]
+      : {};
+    if (browserEntry.enabled !== true) {
+      browserEntry.enabled = true;
+      entries[BROWSER_PLUGIN_ID] = browserEntry;
+      changed = true;
+      log.log("Patched config: enabled browser plugin");
+    }
+
+    if (
+      Array.isArray(plugins.allow) &&
+      plugins.allow.length > 0 &&
+      !plugins.allow.includes(BROWSER_PLUGIN_ID)
+    ) {
+      plugins.allow.push(BROWSER_PLUGIN_ID);
+      changed = true;
+      log.log("Patched config: added browser plugin to allow list");
+    }
+
+    return changed;
   }
 
   /**
@@ -990,11 +1136,11 @@ function createConfigReconciler({
   }
 
   /**
-   * Build the ci-hub model catalog from what Ollama actually has installed.
+   * Build the Ollama model catalog from what Ollama actually has installed.
    *
-   * Prepends an "auto" alias pointing at DEFAULT_MODEL (or the first model, if the
-   * Hub's default is not installed) so the agent always has a stable model id to
-   * select, and inherits that target's capabilities and context cap.
+   * Returns every non-embedding tag (for models.providers.ollama) and prepends an
+   * "auto" alias pointing at DEFAULT_MODEL (or the first model) so ci-hub can keep a
+   * stable Hub-default selection without listing the whole local fleet.
    */
   async function discoverOllamaModels(ollamaBaseUrl, defaultModel) {
     const numCtx = resolveHubNumCtx();
@@ -1249,10 +1395,17 @@ function createConfigReconciler({
 
     // Enable CI-managed context through OpenClaw's supported plugin surface.
     // The runtime plugin also ships a `ci` skill, so one load path covers both the
-    // always-on runtime context and deeper on-demand guidance.
+    // always-on runtime context and deeper on-demand guidance. OpenClaw 2.0+ also
+    // requires conversation-hook opt-in for path-loaded plugins' before_prompt_build.
     changed =
       ensureOpenClawPlugin(config, CI_PLUGIN_ID, CI_PLUGIN_PATH, "CI runtime") ||
       changed;
+    changed =
+      ensurePluginConversationAccess(
+        config,
+        CI_PLUGIN_ID,
+        "CI runtime context",
+      ) || changed;
 
     // Install the Companion Intelligence memory plugin as a selectable active
     // memory backend. Keep the entry disabled until selected so OpenClaw does not
@@ -1304,6 +1457,9 @@ function createConfigReconciler({
     // worked and is being retired (CI-Hub#897).
     changed = ensureHooksWake(config, env) || changed;
 
+    // Free web search + Chromium browser for appliance FUX (replaces --skip-search).
+    changed = ensureWebAccessDefaults(config) || changed;
+
     // Enable the CI-Hub companion plugin (wake endpoint, app-event SSE) when Hub
     // injects MCP credentials. Tool access itself comes from the native
     // mcp.servers.ci-hub entry above, not this plugin.
@@ -1343,9 +1499,12 @@ function createConfigReconciler({
       log.log("Patched config: set gateway.mode to local");
     }
 
-    // Mirror the Hub-managed Ollama defaults into OpenClaw's current config shape.
+    // Mirror Hub-managed inference into OpenClaw:
+    //   - models.providers.ci-hub  → Hub default / "auto" only (stable appliance primary)
+    //   - models.providers.ollama  → full local tag catalog when Ollama is reachable
+    // Both use api:"ollama" against the same host; model refs differ (ci-hub/X vs ollama/X).
     // The newer gateway does not switch providers just because OPENAI_API_* is present;
-    // it needs a concrete provider entry plus an agent default model selection.
+    // it needs concrete provider entries plus an agent default model selection.
     const ollamaBaseUrl = resolveOllamaBaseUrl(env);
     const inferenceApiKey = resolveInferenceApiKey(env);
     const defaultModel = env.DEFAULT_MODEL || containerEnv.DEFAULT_MODEL || "";
@@ -1360,34 +1519,38 @@ function createConfigReconciler({
     const providers = ensureRecordPathTracked(config, ["models", "providers"]);
     changed = providers.replaced || changed;
 
-    // Guard the provider entry itself before spreading it. A hand-edited string here
+    // Guard provider entries before spreading. A hand-edited string
     // ("ci-hub": "http://host:11434") is truthy, so `|| {}` keeps it, and `{...string}`
     // spreads into {"0":"h","1":"t",...} — index-keyed junk that is schema-invalid and
     // gets the ENTIRE openclaw.json quarantined on the next boot.
-    const currentHubProvider = isPlainObject(providers.node["ci-hub"])
-      ? providers.node["ci-hub"]
-      : {};
-    const nextHubProvider = {
-      ...currentHubProvider,
-      baseUrl: ollamaBaseUrl,
-      apiKey: inferenceApiKey,
-      api: "ollama",
-      models: Array.isArray(currentHubProvider.models)
-        ? currentHubProvider.models
-        : [],
-    };
-    if (
-      currentHubProvider.baseUrl !== nextHubProvider.baseUrl ||
-      currentHubProvider.apiKey !== nextHubProvider.apiKey ||
-      currentHubProvider.api !== nextHubProvider.api ||
-      !Array.isArray(currentHubProvider.models)
-    ) {
-      providers.node["ci-hub"] = nextHubProvider;
-      changed = true;
-      log.log(
-        `Patched config: synced ci-hub Ollama provider (${ollamaBaseUrl})`,
-      );
+    function syncOllamaApiProvider(providerId, label) {
+      const current = isPlainObject(providers.node[providerId])
+        ? providers.node[providerId]
+        : {};
+      const next = {
+        ...current,
+        baseUrl: ollamaBaseUrl,
+        apiKey: inferenceApiKey,
+        api: "ollama",
+        models: Array.isArray(current.models) ? current.models : [],
+      };
+      if (
+        current.baseUrl !== next.baseUrl ||
+        current.apiKey !== next.apiKey ||
+        current.api !== next.api ||
+        !Array.isArray(current.models)
+      ) {
+        providers.node[providerId] = next;
+        changed = true;
+        log.log(
+          `Patched config: synced ${label} Ollama provider (${ollamaBaseUrl})`,
+        );
+      }
+      return next;
     }
+
+    const nextHubProvider = syncOllamaApiProvider("ci-hub", "ci-hub");
+    const nextOllamaProvider = syncOllamaApiProvider("ollama", "ollama");
 
     try {
       const {
@@ -1397,17 +1560,41 @@ function createConfigReconciler({
       } = await discoverOllamaModels(ollamaBaseUrl, defaultModel);
 
       if (discoveredModels.length > 0) {
+        const hubTargetId = defaultModelAvailable || firstModelId;
+        const hubModels = discoveredModels.filter(
+          (model) =>
+            model.id === "auto" ||
+            (hubTargetId != null && model.id === hubTargetId),
+        );
+        const ollamaModels = discoveredModels.filter(
+          (model) => model.id !== "auto",
+        );
+
         if (
-          JSON.stringify(currentHubProvider.models || []) !==
-          JSON.stringify(discoveredModels)
+          JSON.stringify(nextHubProvider.models || []) !==
+          JSON.stringify(hubModels)
         ) {
           providers.node["ci-hub"] = {
             ...nextHubProvider,
-            models: discoveredModels,
+            models: hubModels,
           };
           changed = true;
           log.log(
-            `Patched config: synced ${discoveredModels.length} ci-hub Ollama model(s)`,
+            `Patched config: synced ${hubModels.length} ci-hub Hub default model(s)`,
+          );
+        }
+
+        if (
+          JSON.stringify(nextOllamaProvider.models || []) !==
+          JSON.stringify(ollamaModels)
+        ) {
+          providers.node.ollama = {
+            ...nextOllamaProvider,
+            models: ollamaModels,
+          };
+          changed = true;
+          log.log(
+            `Patched config: synced ${ollamaModels.length} ollama local model(s)`,
           );
         }
 
@@ -1415,17 +1602,22 @@ function createConfigReconciler({
         changed = defaults.replaced || changed;
 
         // Guard before enumerating: Object.entries("abc") yields index keys, which
-        // would survive the ci-hub/ filter straight into the merged record.
+        // would survive the ci-hub/ / ollama/ filter straight into the merged record.
         const existingModels = isPlainObject(defaults.node.models)
           ? defaults.node.models
           : {};
         const mergedModels = Object.fromEntries(
           Object.entries(existingModels).filter(
-            ([key]) => !key.startsWith("ci-hub/"),
+            ([key]) =>
+              !key.startsWith("ci-hub/") && !key.startsWith("ollama/"),
           ),
         );
-        for (const model of discoveredModels) {
+        for (const model of hubModels) {
           const key = `ci-hub/${model.id}`;
+          mergedModels[key] = existingModels[key] || {};
+        }
+        for (const model of ollamaModels) {
+          const key = `ollama/${model.id}`;
           mergedModels[key] = existingModels[key] || {};
         }
         if (
@@ -1433,7 +1625,7 @@ function createConfigReconciler({
         ) {
           defaults.node.models = mergedModels;
           changed = true;
-          log.log("Patched config: merged ci-hub model options");
+          log.log("Patched config: merged ci-hub + ollama model options");
         }
 
         const existingPrimary = isPlainObject(defaults.node.model)
@@ -1445,12 +1637,15 @@ function createConfigReconciler({
           existingPrimary.startsWith("ci-hub/")
         ) {
           const currentId = existingPrimary.slice("ci-hub/".length);
-          if (discoveredModels.some((model) => model.id === currentId)) {
+          if (hubModels.some((model) => model.id === currentId)) {
             primaryId = currentId;
           }
         }
         if (!primaryId) {
-          primaryId = defaultModelAvailable || firstModelId;
+          // Prefer Hub Auto when present — stable across Hub default model changes.
+          primaryId = hubModels.some((model) => model.id === "auto")
+            ? "auto"
+            : defaultModelAvailable || firstModelId;
         }
         if (primaryId) {
           // Record-guard the node we assign .primary into: on a scalar the assignment
@@ -1468,12 +1663,12 @@ function createConfigReconciler({
         }
       } else {
         log.warn(
-          `No Ollama chat models discovered at ${ollamaBaseUrl}; preserving existing ci-hub model catalog`,
+          `No Ollama chat models discovered at ${ollamaBaseUrl}; preserving existing ci-hub and ollama model catalogs`,
         );
       }
     } catch (error) {
       log.warn(
-        `Failed to sync ci-hub Ollama model catalog: ${
+        `Failed to sync Ollama model catalogs: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
@@ -1551,8 +1746,10 @@ function createConfigReconciler({
     ensureHooksWake,
     disableBundledSessionMemoryHook,
     ensureMemoryConversationAccess,
+    ensurePluginConversationAccess,
     ensureMemoryStoreToolAllowed,
     ensureMemorySearchEmbeddings,
+    ensureWebAccessDefaults,
     ensureOpenClawPlugin,
     // resolvers + discovery
     resolveOllamaBaseUrl,
@@ -1579,6 +1776,9 @@ module.exports = {
   CI_PLUGIN_ID,
   CI_MEMORY_PLUGIN_ID,
   CI_HUB_PLUGIN_ID,
+  DUCKDUCKGO_PLUGIN_ID,
+  BROWSER_PLUGIN_ID,
+  CHROMIUM_EXECUTABLE_PATH,
   HOOKS_WAKE_TOKEN_ENV_REF,
   // Stateless helpers: no I/O, no logging, no injected state.
   isPlainObject,
