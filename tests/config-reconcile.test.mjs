@@ -1259,18 +1259,22 @@ describe("reconcileConfig (end to end)", () => {
       const { cfg } = makeReconciler(dataDir);
       await cfg.reconcileConfig();
 
-      const models = readCfg(dataDir).models.providers["ci-hub"].models;
-      assert.ok(models.length > 0);
-      for (const model of models) {
-        assert.ok(!("options" in model), `${model.id} carries a forbidden \`options\` key`);
-        assert.ok(model.params.num_ctx > 0, `${model.id} is missing params.num_ctx`);
-        assert.ok(
-          model.params.num_ctx <= model.contextWindow,
-          `${model.id} requests more context than it advertises`,
-        );
+      const providers = readCfg(dataDir).models.providers;
+      for (const providerId of ["ci-hub", "ollama"]) {
+        const models = providers[providerId].models;
+        assert.ok(models.length > 0, `${providerId} catalog must not be empty`);
+        for (const model of models) {
+          assert.ok(!("options" in model), `${providerId}/${model.id} carries a forbidden \`options\` key`);
+          assert.ok(model.params.num_ctx > 0, `${providerId}/${model.id} is missing params.num_ctx`);
+          assert.ok(
+            model.params.num_ctx <= model.contextWindow,
+            `${providerId}/${model.id} requests more context than it advertises`,
+          );
+        }
       }
-      // llava is a 4k model; the Hub's 16384 must have been clamped down for it.
-      const llava = models.find((m) => m.id === "llava:7b");
+      // llava lives on the native ollama provider; Hub's 16384 must clamp to its 4k window.
+      const llava = providers.ollama.models.find((m) => m.id === "llava:7b");
+      assert.ok(llava, "llava must be registered under models.providers.ollama");
       assert.strictEqual(llava.params.num_ctx, 4096);
     });
   });
@@ -1332,7 +1336,7 @@ describe("reconcileConfig (end to end)", () => {
     });
   });
 
-  test("sets the default agent model to DEFAULT_MODEL when it is installed", async () => {
+  test("sets the default agent model to ci-hub/auto when DEFAULT_MODEL is installed", async () => {
     await withOllama(CATALOG, async (baseUrl) => {
       dataDir = makeDataDir({
         config: {},
@@ -1340,7 +1344,7 @@ describe("reconcileConfig (end to end)", () => {
       });
       const { cfg } = makeReconciler(dataDir);
       await cfg.reconcileConfig();
-      assert.strictEqual(readCfg(dataDir).agents.defaults.model.primary, "ci-hub/qwen3:4b");
+      assert.strictEqual(readCfg(dataDir).agents.defaults.model.primary, "ci-hub/auto");
     });
   });
 
@@ -1352,33 +1356,66 @@ describe("reconcileConfig (end to end)", () => {
       });
       const { cfg } = makeReconciler(dataDir);
       await cfg.reconcileConfig();
-      assert.strictEqual(readCfg(dataDir).agents.defaults.model.primary, "ci-hub/qwen3:4b");
+      assert.strictEqual(readCfg(dataDir).agents.defaults.model.primary, "ci-hub/auto");
     });
   });
 
   test("keeps a still-installed primary across reconciles", async () => {
     await withOllama(CATALOG, async (baseUrl) => {
       dataDir = makeDataDir({
-        config: { agents: { defaults: { model: { primary: "ci-hub/llava:7b" } } } },
+        // Concrete Hub default stays on ci-hub; full-tag picks like llava live only under ollama/.
+        config: { agents: { defaults: { model: { primary: "ci-hub/qwen3:4b" } } } },
         env: { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "qwen3:4b" },
       });
       const { cfg } = makeReconciler(dataDir);
       await cfg.reconcileConfig();
       assert.strictEqual(
         readCfg(dataDir).agents.defaults.model.primary,
-        "ci-hub/llava:7b",
-        "an operator's still-valid choice must not be overridden",
+        "ci-hub/qwen3:4b",
+        "an operator's still-valid Hub choice must not be overridden",
       );
     });
   });
 
-  test("drops stale ci-hub model keys but preserves non-ci-hub ones", async () => {
+  test("splits Hub default onto ci-hub and full local tags onto ollama", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: {},
+        env: { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "qwen3:4b" },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+
+      const config = readCfg(dataDir);
+      const hubIds = config.models.providers["ci-hub"].models.map((m) => m.id);
+      const ollamaIds = config.models.providers.ollama.models.map((m) => m.id);
+
+      assert.deepStrictEqual(hubIds, ["auto", "qwen3:4b"]);
+      assert.deepStrictEqual(ollamaIds, ["llama3.1:8b", "qwen3:4b", "llava:7b"]);
+      assert.ok(!ollamaIds.includes("auto"), "native ollama catalog must not include Hub auto");
+      assert.strictEqual(config.agents.defaults.model.primary, "ci-hub/auto");
+
+      const agentModels = config.agents.defaults.models;
+      assert.ok("ci-hub/auto" in agentModels);
+      assert.ok("ci-hub/qwen3:4b" in agentModels);
+      assert.ok("ollama/llama3.1:8b" in agentModels);
+      assert.ok("ollama/qwen3:4b" in agentModels);
+      assert.ok("ollama/llava:7b" in agentModels);
+      assert.ok(!("ci-hub/llava:7b" in agentModels));
+    });
+  });
+
+  test("drops stale ci-hub and ollama model keys but preserves other providers", async () => {
     await withOllama(CATALOG, async (baseUrl) => {
       dataDir = makeDataDir({
         config: {
           agents: {
             defaults: {
-              models: { "ci-hub/gone:7b": { x: 1 }, "anthropic/claude": { keep: true } },
+              models: {
+                "ci-hub/gone:7b": { x: 1 },
+                "ollama/gone:7b": { y: 1 },
+                "anthropic/claude": { keep: true },
+              },
             },
           },
         },
@@ -1389,24 +1426,45 @@ describe("reconcileConfig (end to end)", () => {
 
       const models = readCfg(dataDir).agents.defaults.models;
       assert.ok(!("ci-hub/gone:7b" in models), "an uninstalled ci-hub model must be dropped");
+      assert.ok(!("ollama/gone:7b" in models), "an uninstalled ollama model must be dropped");
       assert.deepStrictEqual(models["anthropic/claude"], { keep: true });
+      assert.ok("ci-hub/auto" in models);
       assert.ok("ci-hub/llama3.1:8b" in models);
+      assert.ok("ollama/llama3.1:8b" in models);
+      assert.ok("ollama/llava:7b" in models);
+      assert.ok(!("ci-hub/llava:7b" in models), "full local tags belong under ollama/, not ci-hub/");
     });
   });
 
   // Ollama being unreachable must never wipe a working catalog — the appliance would
   // lose every model until Ollama came back.
-  test("preserves the existing ci-hub catalog when Ollama is unreachable", async () => {
-    const existing = [{ id: "llama3.1:8b", name: "Llama" }];
+  test("preserves existing ci-hub and ollama catalogs when Ollama is unreachable", async () => {
+    const existingHub = [{ id: "auto", name: "Hub Auto (llama3.1:8b)" }, { id: "llama3.1:8b", name: "Llama" }];
+    const existingOllama = [{ id: "llama3.1:8b", name: "Llama" }, { id: "llava:7b", name: "LLaVA" }];
     dataDir = makeDataDir({
-      config: { models: { providers: { "ci-hub": { models: existing } } } },
+      config: {
+        models: {
+          providers: {
+            "ci-hub": { models: existingHub },
+            ollama: { models: existingOllama },
+          },
+        },
+      },
       env: { OLLAMA_HOST: OLLAMA_DOWN },
     });
     const ctx = makeReconciler(dataDir);
     await ctx.cfg.reconcileConfig();
 
-    assert.deepStrictEqual(readCfg(dataDir).models.providers["ci-hub"].models, existing);
-    assert.ok(ctx.logs.some((l) => l.includes("Failed to sync") || l.includes("No Ollama chat models")));
+    const providers = readCfg(dataDir).models.providers;
+    assert.deepStrictEqual(providers["ci-hub"].models, existingHub);
+    assert.deepStrictEqual(providers.ollama.models, existingOllama);
+    assert.ok(
+      ctx.logs.some(
+        (l) =>
+          l.includes("Failed to sync") ||
+          l.includes("preserving existing ci-hub and ollama model catalogs"),
+      ),
+    );
   });
 
   test("wires CI memory end to end when CI-Server credentials are present", async () => {
@@ -1575,7 +1633,7 @@ describe("reconcileConfig (end to end)", () => {
 
       const config = readCfg(dataDir);
       assert.strictEqual(config.models.providers["ci-hub"].api, "ollama");
-      assert.strictEqual(config.agents.defaults.model.primary, "ci-hub/llama3.1:8b");
+      assert.strictEqual(config.agents.defaults.model.primary, "ci-hub/auto");
       assert.strictEqual(config.models.providers.openai.apiKey, "sk-oai");
       assert.strictEqual(config.models.providers.openai.api, "openai-completions");
       assert.strictEqual(config.models.providers.anthropic.api, "anthropic-messages");

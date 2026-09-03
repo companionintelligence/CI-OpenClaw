@@ -1136,11 +1136,11 @@ function createConfigReconciler({
   }
 
   /**
-   * Build the ci-hub model catalog from what Ollama actually has installed.
+   * Build the Ollama model catalog from what Ollama actually has installed.
    *
-   * Prepends an "auto" alias pointing at DEFAULT_MODEL (or the first model, if the
-   * Hub's default is not installed) so the agent always has a stable model id to
-   * select, and inherits that target's capabilities and context cap.
+   * Returns every non-embedding tag (for models.providers.ollama) and prepends an
+   * "auto" alias pointing at DEFAULT_MODEL (or the first model) so ci-hub can keep a
+   * stable Hub-default selection without listing the whole local fleet.
    */
   async function discoverOllamaModels(ollamaBaseUrl, defaultModel) {
     const numCtx = resolveHubNumCtx();
@@ -1499,9 +1499,12 @@ function createConfigReconciler({
       log.log("Patched config: set gateway.mode to local");
     }
 
-    // Mirror the Hub-managed Ollama defaults into OpenClaw's current config shape.
+    // Mirror Hub-managed inference into OpenClaw:
+    //   - models.providers.ci-hub  → Hub default / "auto" only (stable appliance primary)
+    //   - models.providers.ollama  → full local tag catalog when Ollama is reachable
+    // Both use api:"ollama" against the same host; model refs differ (ci-hub/X vs ollama/X).
     // The newer gateway does not switch providers just because OPENAI_API_* is present;
-    // it needs a concrete provider entry plus an agent default model selection.
+    // it needs concrete provider entries plus an agent default model selection.
     const ollamaBaseUrl = resolveOllamaBaseUrl(env);
     const inferenceApiKey = resolveInferenceApiKey(env);
     const defaultModel = env.DEFAULT_MODEL || containerEnv.DEFAULT_MODEL || "";
@@ -1516,34 +1519,38 @@ function createConfigReconciler({
     const providers = ensureRecordPathTracked(config, ["models", "providers"]);
     changed = providers.replaced || changed;
 
-    // Guard the provider entry itself before spreading it. A hand-edited string here
+    // Guard provider entries before spreading. A hand-edited string
     // ("ci-hub": "http://host:11434") is truthy, so `|| {}` keeps it, and `{...string}`
     // spreads into {"0":"h","1":"t",...} — index-keyed junk that is schema-invalid and
     // gets the ENTIRE openclaw.json quarantined on the next boot.
-    const currentHubProvider = isPlainObject(providers.node["ci-hub"])
-      ? providers.node["ci-hub"]
-      : {};
-    const nextHubProvider = {
-      ...currentHubProvider,
-      baseUrl: ollamaBaseUrl,
-      apiKey: inferenceApiKey,
-      api: "ollama",
-      models: Array.isArray(currentHubProvider.models)
-        ? currentHubProvider.models
-        : [],
-    };
-    if (
-      currentHubProvider.baseUrl !== nextHubProvider.baseUrl ||
-      currentHubProvider.apiKey !== nextHubProvider.apiKey ||
-      currentHubProvider.api !== nextHubProvider.api ||
-      !Array.isArray(currentHubProvider.models)
-    ) {
-      providers.node["ci-hub"] = nextHubProvider;
-      changed = true;
-      log.log(
-        `Patched config: synced ci-hub Ollama provider (${ollamaBaseUrl})`,
-      );
+    function syncOllamaApiProvider(providerId, label) {
+      const current = isPlainObject(providers.node[providerId])
+        ? providers.node[providerId]
+        : {};
+      const next = {
+        ...current,
+        baseUrl: ollamaBaseUrl,
+        apiKey: inferenceApiKey,
+        api: "ollama",
+        models: Array.isArray(current.models) ? current.models : [],
+      };
+      if (
+        current.baseUrl !== next.baseUrl ||
+        current.apiKey !== next.apiKey ||
+        current.api !== next.api ||
+        !Array.isArray(current.models)
+      ) {
+        providers.node[providerId] = next;
+        changed = true;
+        log.log(
+          `Patched config: synced ${label} Ollama provider (${ollamaBaseUrl})`,
+        );
+      }
+      return next;
     }
+
+    const nextHubProvider = syncOllamaApiProvider("ci-hub", "ci-hub");
+    const nextOllamaProvider = syncOllamaApiProvider("ollama", "ollama");
 
     try {
       const {
@@ -1553,17 +1560,41 @@ function createConfigReconciler({
       } = await discoverOllamaModels(ollamaBaseUrl, defaultModel);
 
       if (discoveredModels.length > 0) {
+        const hubTargetId = defaultModelAvailable || firstModelId;
+        const hubModels = discoveredModels.filter(
+          (model) =>
+            model.id === "auto" ||
+            (hubTargetId != null && model.id === hubTargetId),
+        );
+        const ollamaModels = discoveredModels.filter(
+          (model) => model.id !== "auto",
+        );
+
         if (
-          JSON.stringify(currentHubProvider.models || []) !==
-          JSON.stringify(discoveredModels)
+          JSON.stringify(nextHubProvider.models || []) !==
+          JSON.stringify(hubModels)
         ) {
           providers.node["ci-hub"] = {
             ...nextHubProvider,
-            models: discoveredModels,
+            models: hubModels,
           };
           changed = true;
           log.log(
-            `Patched config: synced ${discoveredModels.length} ci-hub Ollama model(s)`,
+            `Patched config: synced ${hubModels.length} ci-hub Hub default model(s)`,
+          );
+        }
+
+        if (
+          JSON.stringify(nextOllamaProvider.models || []) !==
+          JSON.stringify(ollamaModels)
+        ) {
+          providers.node.ollama = {
+            ...nextOllamaProvider,
+            models: ollamaModels,
+          };
+          changed = true;
+          log.log(
+            `Patched config: synced ${ollamaModels.length} ollama local model(s)`,
           );
         }
 
@@ -1571,17 +1602,22 @@ function createConfigReconciler({
         changed = defaults.replaced || changed;
 
         // Guard before enumerating: Object.entries("abc") yields index keys, which
-        // would survive the ci-hub/ filter straight into the merged record.
+        // would survive the ci-hub/ / ollama/ filter straight into the merged record.
         const existingModels = isPlainObject(defaults.node.models)
           ? defaults.node.models
           : {};
         const mergedModels = Object.fromEntries(
           Object.entries(existingModels).filter(
-            ([key]) => !key.startsWith("ci-hub/"),
+            ([key]) =>
+              !key.startsWith("ci-hub/") && !key.startsWith("ollama/"),
           ),
         );
-        for (const model of discoveredModels) {
+        for (const model of hubModels) {
           const key = `ci-hub/${model.id}`;
+          mergedModels[key] = existingModels[key] || {};
+        }
+        for (const model of ollamaModels) {
+          const key = `ollama/${model.id}`;
           mergedModels[key] = existingModels[key] || {};
         }
         if (
@@ -1589,7 +1625,7 @@ function createConfigReconciler({
         ) {
           defaults.node.models = mergedModels;
           changed = true;
-          log.log("Patched config: merged ci-hub model options");
+          log.log("Patched config: merged ci-hub + ollama model options");
         }
 
         const existingPrimary = isPlainObject(defaults.node.model)
@@ -1601,12 +1637,15 @@ function createConfigReconciler({
           existingPrimary.startsWith("ci-hub/")
         ) {
           const currentId = existingPrimary.slice("ci-hub/".length);
-          if (discoveredModels.some((model) => model.id === currentId)) {
+          if (hubModels.some((model) => model.id === currentId)) {
             primaryId = currentId;
           }
         }
         if (!primaryId) {
-          primaryId = defaultModelAvailable || firstModelId;
+          // Prefer Hub Auto when present — stable across Hub default model changes.
+          primaryId = hubModels.some((model) => model.id === "auto")
+            ? "auto"
+            : defaultModelAvailable || firstModelId;
         }
         if (primaryId) {
           // Record-guard the node we assign .primary into: on a scalar the assignment
@@ -1624,12 +1663,12 @@ function createConfigReconciler({
         }
       } else {
         log.warn(
-          `No Ollama chat models discovered at ${ollamaBaseUrl}; preserving existing ci-hub model catalog`,
+          `No Ollama chat models discovered at ${ollamaBaseUrl}; preserving existing ci-hub and ollama model catalogs`,
         );
       }
     } catch (error) {
       log.warn(
-        `Failed to sync ci-hub Ollama model catalog: ${
+        `Failed to sync Ollama model catalogs: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
