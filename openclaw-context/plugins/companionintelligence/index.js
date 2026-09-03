@@ -22,6 +22,7 @@ const CI_MEMORY_BOOTSTRAP_GUIDANCE = [
   "Do not create or edit `USER.md`, `MEMORY.md`, or `memory/*.md` for memory storage while this backend is active.",
   "Do not inspect, query, edit, or write OpenClaw's local memory SQLite files — the `.openclaw/memory` directory wherever OpenClaw's state directory lives (`/data/.openclaw/memory` in the packaged app, `~/.openclaw/memory` or `%USERPROFILE%\\.openclaw\\memory` on your own install); they are internal cache/index storage, not the Companion Intelligence memory system.",
   "Use `memory_search` for topical recall and `memory_get` with `ci-server://profile` for the CI-Server profile block.",
+  "When a wake or message says `Memory dispatch job <id>`, call `ci_dispatch_packet` with that id, do the briefing, then `ci_dispatch_checkpoint` (status completed, or blocked if you need the user). Push every meaningful step. Do not wait for Memory to pull your session.",
 ].join("\n");
 
 // Marker delimiting the live user-context block injected at agent bootstrap, so
@@ -222,6 +223,68 @@ function appendUserContextBlock(context, block) {
   });
 }
 
+const claimedDispatchJobs = new Set();
+
+function appendDispatchBriefing(context, packet) {
+  if (!context || !Array.isArray(context.bootstrapFiles)) return;
+  const briefing = formatDispatchBriefing(packet);
+  const section = [
+    "",
+    "## Memory dispatch briefing",
+    "",
+    briefing.slice(0, 2000),
+    "",
+    "This packet is already fetched. Do the work, then call ci_dispatch_checkpoint.",
+    "",
+  ].join("\n");
+  const agentsFile = findAgentsFile(context.bootstrapFiles);
+  if (!agentsFile) {
+    context.bootstrapFiles.push({
+      name: "AGENTS.md",
+      path: "AGENTS.md",
+      missing: false,
+      content: section.trimStart(),
+    });
+    return;
+  }
+  const content = typeof agentsFile.content === "string" ? agentsFile.content : "";
+  if (content.includes("## Memory dispatch briefing")) return;
+  agentsFile.content = `${content.trimEnd()}\n${section}`;
+  agentsFile.missing = false;
+}
+
+async function claimDispatchJob(api, cfg, jobId, context) {
+  if (!jobId || claimedDispatchJobs.has(jobId)) return;
+  claimedDispatchJobs.add(jobId);
+  const client = createClient(api, cfg);
+  if (!client.config.url || !client.config.token) return;
+  try {
+    const packet = await client.getPacket(jobId);
+    appendDispatchBriefing(context, packet);
+    await client.checkpoint(jobId, {
+      turns: [{ role: "assistant", content: "Picked up the dispatch. Working it now." }],
+      status: "running",
+      step: "packet",
+    });
+  } catch (error) {
+    try {
+      await client.checkpoint(jobId, {
+        turns: [
+          {
+            role: "assistant",
+            content: `Could not fetch the dispatch packet: ${String(error?.message || error)}`,
+          },
+        ],
+        status: "failed",
+        failed: true,
+        step: "packet",
+      });
+    } catch (inner) {
+      api.log?.debug?.(`CI-Server dispatch claim failed: ${String(inner?.message || inner)}`);
+    }
+  }
+}
+
 async function applyBootstrapMemoryGuidance(event, api) {
   const context = event?.context;
   if (!context || !isCiMemoryActive(context.cfg)) return;
@@ -230,6 +293,12 @@ async function applyBootstrapMemoryGuidance(event, api) {
   // Static guidance first — synchronous, so it lands even if the bootstrap hook
   // runner does not await async handlers.
   injectBootstrapGuidance(context);
+
+  const jobId = featureEnabled("CI_DISPATCH_ENABLED") ? extractDispatchJobIdFromEvent(event) : "";
+  if (jobId) {
+    await claimDispatchJob(api, context.cfg, jobId, context);
+    return;
+  }
 
   // The live user-context block embeds profile data (name, preferences) into the
   // prompt of whatever model is configured, including remote ones. Allow an
@@ -281,6 +350,7 @@ function readLivePluginConfig(api, cfg) {
 //   CI_INTENTS_ENABLED         — intent catalog (/api/intents): ci_list_intents + intent tools
 //   CI_INTENT_TOOLS_ENABLED    — executable intent tools (POST /api/intents/:name/execute);
 //                                sub-switch of CI_INTENTS_ENABLED (both default on)
+//   CI_DISPATCH_ENABLED        — Memory dispatch jobs (/api/v1/agent/jobs): packet + checkpoint
 const FEATURE_FALSY = new Set(["0", "false", "no", "off"]);
 function featureEnabled(envName, defaultOn = true) {
   const raw = process.env[envName];
@@ -293,6 +363,56 @@ function normalizeBaseUrl(url) {
   // an old config value pointing at the MCP path still resolves to the gateway base.
   const base = url.replace(/\/+$/, "");
   return base.endsWith("/api/mcp") ? base.slice(0, -"/api/mcp".length) : base;
+}
+
+const DISPATCH_JOB_LABEL_RE = /Memory dispatch job ([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})/;
+const DISPATCH_JOB_UUID7_RE = /\b(01[0-9a-fA-F]{6}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b/;
+
+function extractDispatchJobId(text) {
+  const source = normalizeString(text);
+  if (!source) return "";
+  return source.match(DISPATCH_JOB_LABEL_RE)?.[1] || source.match(DISPATCH_JOB_UUID7_RE)?.[1] || "";
+}
+
+function extractDispatchJobIdFromMessages(messages) {
+  if (!Array.isArray(messages)) return "";
+  for (const message of messages) {
+    const text =
+      typeof message?.content === "string" ? message.content : extractMessageText(message?.content);
+    const id = extractDispatchJobId(text);
+    if (id) return id;
+  }
+  return "";
+}
+
+function extractDispatchJobIdFromEvent(event) {
+  return (
+    extractDispatchJobIdFromMessages(event?.messages) ||
+    extractDispatchJobId(event?.prompt) ||
+    extractDispatchJobId(event?.text) ||
+    extractDispatchJobId(event?.message)
+  );
+}
+
+function formatDispatchBriefing(packet) {
+  const turns = Array.isArray(packet?.turns) ? packet.turns : [];
+  const body = turns
+    .map((turn) => `${normalizeString(turn?.role) || "user"}: ${normalizeString(turn?.content)}`)
+    .filter((line) => line.includes(": ") && !line.endsWith(": "))
+    .join("\n\n");
+  return body || normalizeString(packet?.source?.title) || "Empty dispatch packet.";
+}
+
+function inferDispatchStatus(assistantText) {
+  const text = normalizeString(assistantText).toLowerCase();
+  if (!text) return "running";
+  if (/\b(need(s)? (you|the user)|blocked|cannot (continue|proceed)|waiting on you)\b/.test(text)) {
+    return "blocked";
+  }
+  if (text.length >= 80 && !/\b(i('ll| will) (fetch|check|look)|working on (it|this)|let me (fetch|get))\b/.test(text)) {
+    return "completed";
+  }
+  return "running";
 }
 
 function resolveConfig(api, cfg) {
@@ -530,6 +650,15 @@ function createClient(api, cfg) {
         body: payload,
       });
     },
+    async getPacket(jobId) {
+      return await requestJson(config, `/api/v1/agent/jobs/${jobId}/packet`);
+    },
+    async checkpoint(jobId, input) {
+      return await requestJson(config, `/api/v1/agent/jobs/${jobId}/checkpoint`, {
+        method: "POST",
+        body: input,
+      });
+    },
   };
 }
 
@@ -546,6 +675,11 @@ function buildPromptSection({ availableTools }) {
       "Use memory_store for explicit remember/save requests or durable facts the user clearly wants retained.",
       "Do not write memory facts to USER.md, MEMORY.md, or memory/*.md; store them with memory_store so CI-Server can ingest them.",
       "Do not inspect or write the *.sqlite files in OpenClaw's own `.openclaw/memory` state directory, wherever it lives on this machine; those are OpenClaw internals, not the CI memory database.",
+    );
+  }
+  if (availableTools.has("ci_dispatch_packet")) {
+    lines.push(
+      "When woken with a Memory dispatch job id, fetch the packet with ci_dispatch_packet, do that work, then ci_dispatch_checkpoint.",
     );
   }
   if (lines.length > 0) lines.push("");
@@ -677,6 +811,75 @@ function createMemoryGetTool(api) {
         error:
           "CI-Server memory is recall-backed, not file-backed. Use memory_search, or memory_get path ci-server://profile.",
       });
+    },
+  };
+}
+
+function createDispatchPacketTool(api) {
+  return {
+    name: "ci_dispatch_packet",
+    label: "Fetch Memory dispatch",
+    description:
+      "Fetch a Companion Intelligence dispatch packet by job id. Use this when woken with `Memory dispatch job <id>`.",
+    parameters: {
+      type: "object",
+      properties: {
+        jobId: { type: "string", description: "Dispatch job id from the wake text." },
+      },
+      required: ["jobId"],
+      additionalProperties: false,
+    },
+    execute: async (_toolCallId, params) => {
+      const jobId = extractDispatchJobId(params?.jobId) || normalizeString(params?.jobId);
+      if (!jobId) return jsonResult({ error: "jobId required" });
+      const client = createClient(api);
+      const packet = await client.getPacket(jobId);
+      return jsonResult({
+        jobId,
+        briefing: formatDispatchBriefing(packet),
+        packet,
+      });
+    },
+  };
+}
+
+function createDispatchCheckpointTool(api) {
+  return {
+    name: "ci_dispatch_checkpoint",
+    label: "Checkpoint Memory dispatch",
+    description:
+      "Push a dispatch checkpoint back to Companion Intelligence. Call after each meaningful step, and when finished or blocked.",
+    parameters: {
+      type: "object",
+      properties: {
+        jobId: { type: "string" },
+        content: { type: "string", description: "What you did or found." },
+        status: { type: "string", enum: ["running", "blocked", "completed", "failed"] },
+        needsUser: { type: "boolean" },
+        failed: { type: "boolean" },
+        step: { type: "string" },
+      },
+      required: ["jobId", "content"],
+      additionalProperties: false,
+    },
+    execute: async (_toolCallId, params) => {
+      const jobId = extractDispatchJobId(params?.jobId) || normalizeString(params?.jobId);
+      const content = normalizeString(params?.content);
+      if (!jobId) return jsonResult({ error: "jobId required" });
+      if (!content) return jsonResult({ error: "content required" });
+      const client = createClient(api);
+      const body = {
+        turns: [{ role: "assistant", content }],
+        status: normalizeString(params?.status) || inferDispatchStatus(content),
+        ...(params?.needsUser ? { needsUser: true } : {}),
+        ...(params?.failed ? { failed: true } : {}),
+        ...(normalizeString(params?.step) ? { step: normalizeString(params.step) } : {}),
+        ...(normalizeString(params?.status) === "completed" || inferDispatchStatus(content) === "completed"
+          ? { result: { summary: content.slice(0, 800) } }
+          : {}),
+      };
+      const updated = await client.checkpoint(jobId, body);
+      return jsonResult({ jobId, status: updated?.status || body.status });
     },
   };
 }
@@ -897,6 +1100,11 @@ export default {
       });
     }
 
+    if (featureEnabled("CI_DISPATCH_ENABLED")) {
+      api.registerTool(() => createDispatchPacketTool(api), { name: "ci_dispatch_packet" });
+      api.registerTool(() => createDispatchCheckpointTool(api), { name: "ci_dispatch_checkpoint" });
+    }
+
     // Curated CI Intent catalog discovery — lets the agent learn the typed,
     // privacy-labelled vocabulary CI-Server publishes (one shared catalog instead
     // of bespoke per-harness glue) and prefer those intents over raw CRUD.
@@ -946,9 +1154,47 @@ export default {
     // agent_end is a conversation hook, so the plugin entry must set
     // `hooks.allowConversationAccess: true` (the CI bootstrap does this).
     api.on?.("agent_end", async (event, ctx) => {
-      if (event?.success === false || !featureEnabled("CI_MEMORY_TURN_ENABLED")) return;
-      const exchange = latestExchange(normalizeTurnMessages(event?.messages));
-      await syncTurn(api, exchange, normalizeString(ctx?.sessionId || ctx?.sessionKey));
+      const messages = event?.messages;
+      if (event?.success !== false && featureEnabled("CI_MEMORY_TURN_ENABLED")) {
+        const exchange = latestExchange(normalizeTurnMessages(messages));
+        await syncTurn(api, exchange, normalizeString(ctx?.sessionId || ctx?.sessionKey));
+      }
+      if (!featureEnabled("CI_DISPATCH_ENABLED")) return;
+      const jobId = extractDispatchJobIdFromMessages(messages) || extractDispatchJobIdFromEvent(event);
+      if (!jobId) return;
+      const client = createClient(api);
+      if (!client.config.url || !client.config.token) return;
+      if (event?.success === false) {
+        const err =
+          normalizeString(event?.error) ||
+          "OpenClaw could not finish this turn (context overflow or model error).";
+        try {
+          await client.checkpoint(jobId, {
+            turns: [{ role: "assistant", content: err }],
+            status: "failed",
+            failed: true,
+            step: "inference",
+          });
+        } catch (error) {
+          api.log?.debug?.(`CI-Server dispatch failure checkpoint failed: ${String(error?.message || error)}`);
+        }
+        return;
+      }
+      const turns = normalizeTurnMessages(messages);
+      const assistant = [...turns].reverse().find((turn) => turn.role === "assistant");
+      if (!assistant) return;
+      const status = inferDispatchStatus(assistant.content);
+      try {
+        await client.getPacket(jobId);
+        await client.checkpoint(jobId, {
+          turns: [assistant],
+          status,
+          ...(status === "blocked" ? { needsUser: true } : {}),
+          ...(status === "completed" ? { result: { summary: assistant.content.slice(0, 800) } } : {}),
+        });
+      } catch (error) {
+        api.log?.debug?.(`CI-Server dispatch checkpoint failed: ${String(error?.message || error)}`);
+      }
     }, {
       priority: 50,
       timeoutMs: 15000,
@@ -992,4 +1238,13 @@ export default {
 };
 
 // Exported for unit tests (does not affect the default-export plugin entrypoint).
-export { featureEnabled, normalizeBaseUrl, registerIntentTools };
+export {
+  extractDispatchJobId,
+  extractDispatchJobIdFromEvent,
+  extractDispatchJobIdFromMessages,
+  featureEnabled,
+  formatDispatchBriefing,
+  inferDispatchStatus,
+  normalizeBaseUrl,
+  registerIntentTools,
+};
