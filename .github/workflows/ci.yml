@@ -390,7 +390,7 @@ jobs:
           # regardless of it. HOME is the isolation that works.
           export HOME="${RUNNER_TEMP}/openclaw-home"
           mkdir -p "${HOME}/.openclaw"
-          openclaw plugins install "npm-pack:${TARBALL}" --force
+          openclaw plugins install "npm-pack:${TARBALL}" --force --accept-capabilities
 
           node - <<'NODE'
           const fs = require("node:fs");
