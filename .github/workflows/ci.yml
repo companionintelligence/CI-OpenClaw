@@ -307,10 +307,10 @@ jobs:
     # throwaway HOME with the real CLI, and assert it registers and loads.
     #
     # Verified by hand before this job existed, and the reason it exists: the npm form
-    # registers under the MANIFEST id (companionintelligence), not the package name,
-    # and it does NOT claim plugins.slots.memory the way a path install does. Both are
-    # load-bearing for the published install instructions, and neither is stated
-    # anywhere in OpenClaw's own docs — so both are asserted here rather than trusted.
+    # registers under the MANIFEST id (companionintelligence), not the package name.
+    # OpenClaw 2026.9.1+ also claims plugins.slots.memory for kind:memory plugins and
+    # requires --accept-capabilities for declared non-default tools. Both are
+    # load-bearing for the published install instructions, so both are asserted here.
     name: npm package installs into stock openclaw
     needs: test
     runs-on: ubuntu-latest
@@ -404,16 +404,13 @@ jobs:
             process.exit(1);
           }
           console.log("registered under the manifest id, enabled");
-          // Documented behaviour, actually asserted: the npm form leaves the memory
-          // slot alone. The README's install block rests on this — it tells users to
-          // set plugins.slots.memory themselves precisely because installing does not.
-          // If a future OpenClaw starts auto-claiming the slot, that instruction turns
-          // from necessary into wrong, so this has to fail rather than just report.
+          // OpenClaw 2026.9.1+ auto-selects kind:memory plugins into plugins.slots.memory
+          // on install. Assert that so the README stays truthful if upstream reverts.
           const slot = cfg.plugins?.slots?.memory;
           console.log(`memory slot after install: ${slot ?? "(unset)"}`);
-          if (slot === "companionintelligence") {
+          if (slot !== "companionintelligence") {
             console.error(
-              "the npm install claimed the memory slot on its own; the install docs tell users to set it themselves and now say something untrue",
+              `expected plugins.slots.memory=companionintelligence after install, got ${slot ?? "(unset)"}`,
             );
             process.exit(1);
           }
@@ -424,8 +421,8 @@ jobs:
         run: |
           set -euo pipefail
           export HOME="${RUNNER_TEMP}/openclaw-home"
-          # Selecting the slot is the user's documented step; do it here so the check
-          # covers the state the install instructions actually produce.
+          # Install already claims the memory slot on 2026.9.1+; re-pin it so the
+          # inspect step still covers an explicit slots.memory selection.
           node -e '
             const fs = require("node:fs"), path = require("node:path");
             const p = path.join(process.env.HOME, ".openclaw", "openclaw.json");
