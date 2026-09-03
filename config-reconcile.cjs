@@ -514,8 +514,9 @@ function createConfigReconciler({
       url,
       transport: "streamable-http",
       headers: { Authorization: "Bearer ${HUB_MCP_API_KEY}" },
-      timeout: 180,
-      connectTimeout: 60,
+      // OpenClaw 2026.9.1+: millisecond fields (legacy connectTimeout/timeout were seconds).
+      connectionTimeoutMs: 60_000,
+      requestTimeoutMs: 180_000,
     };
 
     const current = servers["ci-hub"];
@@ -714,11 +715,10 @@ function createConfigReconciler({
 
   // The Hub injects EMBEDDINGS_MODEL (e.g. nomic-embed-text) as a managed key, but
   // OpenClaw has no env-var path for embeddings — memory search resolves its provider
-  // from agents.defaults.memorySearch. Left unset, the provider falls back to its
-  // "openai" default and semantic recall silently tries api.openai.com with a key we
-  // don't have (memory_search then reports provider=openai model=text-embedding-3-small
-  // while quietly returning nothing). "openai-compatible" points it at the appliance's
-  // own Ollama /v1 instead, and needs no API key.
+  // from top-level memory.search (moved off agents.defaults.memorySearch in 2026.9.1).
+  // Left unset, the provider falls back to its "openai" default and semantic recall
+  // silently tries api.openai.com with a key we don't have. "openai-compatible" points
+  // it at the appliance's own Ollama /v1 instead, and needs no API key.
   function ensureMemorySearchEmbeddings(config, env) {
     const model = (env.EMBEDDINGS_MODEL || containerEnv.EMBEDDINGS_MODEL || "").trim();
     if (!model) return false;
@@ -728,12 +728,25 @@ function createConfigReconciler({
     const ollamaBase = normalizeEmbeddingsBaseUrl(resolveOllamaBaseUrl(env));
     const baseUrl = ollamaBase.endsWith("/v1") ? ollamaBase : `${ollamaBase}/v1`;
 
-    // Guard every node we spread or assign into: a hand-edited memorySearch that is
+    // Guard every node we spread or assign into: a hand-edited memory.search that is
     // a scalar or array would otherwise spread into index-keyed junk, producing the
     // very kind of schema-invalid config that gets the whole file clobbered.
-    const defaults = ensureRecordPath(config, ["agents", "defaults"]);
-    const current = isPlainObject(defaults.memorySearch) ? defaults.memorySearch : {};
+    const { node: memory, replaced } = ensureRecordPathTracked(config, ["memory"]);
+    let changed = replaced;
+    const current = isPlainObject(memory.search) ? memory.search : {};
     const currentRemote = isPlainObject(current.remote) ? current.remote : {};
+
+    // Drop a legacy agents.defaults.memorySearch block if present — unrecognized on
+    // 2026.9.1 and would quarantine the whole file if left behind.
+    if (
+      isPlainObject(config.agents) &&
+      isPlainObject(config.agents.defaults) &&
+      "memorySearch" in config.agents.defaults
+    ) {
+      delete config.agents.defaults.memorySearch;
+      changed = true;
+      log.log("Patched config: removed legacy agents.defaults.memorySearch");
+    }
 
     // Are we moving embeddings to a different provider or endpoint than the config
     // currently names? If so, any apiKey already in the remote block was issued for
@@ -754,19 +767,20 @@ function createConfigReconciler({
       model,
       remote: nextRemote,
     };
-    if (JSON.stringify(defaults.memorySearch) === JSON.stringify(next)) return false;
-
-    defaults.memorySearch = next;
-    log.log(
-      `Patched config: memory search embeddings -> ${model} @ ${baseUrl}`,
-    );
-    if (droppedApiKey) {
-      // Never log the value, only that it is gone.
+    if (JSON.stringify(memory.search) !== JSON.stringify(next)) {
+      memory.search = next;
+      changed = true;
       log.log(
-        "Patched config: dropped memory search remote.apiKey — it belonged to the previous embeddings endpoint",
+        `Patched config: memory search embeddings -> ${model} @ ${baseUrl}`,
       );
+      if (droppedApiKey) {
+        // Never log the value, only that it is gone.
+        log.log(
+          "Patched config: dropped memory search remote.apiKey — it belonged to the previous embeddings endpoint",
+        );
+      }
     }
-    return true;
+    return changed;
   }
 
   /**
@@ -1345,25 +1359,23 @@ function createConfigReconciler({
 
     let changed = false;
 
-    // Ensure allowInsecureAuth is set (needed for the CI app proxy).
-    // Record-guard rather than truthiness-guard: a hand-edited `"gateway": "local"` is
-    // truthy, so `if (!config.gateway)` passes it through, the next assignment no-ops on
-    // the primitive in sloppy mode, and reading .allowInsecureAuth off undefined throws.
-    // reconcileConfig's caller swallows that rejection, so the gateway would start with
-    // no auth token at all — the exact failure the token block below exists to prevent.
+    // Control UI behind the CI app proxy: trust rewritten local Origins.
+    // OpenClaw 2026.9.1 removed gateway.controlUi.allowInsecureAuth; device-auth
+    // kill-switch dangerouslyDisableDeviceAuth is inert — do not write either.
+    // Record-guard rather than truthiness-guard: a hand-edited `"gateway": "local"`
+    // is truthy, so `if (!config.gateway)` would leave a primitive and later
+    // assignments no-op / throw.
     const controlUi = ensureRecordPathTracked(config, ["gateway", "controlUi"]);
     changed = controlUi.replaced || changed;
-    if (!controlUi.node.allowInsecureAuth) {
-      controlUi.node.allowInsecureAuth = true;
+    if ("allowInsecureAuth" in controlUi.node) {
+      delete controlUi.node.allowInsecureAuth;
       changed = true;
-      log.log("Patched config: enabled allowInsecureAuth");
+      log.log("Patched config: removed retired allowInsecureAuth");
     }
-
-    // Disable device auth (would break access in some CI proxy configurations)
-    if (!controlUi.node.dangerouslyDisableDeviceAuth) {
-      controlUi.node.dangerouslyDisableDeviceAuth = true;
+    if ("dangerouslyDisableDeviceAuth" in controlUi.node) {
+      delete controlUi.node.dangerouslyDisableDeviceAuth;
       changed = true;
-      log.log("Patched config: disabled device auth");
+      log.log("Patched config: removed inert dangerouslyDisableDeviceAuth");
     }
 
     // The CI setup proxy rewrites Host/Origin to the local gateway origin.

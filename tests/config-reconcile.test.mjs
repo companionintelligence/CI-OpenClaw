@@ -314,8 +314,8 @@ describe("ensureHubMcpServer", () => {
       url: "https://hub.x/api/mcp",
       transport: "streamable-http",
       headers: { Authorization: "Bearer ${HUB_MCP_API_KEY}" },
-      timeout: 180,
-      connectTimeout: 60,
+      connectionTimeoutMs: 60000,
+      requestTimeoutMs: 180000,
     });
   });
 
@@ -519,7 +519,7 @@ describe("ensureMemorySearchEmbeddings", () => {
     const config = {};
     const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OLLAMA_HOST: "http://ollama:11434" };
     assert.strictEqual(ctx.cfg.ensureMemorySearchEmbeddings(config, env), true);
-    assert.deepStrictEqual(config.agents.defaults.memorySearch, {
+    assert.deepStrictEqual(config.memory.search, {
       provider: "openai-compatible",
       model: "nomic-embed-text",
       remote: { baseUrl: "http://ollama:11434/v1" },
@@ -539,14 +539,14 @@ describe("ensureMemorySearchEmbeddings", () => {
     const config = {};
     const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OLLAMA_HOST: "http://ollama:11434/v1" };
     ctx.cfg.ensureMemorySearchEmbeddings(config, env);
-    assert.strictEqual(config.agents.defaults.memorySearch.remote.baseUrl, "http://ollama:11434/v1");
+    assert.strictEqual(config.memory.search.remote.baseUrl, "http://ollama:11434/v1");
   });
 
   test("derives the base url from OPENAI_API_BASE when OLLAMA_HOST is unset", () => {
     const config = {};
     const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OPENAI_API_BASE: "http://ollama:11434/v1" };
     ctx.cfg.ensureMemorySearchEmbeddings(config, env);
-    assert.strictEqual(config.agents.defaults.memorySearch.remote.baseUrl, "http://ollama:11434/v1");
+    assert.strictEqual(config.memory.search.remote.baseUrl, "http://ollama:11434/v1");
   });
 
   // An apiKey in the remote block was issued FOR the endpoint the config names. If we
@@ -554,82 +554,72 @@ describe("ensureMemorySearchEmbeddings", () => {
   // it was never issued for.
   test("drops a stale remote.apiKey when the baseUrl is repointed", () => {
     const config = {
-      agents: {
-        defaults: {
-          memorySearch: {
-            provider: "openai-compatible",
-            remote: { baseUrl: "http://old:11434/v1", apiKey: "key-for-the-OLD-host" },
-          },
+      memory: {
+        search: {
+          provider: "openai-compatible",
+          remote: { baseUrl: "http://old:11434/v1", apiKey: "key-for-the-OLD-host" },
         },
       },
     };
     const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OLLAMA_HOST: "http://new:11434" };
     assert.strictEqual(ctx.cfg.ensureMemorySearchEmbeddings(config, env), true);
-    const remote = config.agents.defaults.memorySearch.remote;
+    const remote = config.memory.search.remote;
     assert.strictEqual(remote.baseUrl, "http://new:11434/v1");
     assert.ok(!("apiKey" in remote), "a credential issued for the old host must not follow it");
   });
 
   test("drops a stale remote.apiKey when the provider changes", () => {
     const config = {
-      agents: {
-        defaults: {
-          memorySearch: {
-            provider: "openai",
-            remote: { baseUrl: "http://ollama:11434/v1", apiKey: "openai-key" },
-          },
+      memory: {
+        search: {
+          provider: "openai",
+          remote: { baseUrl: "http://ollama:11434/v1", apiKey: "openai-key" },
         },
       },
     };
     const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OLLAMA_HOST: "http://ollama:11434" };
     assert.strictEqual(ctx.cfg.ensureMemorySearchEmbeddings(config, env), true);
-    assert.ok(!("apiKey" in config.agents.defaults.memorySearch.remote));
+    assert.ok(!("apiKey" in config.memory.search.remote));
   });
 
   test("preserves remote.apiKey when provider and endpoint are unchanged", () => {
     const config = {
-      agents: {
-        defaults: {
-          memorySearch: {
-            provider: "openai-compatible",
-            model: "nomic-embed-text",
-            remote: { baseUrl: "http://ollama:11434/v1", apiKey: "operator-key" },
-          },
+      memory: {
+        search: {
+          provider: "openai-compatible",
+          model: "nomic-embed-text",
+          remote: { baseUrl: "http://ollama:11434/v1", apiKey: "operator-key" },
         },
       },
     };
     const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OLLAMA_HOST: "http://ollama:11434" };
     assert.strictEqual(ctx.cfg.ensureMemorySearchEmbeddings(config, env), false);
-    assert.strictEqual(config.agents.defaults.memorySearch.remote.apiKey, "operator-key");
+    assert.strictEqual(config.memory.search.remote.apiKey, "operator-key");
   });
 
   // A trailing slash spells the SAME endpoint. Treating it as a repoint would delete an
   // operator's credential for a host we are not actually moving away from.
   test("treats a trailing slash as the same endpoint: no rewrite, no key drop", () => {
     const config = {
-      agents: {
-        defaults: {
-          memorySearch: {
-            provider: "openai-compatible",
-            model: "nomic-embed-text",
-            remote: { baseUrl: "http://ollama:11434/v1", apiKey: "operator-key" },
-          },
+      memory: {
+        search: {
+          provider: "openai-compatible",
+          model: "nomic-embed-text",
+          remote: { baseUrl: "http://ollama:11434/v1", apiKey: "operator-key" },
         },
       },
     };
     const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OLLAMA_HOST: "http://ollama:11434/" };
     assert.strictEqual(ctx.cfg.ensureMemorySearchEmbeddings(config, env), false);
-    assert.strictEqual(config.agents.defaults.memorySearch.remote.apiKey, "operator-key");
+    assert.strictEqual(config.memory.search.remote.apiKey, "operator-key");
   });
 
   test("never logs the dropped key's value", () => {
     const config = {
-      agents: {
-        defaults: {
-          memorySearch: {
-            provider: "openai-compatible",
-            remote: { baseUrl: "http://old:11434/v1", apiKey: "super-secret" },
-          },
+      memory: {
+        search: {
+          provider: "openai-compatible",
+          remote: { baseUrl: "http://old:11434/v1", apiKey: "super-secret" },
         },
       },
     };
@@ -644,13 +634,34 @@ describe("ensureMemorySearchEmbeddings", () => {
     assert.ok(ctx.logs.some((l) => l.includes("dropped memory search remote.apiKey")));
   });
 
-  test("preserves unrelated memorySearch keys while repointing", () => {
-    const config = { agents: { defaults: { memorySearch: { topK: 7 } } } };
+  test("preserves unrelated memory.search keys while repointing", () => {
+    const config = { memory: { search: { topK: 7 } } };
     ctx.cfg.ensureMemorySearchEmbeddings(config, {
       EMBEDDINGS_MODEL: "nomic-embed-text",
       OLLAMA_HOST: "http://ollama:11434",
     });
-    assert.strictEqual(config.agents.defaults.memorySearch.topK, 7);
+    assert.strictEqual(config.memory.search.topK, 7);
+  });
+
+  test("removes legacy agents.defaults.memorySearch when writing memory.search", () => {
+    const config = {
+      agents: {
+        defaults: {
+          memorySearch: {
+            provider: "openai",
+            remote: { baseUrl: "http://old:11434/v1" },
+          },
+        },
+      },
+    };
+    const env = { EMBEDDINGS_MODEL: "nomic-embed-text", OLLAMA_HOST: "http://ollama:11434" };
+    assert.strictEqual(ctx.cfg.ensureMemorySearchEmbeddings(config, env), true);
+    assert.ok(!("memorySearch" in (config.agents?.defaults || {})));
+    assert.deepStrictEqual(config.memory.search, {
+      provider: "openai-compatible",
+      model: "nomic-embed-text",
+      remote: { baseUrl: "http://ollama:11434/v1" },
+    });
   });
 
   test("reads EMBEDDINGS_MODEL from the container env when .env lacks it", () => {
@@ -662,7 +673,7 @@ describe("ensureMemorySearchEmbeddings", () => {
       withContainer.cfg.ensureMemorySearchEmbeddings(config, { OLLAMA_HOST: "http://o:1" }),
       true,
     );
-    assert.strictEqual(config.agents.defaults.memorySearch.model, "nomic-embed-text");
+    assert.strictEqual(config.memory.search.model, "nomic-embed-text");
   });
 });
 
@@ -1214,8 +1225,8 @@ describe("reconcileConfig (end to end)", () => {
       assert.strictEqual(config.gateway.mode, "local");
       assert.strictEqual(config.gateway.auth.mode, "token");
       assert.match(config.gateway.auth.token, /^[0-9a-f]{48}$/);
-      assert.strictEqual(config.gateway.controlUi.allowInsecureAuth, true);
-      assert.strictEqual(config.gateway.controlUi.dangerouslyDisableDeviceAuth, true);
+      assert.ok(!("allowInsecureAuth" in config.gateway.controlUi));
+      assert.ok(!("dangerouslyDisableDeviceAuth" in config.gateway.controlUi));
       assert.deepStrictEqual(config.gateway.controlUi.allowedOrigins, [
         "http://127.0.0.1:18790",
         "http://localhost:18790",
@@ -1485,8 +1496,8 @@ describe("reconcileConfig (end to end)", () => {
       );
       assert.strictEqual(config.hooks.internal.entries["session-memory"].enabled, false);
       assert.ok(config.tools.alsoAllow.includes("memory_store"));
-      assert.strictEqual(config.agents.defaults.memorySearch.provider, "openai-compatible");
-      assert.strictEqual(config.agents.defaults.memorySearch.remote.baseUrl, `${baseUrl}/v1`);
+      assert.strictEqual(config.memory.search.provider, "openai-compatible");
+      assert.strictEqual(config.memory.search.remote.baseUrl, `${baseUrl}/v1`);
       assert.strictEqual(config.plugins.load.paths.length, 4, "runtime, memory, hub, duckduckgo registered");
       assert.strictEqual(config.tools.web.search.provider, "duckduckgo");
       assert.ok(config.tools.alsoAllow.includes("browser"));
@@ -1723,7 +1734,7 @@ describe("malformed nodes + convergence", () => {
     ["agents is a scalar", { agents: "x" }],
     ["agents.defaults.models is a string", { agents: { defaults: { models: "abc" } } }],
     ["agents.defaults.model is a string", { agents: { defaults: { model: "x" } } }],
-    ["agents.defaults.memorySearch is a scalar", { agents: { defaults: { memorySearch: "openai" } } }],
+    ["memory.search is a scalar", { memory: { search: "openai" } }],
     ["tools.alsoAllow is a string", { tools: { alsoAllow: "memory_store" } }],
     ["hooks is a scalar", { hooks: 1 }],
     ["mcp is a scalar", { mcp: "nope" }],
