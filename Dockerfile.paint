@@ -1,0 +1,7 @@
+# Paint a dispatch-capable Memory plugin onto the published marketplace image.
+# Skips Homebrew. Data volume on the appliance is unchanged.
+FROM ghcr.io/companionintelligence/ci-openclaw:2026.8.5
+
+USER root
+COPY openclaw-context/plugins/companionintelligence/ /app/openclaw-context/plugins/companionintelligence/
+USER node

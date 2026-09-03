@@ -1,7 +1,14 @@
 import test from "node:test";
 import assert from "node:assert";
 
-import plugin, { featureEnabled, normalizeBaseUrl, registerIntentTools } from "./index.js";
+import plugin, {
+  extractDispatchJobId,
+  extractDispatchJobIdFromEvent,
+  featureEnabled,
+  inferDispatchStatus,
+  normalizeBaseUrl,
+  registerIntentTools,
+} from "./index.js";
 
 const FLAGS = [
   "CI_MEMORY_CONTEXT_ENABLED",
@@ -10,6 +17,7 @@ const FLAGS = [
   "CI_MEMORY_WRITE_ENABLED",
   "CI_INTENTS_ENABLED",
   "CI_INTENT_TOOLS_ENABLED",
+  "CI_DISPATCH_ENABLED",
 ];
 
 function clearFlags() {
@@ -111,6 +119,8 @@ test("normalizeBaseUrl strips trailing slashes and a legacy /api/mcp suffix", ()
 test("registers all memory + intent tools by default", () => {
   const api = register();
   assert.deepEqual([...api._tools].sort(), [
+    "ci_dispatch_checkpoint",
+    "ci_dispatch_packet",
     "ci_list_intents",
     "memory_get",
     "memory_search",
@@ -124,8 +134,12 @@ test("each disabled API system omits exactly its tool", () => {
   assert.ok(!register({ CI_MEMORY_CONTEXT_ENABLED: "false" })._tools.includes("memory_get"));
   assert.ok(!register({ CI_MEMORY_WRITE_ENABLED: "false" })._tools.includes("memory_store"));
   assert.ok(!register({ CI_INTENTS_ENABLED: "false" })._tools.includes("ci_list_intents"));
+  assert.ok(!register({ CI_DISPATCH_ENABLED: "false" })._tools.includes("ci_dispatch_packet"));
+  assert.ok(!register({ CI_DISPATCH_ENABLED: "false" })._tools.includes("ci_dispatch_checkpoint"));
   // Disabling one leaves the others registered.
   assert.deepEqual([...register({ CI_INTENTS_ENABLED: "false" })._tools].sort(), [
+    "ci_dispatch_checkpoint",
+    "ci_dispatch_packet",
     "memory_get",
     "memory_search",
     "memory_store",
@@ -163,6 +177,152 @@ test("agent_end posts a turn (POST /api/memory/turn with platform/sessionId and 
     assert.equal(body.platform, "openclaw");
     assert.equal(body.sessionId, "s1");
     assert.ok(Array.isArray(body.messages) && body.messages.length >= 1);
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("extractDispatchJobId reads the wake label and a uuid7", () => {
+  assert.equal(
+    extractDispatchJobId("Memory dispatch job 01a061f8-755e-731f-9d11-a60906902ffa. Fetch the packet from Memory."),
+    "01a061f8-755e-731f-9d11-a60906902ffa",
+  );
+  assert.equal(extractDispatchJobId("no job here"), "");
+});
+
+test("extractDispatchJobIdFromEvent reads prompt and messages", () => {
+  assert.equal(
+    extractDispatchJobIdFromEvent({
+      prompt: "Memory dispatch job 01a061f8-755e-731f-9d11-a60906902ffa. Fetch the packet from Memory.",
+    }),
+    "01a061f8-755e-731f-9d11-a60906902ffa",
+  );
+  assert.equal(
+    extractDispatchJobIdFromEvent({
+      messages: [{ role: "user", content: "Memory dispatch job 01a0621f-aae3-73b9-86bd-1d2df5ed6a15." }],
+    }),
+    "01a0621f-aae3-73b9-86bd-1d2df5ed6a15",
+  );
+});
+
+test("inferDispatchStatus completes a real answer and blocks when it needs the user", () => {
+  assert.equal(inferDispatchStatus("I'll fetch the packet"), "running");
+  assert.equal(inferDispatchStatus("Blocked. Need the user to pick a date."), "blocked");
+  assert.equal(
+    inferDispatchStatus(
+      "Called the office and left a message with Dana. They will call Bennett back tomorrow afternoon about the picnic permit.",
+    ),
+    "completed",
+  );
+});
+
+test("agent_end checkpoints failed when the turn dies", async () => {
+  const calls = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    calls.push({ url: String(url), method: opts?.method, body: opts?.body });
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  try {
+    const api = register({ CI_MEMORY_TURN_ENABLED: "false" });
+    await api._handlers.agent_end(
+      {
+        success: false,
+        error: "Context overflow: prompt too large for the model (precheck).",
+        messages: [
+          {
+            role: "user",
+            content: "Memory dispatch job 01a061f8-755e-731f-9d11-a60906902ffa. Fetch the packet from Memory.",
+          },
+        ],
+      },
+      { sessionId: "s1" },
+    );
+    const checkpoint = calls.find((c) => c.url.includes("/checkpoint"));
+    assert.ok(checkpoint, "failure must still checkpoint");
+    const body = JSON.parse(checkpoint.body);
+    assert.equal(body.status, "failed");
+    assert.equal(body.failed, true);
+    assert.equal(body.step, "inference");
+    assert.ok(body.turns[0].content.includes("Context overflow"));
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("agent:bootstrap claims a dispatch packet and skips user-context inject", async () => {
+  const calls = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    calls.push({ url: String(url), method: opts?.method });
+    if (String(url).includes("/packet")) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            turns: [{ role: "user", content: "Register for soccer." }],
+            source: { title: "Soccer" },
+          }),
+      };
+    }
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  try {
+    const api = register();
+    const agents = { name: "AGENTS.md", path: "AGENTS.md", missing: false, content: "" };
+    await api._handlers["agent:bootstrap"]({
+      prompt: "Memory dispatch job 01a061f8-755e-731f-9d11-a60906902ffa.",
+      context: {
+        cfg: { plugins: { slots: { memory: "companionintelligence" } } },
+        bootstrapFiles: [agents],
+      },
+    });
+    assert.ok(calls.some((c) => c.url.includes("/packet")));
+    assert.ok(calls.some((c) => c.url.includes("/checkpoint")));
+    assert.ok(!calls.some((c) => c.url.includes("/api/memory/context")));
+    assert.ok(agents.content.includes("Register for soccer."));
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("agent_end checkpoints a dispatch job even when turn sync is off", async () => {
+  const calls = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    calls.push({ url: String(url), method: opts?.method, body: opts?.body });
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  try {
+    const api = register({ CI_MEMORY_TURN_ENABLED: "false" });
+    await api._handlers.agent_end(
+      {
+        success: true,
+        messages: [
+          {
+            role: "user",
+            content: "Memory dispatch job 01a061f8-755e-731f-9d11-a60906902ffa. Fetch the packet from Memory.",
+          },
+          {
+            role: "assistant",
+            content:
+              "Called the office and left a message with Dana. They will call Bennett back tomorrow afternoon about the picnic permit.",
+          },
+        ],
+      },
+      { sessionId: "s1" },
+    );
+    assert.ok(calls.some((c) => c.url.includes("/api/v1/agent/jobs/01a061f8-755e-731f-9d11-a60906902ffa/packet")));
+    const checkpoint = calls.find((c) => c.url.includes("/checkpoint"));
+    assert.ok(checkpoint, "checkpoint POST missing");
+    assert.equal(checkpoint.method, "POST");
+    const body = JSON.parse(checkpoint.body);
+    assert.equal(body.status, "completed");
+    assert.equal(body.turns[0].role, "assistant");
   } finally {
     global.fetch = origFetch;
     clearFlags();
