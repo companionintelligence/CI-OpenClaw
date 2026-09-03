@@ -783,6 +783,22 @@ describe("memory wiring", () => {
     assert.strictEqual(config.plugins.entries.companionintelligence.enabled, true);
   });
 
+  test("ensurePluginConversationAccess opts ci-runtime into conversation hooks", () => {
+    const config = { plugins: { entries: {} } };
+    assert.strictEqual(
+      ctx.cfg.ensurePluginConversationAccess(config, "ci-runtime", "CI runtime context"),
+      true,
+    );
+    assert.strictEqual(
+      config.plugins.entries["ci-runtime"].hooks.allowConversationAccess,
+      true,
+    );
+    assert.strictEqual(
+      ctx.cfg.ensurePluginConversationAccess(config, "ci-runtime", "CI runtime context"),
+      false,
+    );
+  });
+
   test("ensureMemoryStoreToolAllowed adds memory_store to alsoAllow", () => {
     const config = {};
     assert.strictEqual(ctx.cfg.ensureMemoryStoreToolAllowed(config), true);

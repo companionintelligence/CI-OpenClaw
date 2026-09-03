@@ -643,30 +643,39 @@ function createConfigReconciler({
     return changed;
   }
 
-  function ensureMemoryConversationAccess(config) {
-    // The CI memory plugin's agent_end turn-sync is a conversation hook; a
-    // path-loaded (non-bundled) plugin only receives it when its entry opts in
-    // via hooks.allowConversationAccess.
+  /**
+   * Opt a path-loaded (non-bundled) plugin into conversation hooks.
+   *
+   * OpenClaw 2.0+ blocks hooks like `before_prompt_build` / `agent_end` for
+   * non-bundled plugins unless `plugins.entries.<id>.hooks.allowConversationAccess`
+   * is true. `plugins.allow` only gates load — it does not grant this.
+   */
+  function ensurePluginConversationAccess(config, pluginId, label) {
     const { node: entries, replaced } = ensureRecordPathTracked(config, [
       "plugins",
       "entries",
     ]);
     let changed = replaced;
 
-    const entry = isPlainObject(entries[CI_MEMORY_PLUGIN_ID])
-      ? entries[CI_MEMORY_PLUGIN_ID]
-      : {};
+    const entry = isPlainObject(entries[pluginId]) ? entries[pluginId] : {};
     const hooks = isPlainObject(entry.hooks) ? entry.hooks : {};
     if (hooks.allowConversationAccess !== true) {
       hooks.allowConversationAccess = true;
       entry.hooks = hooks;
-      entries[CI_MEMORY_PLUGIN_ID] = entry;
+      entries[pluginId] = entry;
       changed = true;
-      log.log(
-        "Patched config: enabled conversation access for CI memory turn-sync",
-      );
+      log.log(`Patched config: enabled conversation access for ${label}`);
     }
     return changed;
+  }
+
+  function ensureMemoryConversationAccess(config) {
+    // The CI memory plugin's agent_end turn-sync is a conversation hook.
+    return ensurePluginConversationAccess(
+      config,
+      CI_MEMORY_PLUGIN_ID,
+      "CI memory turn-sync",
+    );
   }
 
   /**
@@ -1249,10 +1258,17 @@ function createConfigReconciler({
 
     // Enable CI-managed context through OpenClaw's supported plugin surface.
     // The runtime plugin also ships a `ci` skill, so one load path covers both the
-    // always-on runtime context and deeper on-demand guidance.
+    // always-on runtime context and deeper on-demand guidance. OpenClaw 2.0+ also
+    // requires conversation-hook opt-in for path-loaded plugins' before_prompt_build.
     changed =
       ensureOpenClawPlugin(config, CI_PLUGIN_ID, CI_PLUGIN_PATH, "CI runtime") ||
       changed;
+    changed =
+      ensurePluginConversationAccess(
+        config,
+        CI_PLUGIN_ID,
+        "CI runtime context",
+      ) || changed;
 
     // Install the Companion Intelligence memory plugin as a selectable active
     // memory backend. Keep the entry disabled until selected so OpenClaw does not
@@ -1551,6 +1567,7 @@ function createConfigReconciler({
     ensureHooksWake,
     disableBundledSessionMemoryHook,
     ensureMemoryConversationAccess,
+    ensurePluginConversationAccess,
     ensureMemoryStoreToolAllowed,
     ensureMemorySearchEmbeddings,
     ensureOpenClawPlugin,
