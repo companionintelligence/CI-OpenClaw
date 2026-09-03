@@ -33,12 +33,16 @@ const DEFAULT_GATEWAY_PORT = 18790;
 const CI_PLUGIN_ID = "ci-runtime";
 const CI_MEMORY_PLUGIN_ID = "companionintelligence";
 const CI_HUB_PLUGIN_ID = "ci-hub";
+const DUCKDUCKGO_PLUGIN_ID = "duckduckgo";
+const BROWSER_PLUGIN_ID = "browser";
+const CHROMIUM_EXECUTABLE_PATH = "/usr/bin/chromium";
 
 /** Where the vendored plugins live inside the built image (see Dockerfile). */
 const DEFAULT_PLUGIN_PATHS = {
   ciRuntime: "/app/openclaw-context/plugins/ci-runtime",
   ciMemory: "/app/openclaw-context/plugins/companionintelligence",
   ciHub: "/app/openclaw-context/plugins/ci-hub",
+  duckduckgo: "/app/openclaw-context/plugins/duckduckgo",
 };
 
 // Treats the embeddings endpoint as an OpenAI-compatible /v1 server (which Ollama
@@ -311,6 +315,8 @@ function createConfigReconciler({
   const CI_PLUGIN_PATH = pluginPaths.ciRuntime;
   const CI_MEMORY_PLUGIN_PATH = pluginPaths.ciMemory;
   const CI_HUB_PLUGIN_PATH = pluginPaths.ciHub;
+  const DUCKDUCKGO_PLUGIN_PATH =
+    pluginPaths.duckduckgo || DEFAULT_PLUGIN_PATHS.duckduckgo;
 
   // When we last wrote openclaw.json. warnIfConfigClobbered uses this as the cutoff
   // so it catches a quarantine by ANY openclaw invocation after our write, not just
@@ -761,6 +767,137 @@ function createConfigReconciler({
       );
     }
     return true;
+  }
+
+  /**
+   * Appliance FUX: free web search + page reading without the onboarding search wizard.
+   *
+   * CI setup intentionally passes `--skip-search` so QuickStart stays API-key-only.
+   * OpenClaw never auto-selects key-free search providers, so we:
+   *   1. Path-load the image-baked DuckDuckGo plugin
+   *   2. Set tools.web.search.provider=duckduckgo when unset (do not clobber Brave/etc.)
+   *   3. Enable the bundled browser tool (outside the coding profile by default) and
+   *      point it at the image Chromium with Docker-safe headless/noSandbox flags
+   *
+   * web_fetch stays on OpenClaw's built-in keyless reader; we do not force Firecrawl.
+   */
+  function ensureWebAccessDefaults(config) {
+    let changed = false;
+
+    changed =
+      ensureOpenClawPlugin(
+        config,
+        DUCKDUCKGO_PLUGIN_ID,
+        DUCKDUCKGO_PLUGIN_PATH,
+        "DuckDuckGo search",
+      ) || changed;
+
+    const search = ensureRecordPathTracked(config, ["tools", "web", "search"]);
+    changed = search.replaced || changed;
+    if (search.node.enabled !== true) {
+      search.node.enabled = true;
+      changed = true;
+      log.log("Patched config: enabled tools.web.search");
+    }
+    const provider = search.node.provider;
+    if (provider == null || provider === "") {
+      search.node.provider = DUCKDUCKGO_PLUGIN_ID;
+      changed = true;
+      log.log("Patched config: set tools.web.search.provider=duckduckgo (free default)");
+    }
+
+    const fetch = ensureRecordPathTracked(config, ["tools", "web", "fetch"]);
+    changed = fetch.replaced || changed;
+    if (fetch.node.enabled !== true) {
+      fetch.node.enabled = true;
+      changed = true;
+      log.log("Patched config: enabled tools.web.fetch");
+    }
+
+    const { node: tools, replaced: toolsReplaced } = ensureRecordPathTracked(
+      config,
+      ["tools"],
+    );
+    changed = toolsReplaced || changed;
+    if (!Array.isArray(tools.alsoAllow)) {
+      tools.alsoAllow = [];
+      changed = true;
+    }
+    if (!tools.alsoAllow.includes("browser")) {
+      tools.alsoAllow.push("browser");
+      changed = true;
+      log.log("Patched config: allowed browser tool via tools.alsoAllow");
+    }
+    // tools.allow is exclusive — only extend an allowlist the operator already keeps.
+    if (Array.isArray(tools.allow) && !tools.allow.includes("browser")) {
+      tools.allow.push("browser");
+      changed = true;
+      log.log("Patched config: added browser to existing tools.allow");
+    }
+
+    const browser = ensureRecordPathTracked(config, ["browser"]);
+    changed = browser.replaced || changed;
+    if (browser.node.enabled !== true) {
+      browser.node.enabled = true;
+      changed = true;
+      log.log("Patched config: enabled browser");
+    }
+    if (
+      browser.node.executablePath == null ||
+      browser.node.executablePath === ""
+    ) {
+      browser.node.executablePath = CHROMIUM_EXECUTABLE_PATH;
+      changed = true;
+      log.log(`Patched config: browser.executablePath=${CHROMIUM_EXECUTABLE_PATH}`);
+    }
+    if (browser.node.headless !== true) {
+      browser.node.headless = true;
+      changed = true;
+      log.log("Patched config: browser.headless=true");
+    }
+    if (browser.node.noSandbox !== true) {
+      browser.node.noSandbox = true;
+      changed = true;
+      log.log("Patched config: browser.noSandbox=true (container)");
+    }
+
+    const { node: plugins, replaced: pluginsReplaced } = ensureRecordPathTracked(
+      config,
+      ["plugins"],
+    );
+    changed = pluginsReplaced || changed;
+    if (plugins.enabled !== true) {
+      plugins.enabled = true;
+      changed = true;
+      log.log("Patched config: enabled plugins");
+    }
+
+    const { node: entries, replaced: entriesReplaced } = ensureRecordPathTracked(
+      config,
+      ["plugins", "entries"],
+    );
+    changed = entriesReplaced || changed;
+    const browserEntry = isPlainObject(entries[BROWSER_PLUGIN_ID])
+      ? entries[BROWSER_PLUGIN_ID]
+      : {};
+    if (browserEntry.enabled !== true) {
+      browserEntry.enabled = true;
+      entries[BROWSER_PLUGIN_ID] = browserEntry;
+      changed = true;
+      log.log("Patched config: enabled browser plugin");
+    }
+
+    if (
+      Array.isArray(plugins.allow) &&
+      plugins.allow.length > 0 &&
+      !plugins.allow.includes(BROWSER_PLUGIN_ID)
+    ) {
+      plugins.allow.push(BROWSER_PLUGIN_ID);
+      changed = true;
+      log.log("Patched config: added browser plugin to allow list");
+    }
+
+    return changed;
   }
 
   /**
@@ -1320,6 +1457,9 @@ function createConfigReconciler({
     // worked and is being retired (CI-Hub#897).
     changed = ensureHooksWake(config, env) || changed;
 
+    // Free web search + Chromium browser for appliance FUX (replaces --skip-search).
+    changed = ensureWebAccessDefaults(config) || changed;
+
     // Enable the CI-Hub companion plugin (wake endpoint, app-event SSE) when Hub
     // injects MCP credentials. Tool access itself comes from the native
     // mcp.servers.ci-hub entry above, not this plugin.
@@ -1570,6 +1710,7 @@ function createConfigReconciler({
     ensurePluginConversationAccess,
     ensureMemoryStoreToolAllowed,
     ensureMemorySearchEmbeddings,
+    ensureWebAccessDefaults,
     ensureOpenClawPlugin,
     // resolvers + discovery
     resolveOllamaBaseUrl,
@@ -1596,6 +1737,9 @@ module.exports = {
   CI_PLUGIN_ID,
   CI_MEMORY_PLUGIN_ID,
   CI_HUB_PLUGIN_ID,
+  DUCKDUCKGO_PLUGIN_ID,
+  BROWSER_PLUGIN_ID,
+  CHROMIUM_EXECUTABLE_PATH,
   HOOKS_WAKE_TOKEN_ENV_REF,
   // Stateless helpers: no I/O, no logging, no injected state.
   isPlainObject,

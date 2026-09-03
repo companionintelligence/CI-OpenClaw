@@ -799,6 +799,44 @@ describe("memory wiring", () => {
     );
   });
 
+  test("ensureWebAccessDefaults enables free DuckDuckGo search and Chromium browser", () => {
+    const config = {};
+    assert.strictEqual(ctx.cfg.ensureWebAccessDefaults(config), true);
+    assert.strictEqual(config.tools.web.search.enabled, true);
+    assert.strictEqual(config.tools.web.search.provider, "duckduckgo");
+    assert.strictEqual(config.tools.web.fetch.enabled, true);
+    assert.ok(config.tools.alsoAllow.includes("browser"));
+    assert.strictEqual(config.browser.enabled, true);
+    assert.strictEqual(config.browser.executablePath, "/usr/bin/chromium");
+    assert.strictEqual(config.browser.headless, true);
+    assert.strictEqual(config.browser.noSandbox, true);
+    assert.strictEqual(config.plugins.entries.duckduckgo.enabled, true);
+    assert.strictEqual(config.plugins.entries.browser.enabled, true);
+    assert.ok(
+      config.plugins.load.paths.some((p) => p.endsWith(`${path.sep}duckduckgo`) || p.endsWith("/duckduckgo")),
+    );
+    assert.strictEqual(ctx.cfg.ensureWebAccessDefaults(config), false);
+  });
+
+  test("ensureWebAccessDefaults does not clobber an operator-chosen search provider", () => {
+    const config = { tools: { web: { search: { enabled: true, provider: "brave" } } } };
+    ctx.cfg.ensureWebAccessDefaults(config);
+    assert.strictEqual(config.tools.web.search.provider, "brave");
+  });
+
+  test("ensureWebAccessDefaults extends an existing tools.allow with browser", () => {
+    const config = { tools: { allow: ["read"] } };
+    ctx.cfg.ensureWebAccessDefaults(config);
+    assert.deepStrictEqual(config.tools.allow, ["read", "browser"]);
+  });
+
+  test("ensureWebAccessDefaults adds browser to an existing plugins.allow list", () => {
+    const config = { plugins: { allow: ["other"] } };
+    ctx.cfg.ensureWebAccessDefaults(config);
+    assert.ok(config.plugins.allow.includes("browser"));
+    assert.ok(config.plugins.allow.includes("duckduckgo"));
+  });
+
   test("ensureMemoryStoreToolAllowed adds memory_store to alsoAllow", () => {
     const config = {};
     assert.strictEqual(ctx.cfg.ensureMemoryStoreToolAllowed(config), true);
@@ -1391,7 +1429,10 @@ describe("reconcileConfig (end to end)", () => {
       assert.ok(config.tools.alsoAllow.includes("memory_store"));
       assert.strictEqual(config.agents.defaults.memorySearch.provider, "openai-compatible");
       assert.strictEqual(config.agents.defaults.memorySearch.remote.baseUrl, `${baseUrl}/v1`);
-      assert.strictEqual(config.plugins.load.paths.length, 3, "all three plugins registered");
+      assert.strictEqual(config.plugins.load.paths.length, 4, "runtime, memory, hub, duckduckgo registered");
+      assert.strictEqual(config.tools.web.search.provider, "duckduckgo");
+      assert.ok(config.tools.alsoAllow.includes("browser"));
+      assert.strictEqual(config.browser.executablePath, "/usr/bin/chromium");
     });
   });
 
@@ -1723,14 +1764,17 @@ describe("malformed nodes on an inactive feature path", () => {
     });
   }
 
-  test("a minimal config gains no empty agents/tools/hooks/mcp nodes", async () => {
+  test("a minimal config gains no empty agents/hooks/mcp nodes", async () => {
     dataDir = makeDataDir({ config: {}, env: { OLLAMA_HOST: OLLAMA_DOWN } });
     const { cfg } = makeReconciler(dataDir);
     await cfg.reconcileConfig();
     const config = readCfg(dataDir);
-    for (const key of ["agents", "tools", "hooks", "mcp"]) {
+    // tools is intentionally written by ensureWebAccessDefaults (DDG + browser).
+    for (const key of ["agents", "hooks", "mcp"]) {
       assert.ok(!(key in config), `${key} must not be conjured onto a config that never had it`);
     }
+    assert.strictEqual(config.tools.web.search.provider, "duckduckgo");
+    assert.ok(config.tools.alsoAllow.includes("browser"));
   });
 
   test("bails cleanly on a non-record top-level config", async () => {
