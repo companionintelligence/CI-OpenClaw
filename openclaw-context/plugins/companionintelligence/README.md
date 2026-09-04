@@ -22,11 +22,12 @@ stock `openclaw` install is enough.
 ## Install
 
 ```bash
-openclaw plugins install npm:@companionintelligence/openclaw-memory
+openclaw plugins install npm:@companionintelligence/openclaw-memory --accept-capabilities
 ```
 
-Then add your server URL and key, and select the plugin as the memory provider, in
-`~/.openclaw/openclaw.json`:
+OpenClaw 2026.9.1+ claims `plugins.slots.memory` for this plugin on install. Then add
+your server URL and key in `~/.openclaw/openclaw.json` (keep the slot pin so upgrades
+stay explicit):
 
 ```json
 {
@@ -66,8 +67,9 @@ and reports back the URL it used.
 
 ### Why each key is needed
 
-- **`plugins.slots.memory`** — selects this plugin as the memory provider. Installing
-  from npm registers the plugin but does not claim the slot, so set it explicitly.
+- **`plugins.slots.memory`** — selects this plugin as the memory provider. OpenClaw
+  2026.9.1+ sets this on install for `kind: memory` plugins; keep it in config so the
+  selection survives hand-edits and older CLI behaviour.
 - **`hooks.allowConversationAccess: true`** — required for passive capture. `agent_end`
   is a conversation hook, and OpenClaw only delivers conversation hooks to a plugin
   whose entry opts in. Without it you get the tools but no automatic capture.

@@ -120,8 +120,8 @@ if (shouldEnable && mcpUrl) {
     url: mcpUrl,
     transport: "streamable-http",
     headers: { Authorization: "Bearer ${HUB_MCP_API_KEY}" },
-    timeout: 180,
-    connectTimeout: 60,
+    connectionTimeoutMs: 60_000,
+    requestTimeoutMs: 180_000,
   };
   if (JSON.stringify(servers["ci-hub"]) !== JSON.stringify(desired)) {
     servers["ci-hub"] = desired;
