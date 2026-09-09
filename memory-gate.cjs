@@ -122,6 +122,20 @@ function launcherWithNext(launcher, nextUrl) {
  * hostname and can never tell a LAN visitor from a remote one — and would
  * therefore never offer the LAN launcher to the callers who need it.
  */
+/**
+ * Copy Traefik's signed Hub identity onto the wrapper→Hub state call so the
+ * Hub can tell which person opened the app (the S2S call is the app key).
+ */
+function forwardAuthHeaders(req) {
+  const headers = req && req.headers ? req.headers : {};
+  const out = {};
+  for (const name of ["x-ci-hub-user", "x-ci-hub-user-timestamp", "x-ci-hub-user-signature"]) {
+    const value = headers[name];
+    if (typeof value === "string" && value.trim()) out[name] = value.trim();
+  }
+  return out;
+}
+
 function buildStateUrl(hubBase, appUrn, clientHost) {
   const url = new URL(`${hubBase}/api/memory-connect/apps/${encodeURIComponent(appUrn)}/state`);
   // Trim before forwarding: a whitespace-padded Host would otherwise reach the
@@ -133,6 +147,7 @@ function buildStateUrl(hubBase, appUrn, clientHost) {
 
 module.exports = {
   buildStateUrl,
+  forwardAuthHeaders,
   launcherWithNext,
   requestAbsoluteUrl,
   safeHttpUrl,

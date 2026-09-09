@@ -554,7 +554,6 @@ async function maybeServeMemoryGate(req, res) {
   // `${CI_SERVER_TOKEN}` (resolved to "") blank a real .env token and wrongly
   // re-show the interstitial to an already-configured app.
   const env = cfg.buildChildEnv();
-  if (hasCiServerCredentials(env)) return false; // connected or manually configured
   if (hasMemoryDeferCookie(req)) return false; // dismissed for this session
 
   const appUrn = (env.CI_APP_URN || "").trim();
@@ -566,10 +565,14 @@ async function maybeServeMemoryGate(req, res) {
     // server-to-server over the internal network, so the Hub would otherwise see
     // its own container hostname and could never tell a LAN visitor from a remote
     // one — which is what decides whether the LAN launcher is usable.
+    //
+    // Forward Traefik's signed Hub identity so a second family member is not
+    // treated as already-connected just because the container still holds
+    // someone else's CI_SERVER_TOKEN.
     const stateUrl = memoryGate.buildStateUrl(hubBase, appUrn, req.headers.host);
 
     const resp = await fetch(stateUrl, {
-      headers: mcpAuthHeaders(env),
+      headers: { ...mcpAuthHeaders(env), ...memoryGate.forwardAuthHeaders(req) },
       signal: AbortSignal.timeout(4000),
     });
     if (!resp.ok) return false;
