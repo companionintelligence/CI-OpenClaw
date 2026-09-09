@@ -29,15 +29,41 @@ function isHookPath(rawUrl) {
 }
 
 /**
+ * Headers OpenClaw 2026.9.1+ treats as proxy-shaped (hasForwardedRequestHeaders).
+ * Any one of these on a request from a source not in gateway.trustedProxies makes
+ * Gateway-authenticated routes return 403 proxy_attribution_required. That is why
+ * this proxy strips the whole class, not a fixed list of the common four: Traefik
+ * also sends x-forwarded-server / x-forwarded-uri, and those alone reproduce the
+ * 403 on 2026.9.1.
+ */
+function isProxyAttributionHeader(name) {
+  const normalized = String(name || "").toLowerCase();
+  return (
+    normalized === "forwarded" ||
+    normalized === "x-real-ip" ||
+    normalized.startsWith("x-forwarded-")
+  );
+}
+
+function stripProxyAttributionHeaders(headers) {
+  for (const key of Object.keys(headers)) {
+    if (isProxyAttributionHeader(key)) delete headers[key];
+  }
+}
+
+/**
  * Rewrite an inbound request's headers for the gateway.
  *
  * Two jobs:
  *
  * 1. Make the request look local. The gateway checks Origin/Host to block cross-origin
- *    requests (anti-CSRF) and rejects a connection carrying forwarding headers from a source
- *    outside gateway.trustedProxies. Both checks are redundant here — the gateway binds to
- *    127.0.0.1 inside the container, so this proxy is the only thing that can reach it, and
- *    the whole app already sits behind the CI app proxy.
+ *    requests (anti-CSRF) and, since 2026.9.1, rejects any connection that still carries
+ *    proxy-shaped headers (see isProxyAttributionHeader) from a source outside
+ *    gateway.trustedProxies. Both checks are redundant here — this proxy is the only
+ *    thing that should reach the gateway (reconcile pins gateway.bind to loopback), and
+ *    the whole app already sits behind the CI app proxy. We do not set trustedProxies
+ *    and rebuild X-Forwarded-For: a loopback client IP still fails attribution, which
+ *    is exactly the LAN / localhost "Open" path.
  *
  * 2. Attach the gateway token — EXCEPT on the hook routes.
  *
@@ -68,12 +94,7 @@ function buildGatewayHeaders({ reqHeaders, url, gatewayHost, token }) {
   headers["host"] = gatewayHost;
   headers["origin"] = `http://${gatewayHost}`;
 
-  delete headers["x-forwarded-for"];
-  delete headers["x-forwarded-proto"];
-  delete headers["x-forwarded-host"];
-  delete headers["x-forwarded-port"];
-  delete headers["x-real-ip"];
-  delete headers["forwarded"];
+  stripProxyAttributionHeaders(headers);
 
   if (token && !isHookPath(url)) {
     // Node lowercases inbound header names, so the caller's own Authorization arrives as
@@ -91,5 +112,7 @@ function buildGatewayHeaders({ reqHeaders, url, gatewayHost, token }) {
 module.exports = {
   HOOKS_PATH_PREFIX,
   isHookPath,
+  isProxyAttributionHeader,
+  stripProxyAttributionHeaders,
   buildGatewayHeaders,
 };

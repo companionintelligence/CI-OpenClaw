@@ -1223,6 +1223,7 @@ describe("reconcileConfig (end to end)", () => {
 
       const config = readCfg(dataDir);
       assert.strictEqual(config.gateway.mode, "local");
+      assert.strictEqual(config.gateway.bind, "loopback");
       assert.strictEqual(config.gateway.auth.mode, "token");
       assert.match(config.gateway.auth.token, /^[0-9a-f]{48}$/);
       assert.ok(!("allowInsecureAuth" in config.gateway.controlUi));
@@ -1237,6 +1238,21 @@ describe("reconcileConfig (end to end)", () => {
       // No wake secret in this fixture, so the wake hook must stay off — and must not
       // leave a half-enabled `hooks.enabled` behind, which makes OpenClaw throw at resolve.
       assert.strictEqual(config.hooks?.enabled, undefined);
+    });
+  });
+
+  // OpenClaw 2026.9.1 defaults container bind to "auto" → 0.0.0.0. Existing volumes
+  // that already onboarded never got a bind pin, so the gateway listens on every
+  // interface and logs the non-loopback warning. The published port is the wrapper.
+  test("pins gateway.bind to loopback even when 2026.9.1 left it auto", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: { gateway: { mode: "local", bind: "auto" } },
+        env: { OLLAMA_HOST: baseUrl },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+      assert.strictEqual(readCfg(dataDir).gateway.bind, "loopback");
     });
   });
 
@@ -1761,6 +1777,7 @@ describe("malformed nodes + convergence", () => {
         const config = readCfg(dataDir);
         assertNoIndexKeys(config);
         assert.strictEqual(config.gateway.mode, "local");
+        assert.strictEqual(config.gateway.bind, "loopback");
         assert.match(config.gateway.auth.token, /^[0-9a-f]{48}$/, "the gateway token must still be written");
 
         // 3. The result must survive a JSON round-trip unchanged (no array-with-props).
