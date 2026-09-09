@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const {
   buildStateUrl,
+  forwardAuthHeaders,
   launcherWithNext,
   requestAbsoluteUrl,
   safeHttpUrl,
@@ -170,6 +171,29 @@ describe("launcherWithNext", () => {
     const out = launcherWithNext("https://hub.example.com/start#section", "http://192.168.1.9/chat");
 
     assert.equal(out, "https://hub.example.com/start?next=http%3A%2F%2F192.168.1.9%2Fchat#section");
+  });
+});
+
+describe("forwardAuthHeaders", () => {
+  test("copies the signed Hub identity Traefik planted on the browser request", () => {
+    const headers = forwardAuthHeaders({
+      headers: {
+        "x-ci-hub-user": "hello@lifescope.io",
+        "x-ci-hub-user-timestamp": "1700000000000",
+        "x-ci-hub-user-signature": "abc",
+        host: "openclaw.example.com",
+      },
+    });
+
+    assert.deepEqual(headers, {
+      "x-ci-hub-user": "hello@lifescope.io",
+      "x-ci-hub-user-timestamp": "1700000000000",
+      "x-ci-hub-user-signature": "abc",
+    });
+  });
+
+  test("omits missing or blank identity headers", () => {
+    assert.deepEqual(forwardAuthHeaders({ headers: { host: "openclaw.example.com" } }), {});
   });
 });
 
