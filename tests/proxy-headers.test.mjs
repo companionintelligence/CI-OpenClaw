@@ -102,8 +102,8 @@ describe("buildGatewayHeaders: ordinary gateway routes", () => {
   });
 
   test("strips the forwarding headers the app proxy injects", () => {
-    // The gateway treats a connection carrying these from a source outside trustedProxies as
-    // non-local and rejects it.
+    // OpenClaw 2026.9.1 treats ANY of these as proxy-shaped. A leftover one from a
+    // source outside trustedProxies is a 403 proxy_attribution_required.
     const headers = build("/api/status", {
       "x-forwarded-for": "1.2.3.4",
       "x-forwarded-proto": "https",
@@ -116,6 +116,31 @@ describe("buildGatewayHeaders: ordinary gateway routes", () => {
     for (const h of ["x-forwarded-for", "x-forwarded-proto", "x-forwarded-host", "x-forwarded-port", "x-real-ip", "forwarded"]) {
       assert.equal(headers[h], undefined, `${h} survived`);
     }
+  });
+
+  test("strips Traefik extras, not just the common four (2026.9.1 attribution)", () => {
+    // Measured on ci-openclaw-core-bc after the 2026.9.1 bump: curl with only
+    // x-forwarded-for/proto/host is 404 (auth passed; no /api/status), but adding
+    // x-forwarded-server: traefik is 403 proxy_attribution_required. Traefik also
+    // injects x-forwarded-uri for forward-auth. The old allowlist missed both.
+    const headers = build("/api/status", {
+      "x-forwarded-server": "traefik",
+      "x-forwarded-uri": "/",
+      "x-forwarded-prefix": "/",
+      "x-forwarded-scheme": "https",
+      "X-Forwarded-Server": "mixed-case-should-still-go",
+    });
+
+    for (const h of [
+      "x-forwarded-server",
+      "x-forwarded-uri",
+      "x-forwarded-prefix",
+      "x-forwarded-scheme",
+      "X-Forwarded-Server",
+    ]) {
+      assert.equal(headers[h], undefined, `${h} survived`);
+    }
+    assert.equal(headers.Authorization, `Bearer ${GATEWAY_TOKEN}`);
   });
 
   test("strips forwarding headers on hook routes too", () => {

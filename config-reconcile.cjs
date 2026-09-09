@@ -1511,6 +1511,16 @@ function createConfigReconciler({
       log.log("Patched config: set gateway.mode to local");
     }
 
+    // OpenClaw 2026.9.1 defaults container bind to "auto" → 0.0.0.0. The published
+    // app port is the setup proxy (18789); only that process should reach the
+    // gateway on 127.0.0.1:18790. Schema bind modes are auto/loopback/lan/tailnet/
+    // custom — not a raw host. Same pin as the stock marketplace OpenClaw entrypoint.
+    if (config.gateway.bind !== "loopback") {
+      config.gateway.bind = "loopback";
+      changed = true;
+      log.log("Patched config: set gateway.bind to loopback");
+    }
+
     // Mirror Hub-managed inference into OpenClaw:
     //   - models.providers.ci-hub  → Hub default / "auto" only (stable appliance primary)
     //   - models.providers.ollama  → full local tag catalog when Ollama is reachable
