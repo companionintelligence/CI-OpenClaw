@@ -796,7 +796,11 @@ test("memory_store.execute requires content", async () => {
   }
 });
 
-test("memory_store.execute falls back to /api/memory/note on 404 with the same POST body", async () => {
+test("memory_store.execute POSTs /api/memory/write and does not retry a dead alias on 404", async () => {
+  // This asserted the opposite until 2026-09: a 404 fell back to
+  // `/api/memory/note`, a route CI-Server renamed to `/write` on 2026-06-03.
+  // The fallback therefore turned one 404 into two and surfaced the second,
+  // which is strictly worse than reporting the first. A 404 is now a 404.
   const calls = [];
   const origFetch = global.fetch;
   global.fetch = async (url, opts) => {
@@ -807,16 +811,17 @@ test("memory_store.execute falls back to /api/memory/note on 404 with the same P
   };
   try {
     const api = register();
-    const res = await api._toolFactories["memory_store"]({}).execute("id", { content: "x" });
-    const payload = JSON.parse(res.content[0].text);
-    assert.equal(payload.ok, true);
-    assert.equal(calls.length, 2);
+    await assert.rejects(
+      () => api._toolFactories["memory_store"]({}).execute("id", { content: "x" }),
+      /404/,
+    );
+    assert.equal(calls.length, 1);
     assert.ok(calls[0].url.includes("/api/memory/write"));
-    assert.ok(calls[1].url.includes("/api/memory/note"));
-    // The fallback must POST and carry the same payload — a regression that
-    // sent GET, dropped the body, or shuffled fields would now fail.
-    assert.equal(calls[1].opts.method, "POST");
-    const body = JSON.parse(calls[1].opts.body);
+    assert.ok(!calls.some((c) => c.url.includes("/api/memory/note")));
+    // The one call must still POST the full payload — the regression this
+    // half of the original test guarded against is unrelated to the fallback.
+    assert.equal(calls[0].opts.method, "POST");
+    const body = JSON.parse(calls[0].opts.body);
     assert.equal(body.content, "x");
     assert.equal(body.source, "openclaw");
   } finally {

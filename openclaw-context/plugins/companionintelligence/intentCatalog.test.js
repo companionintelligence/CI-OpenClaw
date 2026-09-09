@@ -87,6 +87,55 @@ test("fetchIntentManifest degrades to null on error or malformed body", async ()
   assert.equal(await fetchIntentManifest(async () => null), null);
 });
 
+test("fetchIntentManifest reports every failed path when no candidate yields a manifest", async () => {
+  // The regression guard for CI-Server#1684: both paths 404'd through the
+  // gateway, this returned null, and nothing anywhere said so.
+  const reported = [];
+  const manifest = await fetchIntentManifest(
+    async (path) => {
+      throw new Error(`HTTP 404 for ${path}`);
+    },
+    (failures) => reported.push(...failures),
+  );
+
+  assert.equal(manifest, null);
+  assert.equal(reported.length, 2);
+  assert.match(reported[0], /\/api\/agent\/intents: HTTP 404/);
+  assert.match(reported[1], /\/api\/intents: HTTP 404/);
+});
+
+test("fetchIntentManifest names a 200 that is not a manifest — the gateway-misroute shape", async () => {
+  // nginx serves the SPA rather than 404ing for an unmatched /api path, so the
+  // body parses fine and simply has no intents[]. "Malformed" must be a
+  // distinguishable reason, not a silent null.
+  const reported = [];
+  assert.equal(
+    await fetchIntentManifest(
+      async () => ({ ok: true }),
+      (failures) => reported.push(...failures),
+    ),
+    null,
+  );
+  assert.equal(reported.length, 2);
+  assert.ok(reported.every((line) => line.includes("200 without an intents[] array")));
+});
+
+test("fetchIntentManifest stays silent when a fallback path succeeds", async () => {
+  let called = false;
+  const manifest = await fetchIntentManifest(
+    async (path) => {
+      if (path === "/api/agent/intents") throw new Error("HTTP 404");
+      return MANIFEST;
+    },
+    () => {
+      called = true;
+    },
+  );
+
+  assert.equal(manifest.intents.length, 3);
+  assert.equal(called, false, "a working legacy alias is not a failure worth warning about");
+});
+
 test("describeCatalogForPrompt groups by domain and flags destructive/external", () => {
   const text = describeCatalogForPrompt(MANIFEST);
   assert.match(text, /### memory/);

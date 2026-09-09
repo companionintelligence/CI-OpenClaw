@@ -19,24 +19,42 @@
  * catalog is unavailable or malformed (never throws — discovery must degrade
  * gracefully when CI-Server is unreachable).
  *
+ * Degrading quietly is what made CI-Server#1684 survive for months: every
+ * CATALOG_PATH 404'd through the appliance gateway (which strips `/api` while
+ * the controller had baked it in), this returned `null`, and the agent fell
+ * back to raw CRUD with nothing logged anywhere. `onUnavailable` is how the
+ * caller gets told — graceful degradation should still be *audible*. It fires
+ * only when every candidate path failed, so a legacy-alias fallback that
+ * succeeds stays silent.
+ *
  * @param {(path: string) => Promise<any>} getJson
+ * @param {(failures: string[]) => void} [onUnavailable] called with one
+ *   `path: reason` line per candidate when no path yielded a manifest
  * @returns {Promise<object|null>}
  */
 // Canonical path first, then the deprecated alias for older CI-Server builds
 // that still serve the catalog from /api/intents.
 const CATALOG_PATHS = ["/api/agent/intents", "/api/intents"];
 
-export async function fetchIntentManifest(getJson) {
+export async function fetchIntentManifest(getJson, onUnavailable) {
+  const failures = [];
+
   for (const path of CATALOG_PATHS) {
     try {
       const body = await getJson(path);
       if (body && Array.isArray(body.intents)) {
         return body;
       }
-    } catch {
-      // try the next path
+      // A 200 that is not a manifest is its own failure mode, and the one a
+      // gateway misroute produces: nginx serves the SPA rather than 404ing,
+      // so the body parses but has no intents[].
+      failures.push(`${path}: 200 without an intents[] array`);
+    } catch (error) {
+      failures.push(`${path}: ${String(error?.message || error)}`);
     }
   }
+
+  onUnavailable?.(failures);
   return null;
 }
 
