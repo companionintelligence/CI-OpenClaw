@@ -626,18 +626,13 @@ function createClient(api, cfg) {
         ...(options.title ? { title: options.title } : {}),
         ...(options.sessionId ? { sessionId: options.sessionId } : {}),
       };
-      try {
-        return await requestJson(config, "/api/memory/write", {
-          method: "POST",
-          body: payload,
-        });
-      } catch (error) {
-        if (!String(error?.message || error).includes("HTTP 404")) throw error;
-        return await requestJson(config, "/api/memory/note", {
-          method: "POST",
-          body: payload,
-        });
-      }
+      // No 404 fallback: `/api/memory/note` was renamed to `/write` in CI-Server
+      // on 2026-06-03 and no longer exists, so the fallback turned one 404 into
+      // two and reported the second. Let a 404 surface as itself.
+      return await requestJson(config, "/api/memory/write", {
+        method: "POST",
+        body: payload,
+      });
     },
     async turn(messages, options = {}) {
       const payload = {
@@ -893,7 +888,14 @@ function createListIntentsTool(api, intentToolsState) {
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: async () => {
       const client = createClient(api);
-      const manifest = await fetchIntentManifest((path) => requestJson(client.config, path));
+      const manifest = await fetchIntentManifest(
+        (path) => requestJson(client.config, path),
+        (failures) =>
+          api.log?.warn?.(
+            `CI-Server intent catalog unavailable — the agent falls back to raw CRUD instead of the ` +
+              `curated, privacy-labelled intents. Tried ${failures.join("; ")}`,
+          ),
+      );
       if (!manifest) {
         return jsonResult({ available: false, error: "CI Intent catalog unavailable" });
       }
@@ -984,7 +986,14 @@ async function registerIntentTools(api, cfg) {
   try {
     const client = createClient(api, cfg);
     if (!client.config.url || !client.config.token) return registered;
-    const manifest = await fetchIntentManifest((path) => requestJson(client.config, path));
+    const manifest = await fetchIntentManifest(
+      (path) => requestJson(client.config, path),
+      (failures) =>
+        api.log?.warn?.(
+          `CI-Server intent catalog unavailable — the agent falls back to raw CRUD instead of the ` +
+            `curated, privacy-labelled intents. Tried ${failures.join("; ")}`,
+        ),
+    );
     if (!manifest) return registered;
 
     const skipped = [];
