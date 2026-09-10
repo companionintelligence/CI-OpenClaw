@@ -487,23 +487,79 @@ function manifestFetch(url) {
   return { ok: true, status: 200, text: async () => JSON.stringify(INTENT_MANIFEST) };
 }
 
-test("registerIntentTools registers only non-destructive, non-external intents and skips collisions", async () => {
+test("registerIntentTools registers gated intents too, and warns the model they need approval", async () => {
+  // This asserted the opposite until 2026-09: destructive and external intents
+  // were filtered out client-side. That was correct while a connect key held
+  // `write` — CI-Server refused them before its gate, so registering them only
+  // bought confusing failures. CI-Server now mints these keys at `full` and
+  // queues anything irreversible as an approval card, so hiding the tools would
+  // make the card unreachable: the agent cannot ask for what it cannot call.
   const origFetch = global.fetch;
   global.fetch = async (url) => manifestFetch(url);
   try {
     const api = makeApi();
     const registered = await registerIntentTools(api);
-    // destructive (memory_forget) and external (media_streamingAvailability)
-    // are filtered silently; the memory_search collision is skipped + logged.
-    assert.deepEqual(registered, ["predictions_forecast"]);
-    assert.deepEqual(api._tools, ["predictions_forecast"]);
+    // memory_forget (destructive) and media_streamingAvailability (external) now
+    // register; the memory_search collision is still skipped + logged.
+    assert.ok(registered.includes("predictions_forecast"));
+    assert.ok(registered.includes("memory_forget"), "destructive intent must register");
+    assert.ok(
+      registered.includes("media_streamingAvailability"),
+      "external intent must register",
+    );
     assert.equal(api._warns.length, 1);
     assert.ok(api._warns[0].includes("memory_search"), api._warns[0]);
+
     // The registered tool carries the manifest schema.
     const tool = api._toolFactories["predictions_forecast"]();
     assert.equal(tool.name, "predictions_forecast");
     assert.equal(tool.label, "Forecast activities");
     assert.deepEqual(tool.parameters, INTENT_MANIFEST.intents[0].parameters);
+
+    // A gated tool says so in its description, because a model that discovers the
+    // gate only by calling will read the result as a failure and retry it.
+    const gated = api._toolFactories["memory_forget"]();
+    assert.match(gated.description, /Requires the owner's approval/);
+    assert.match(gated.description, /do NOT call it again/);
+    // An ungated one is left alone — a warning on every search would be noise.
+    assert.doesNotMatch(tool.description, /Requires the owner's approval/);
+  } finally {
+    global.fetch = origFetch;
+  }
+});
+
+test("a queued intent reads as 'asked the owner', not as a failure to retry", async () => {
+  // CI-Server returns TOOL_QUEUED as a normal HTTP 200 carrying an error object.
+  // Handed to the model raw it looks like a failure, and the likely next move for
+  // a model that just failed is to try again — which is a pile of duplicate cards
+  // for one intent.
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    if ((opts.method || "GET") === "GET") return manifestFetch(u);
+
+    return {
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          success: false,
+          error: { code: "TOOL_QUEUED", message: "queued", pendingActionId: "pa-1" },
+        }),
+    };
+  };
+  try {
+    const api = makeApi();
+    await registerIntentTools(api);
+    const tool = api._toolFactories["memory_forget"]();
+    const res = await tool.execute("id", {});
+    const payload = JSON.parse(res.content[0].text);
+
+    assert.equal(payload.status, "awaiting_owner_approval");
+    assert.equal(payload.retry, false);
+    assert.equal(payload.pendingActionId, "pa-1");
+    // It must not look like the plain failure shape the catch block produces.
+    assert.equal(payload.success, undefined);
   } finally {
     global.fetch = origFetch;
   }
@@ -625,11 +681,23 @@ test("register() with CI_INTENT_TOOLS_ENABLED wires intent tools and ci_list_int
     // Registration is fire-and-forget from register(); flush the promise chain.
     await new Promise((r) => setImmediate(r));
     assert.ok(api._tools.includes("predictions_forecast"), String(api._tools));
-    assert.ok(!api._tools.includes("memory_forget"), "destructive intent must not register");
-    assert.ok(!api._tools.includes("media_streamingAvailability"), "external intent must not register");
+    // Gated intents DO register now — CI-Server queues them as an approval card
+    // rather than refusing them, and a hidden tool is a card the agent can never
+    // ask for. See the registerIntentTools test above.
+    assert.ok(api._tools.includes("memory_forget"), "destructive intent must register");
+    assert.ok(
+      api._tools.includes("media_streamingAvailability"),
+      "external intent must register",
+    );
     const res = await api._toolFactories["ci_list_intents"]().execute();
     const payload = JSON.parse(res.content[0].text);
-    assert.deepEqual(payload.executableTools, ["predictions_forecast"]);
+    // Gated intents are executable too — "executable" means the agent can CALL it,
+    // which for a gated intent means it can ask. Whether it runs is the owner's.
+    assert.deepEqual(payload.executableTools, [
+      "predictions_forecast",
+      "memory_forget",
+      "media_streamingAvailability",
+    ]);
     assert.ok(payload.catalog.includes("directly callable"), payload.catalog);
   } finally {
     global.fetch = origFetch;
