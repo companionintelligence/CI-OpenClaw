@@ -403,14 +403,35 @@ function formatDispatchBriefing(packet) {
   return body || normalizeString(packet?.source?.title) || "Empty dispatch packet.";
 }
 
+/**
+ * What a turn's text tells us about the job — WITHOUT ever claiming it is done.
+ *
+ * This used to return "completed" for any assistant message of 80+ characters
+ * that missed a narrow in-progress phrase list. The agent's first substantive
+ * reply after reading the briefing — a plan, an acknowledgement, a restatement
+ * of the ask — is almost always over 80 characters and matches none of those
+ * phrases, so the job was checkpointed "completed" on turn one. That drove
+ * finishCompleted on the server, which marks the USER'S TASK done and posts a
+ * "✓" to the thread, before any real work happened.
+ *
+ * Length is not evidence of completion. It is evidence of length.
+ *
+ * The two errors are not symmetric, which is what settles the design:
+ *  - Falsely "running" costs a job that idles until the 15-minute reaper closes
+ *    it and hands the task back to `open`. Annoying, and self-correcting.
+ *  - Falsely "completed" marks the owner's task done, and nothing corrects it.
+ *
+ * So completion is now something the agent must STATE, by calling
+ * ci_dispatch_checkpoint with status "completed". "blocked" is still inferred
+ * because that error is safe in the same way: a blocked job is resumable — the
+ * server treats blocked-on-needs-user as the reply-to-resume path — and the
+ * cost of missing a genuine block is the same idle-until-reaped.
+ */
 function inferDispatchStatus(assistantText) {
   const text = normalizeString(assistantText).toLowerCase();
   if (!text) return "running";
   if (/\b(need(s)? (you|the user)|blocked|cannot (continue|proceed)|waiting on you)\b/.test(text)) {
     return "blocked";
-  }
-  if (text.length >= 80 && !/\b(i('ll| will) (fetch|check|look)|working on (it|this)|let me (fetch|get))\b/.test(text)) {
-    return "completed";
   }
   return "running";
 }
@@ -843,7 +864,8 @@ function createDispatchCheckpointTool(api) {
     name: "ci_dispatch_checkpoint",
     label: "Checkpoint Memory dispatch",
     description:
-      "Push a dispatch checkpoint back to Companion Intelligence. Call after each meaningful step, and when finished or blocked.",
+      "Push a dispatch checkpoint back to Companion Intelligence. Call after each meaningful step, and when finished or blocked. " +
+      "The job stays open until you say otherwise: to finish it you MUST pass status \"completed\" explicitly — nothing infers that for you, and a job left un-finished is closed as failed after 15 minutes.",
     parameters: {
       type: "object",
       properties: {
@@ -863,15 +885,19 @@ function createDispatchCheckpointTool(api) {
       if (!jobId) return jsonResult({ error: "jobId required" });
       if (!content) return jsonResult({ error: "content required" });
       const client = createClient(api);
+      // An explicitly stated status wins; the fallback can only ever say
+      // "running" or "blocked" now, so an unstated status can no longer finish
+      // the job by accident. That mattered here as much as in the agent_end
+      // hook: a deliberate mid-work checkpoint whose content ran past 80
+      // characters used to complete the job the agent was reporting progress on.
+      const stated = normalizeString(params?.status);
       const body = {
         turns: [{ role: "assistant", content }],
-        status: normalizeString(params?.status) || inferDispatchStatus(content),
+        status: stated || inferDispatchStatus(content),
         ...(params?.needsUser ? { needsUser: true } : {}),
         ...(params?.failed ? { failed: true } : {}),
         ...(normalizeString(params?.step) ? { step: normalizeString(params.step) } : {}),
-        ...(normalizeString(params?.status) === "completed" || inferDispatchStatus(content) === "completed"
-          ? { result: { summary: content.slice(0, 800) } }
-          : {}),
+        ...(stated === "completed" ? { result: { summary: content.slice(0, 800) } } : {}),
       };
       const updated = await client.checkpoint(jobId, body);
       return jsonResult({ jobId, status: updated?.status || body.status });
@@ -994,11 +1020,29 @@ function createIntentTool(api, spec) {
         // something to retry; said plainly instead, with `retry: false` carried
         // explicitly so the instruction survives summarisation.
         if (payload && payload.error && payload.error.code === QUEUED_ERROR_CODE) {
+          // `details`, not the top level. `ToolError` on the server is
+          // `{ code, message, retryable, details }` and the queue metadata goes
+          // in `details` — there is no top-level slot for it in the type. This
+          // read was `payload.error.pendingActionId`, which is always
+          // undefined, so every queued call reported `pendingActionId: null`
+          // and the agent could not name the card it had just raised. The unit
+          // test built its fixture flat to match, which kept the bug green.
+          //
+          // The flat form is tolerated as a fallback only because the two ends
+          // release independently: a 90-day connect key outlives a server
+          // upgrade, so a harness can be older or newer than the appliance it
+          // is talking to.
+          const details = payload.error.details ?? {};
+
           return jsonResult({
             status: "awaiting_owner_approval",
             intent: spec.intent || spec.name,
             tool: spec.name,
-            pendingActionId: payload.error.pendingActionId ?? null,
+            pendingActionId:
+              details.pendingActionId ?? payload.error.pendingActionId ?? null,
+            // The owner has a deadline (24h by default). Worth telling the user,
+            // and it is already in the same object.
+            expiresAt: details.expiresAt ?? null,
             retry: false,
             message:
               "Companion Memory has asked the owner to approve this. It has NOT run. Tell the user you have requested approval; do not call this tool again for the same request.",
