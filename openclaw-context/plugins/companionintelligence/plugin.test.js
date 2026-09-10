@@ -206,14 +206,29 @@ test("extractDispatchJobIdFromEvent reads prompt and messages", () => {
   );
 });
 
-test("inferDispatchStatus completes a real answer and blocks when it needs the user", () => {
+test("inferDispatchStatus never claims a job is finished — length is not evidence", () => {
   assert.equal(inferDispatchStatus("I'll fetch the packet"), "running");
   assert.equal(inferDispatchStatus("Blocked. Need the user to pick a date."), "blocked");
+
+  // This USED to return "completed", and that was the bug: the rule was "80+
+  // characters and not obviously in-progress". A finished-sounding report and a
+  // turn-one PLAN are indistinguishable under that rule, and the plan is what
+  // the agent almost always writes first.
   assert.equal(
     inferDispatchStatus(
       "Called the office and left a message with Dana. They will call Bennett back tomorrow afternoon about the picnic permit.",
     ),
-    "completed",
+    "running",
+  );
+
+  // The message that made this urgent. Over 80 characters, matches none of the
+  // in-progress phrases, and describes work that has not started — yet it used
+  // to mark the owner's task DONE.
+  assert.equal(
+    inferDispatchStatus(
+      "Right — I'll start by reading the permit requirements, then contact the parks office to find out which documents they need before anything can be booked.",
+    ),
+    "running",
   );
 });
 
@@ -321,8 +336,14 @@ test("agent_end checkpoints a dispatch job even when turn sync is off", async ()
     assert.ok(checkpoint, "checkpoint POST missing");
     assert.equal(checkpoint.method, "POST");
     const body = JSON.parse(checkpoint.body);
-    assert.equal(body.status, "completed");
+    // The automatic hook keeps the job ALIVE; it does not finish it. agent_end
+    // fires after every turn, so anything it can assert, it asserts on turn one.
+    // Completion has to come from the agent calling ci_dispatch_checkpoint with
+    // status "completed" — a thing it does deliberately, once.
+    assert.equal(body.status, "running");
     assert.equal(body.turns[0].role, "assistant");
+    // And no result summary, which is what the server stores as the answer.
+    assert.equal(body.result, undefined);
   } finally {
     global.fetch = origFetch;
     clearFlags();
@@ -1140,6 +1161,73 @@ test("memory_search.execute surfaces the server's body.error in the thrown HTTP 
       api._toolFactories["memory_search"]().execute("id", { query: "q" }),
       (err) => String(err.message).includes("boom-detail") && String(err.message).includes("500"),
     );
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("the agent can still finish a job — by saying so, which is the point", async () => {
+  // Removing the inference must not remove the ability to complete. Otherwise
+  // every job would idle to the 15-minute reaper, which trades one wrong
+  // outcome for another.
+  const calls = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    calls.push({ url: String(url), body: opts?.body });
+
+    return { ok: true, status: 200, text: async () => JSON.stringify({ status: "completed" }) };
+  };
+  try {
+    const api = makeApi();
+    await plugin.register(api);
+    const tool = api._toolFactories["ci_dispatch_checkpoint"]();
+
+    await tool.execute("id", {
+      jobId: "01a061f8-755e-731f-9d11-a60906902ffa",
+      content: "Permit booked for the 14th, confirmation number 88213.",
+      status: "completed",
+    });
+
+    const body = JSON.parse(calls.find((c) => c.url.includes("/checkpoint")).body);
+
+    assert.equal(body.status, "completed");
+    // The summary rides only on an EXPLICIT completion — it is what the server
+    // stores as the job's answer, and attaching it to an inferred status is how
+    // a turn-one plan became the recorded outcome of the work.
+    assert.equal(body.result.summary, "Permit booked for the 14th, confirmation number 88213.");
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("a mid-work checkpoint with no stated status does not finish the job", async () => {
+  // The second site of the same bug. A deliberate progress report whose content
+  // ran past 80 characters used to complete the very job it was reporting
+  // progress on.
+  const calls = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    calls.push({ url: String(url), body: opts?.body });
+
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  try {
+    const api = makeApi();
+    await plugin.register(api);
+    const tool = api._toolFactories["ci_dispatch_checkpoint"]();
+
+    await tool.execute("id", {
+      jobId: "01a061f8-755e-731f-9d11-a60906902ffa",
+      content:
+        "Read the permit requirements and found they need proof of insurance, so I am going to look for that next before contacting the office.",
+    });
+
+    const body = JSON.parse(calls.find((c) => c.url.includes("/checkpoint")).body);
+
+    assert.equal(body.status, "running");
+    assert.equal(body.result, undefined);
   } finally {
     global.fetch = origFetch;
     clearFlags();
