@@ -544,7 +544,24 @@ test("a queued intent reads as 'asked the owner', not as a failure to retry", as
       text: async () =>
         JSON.stringify({
           success: false,
-          error: { code: "TOOL_QUEUED", message: "queued", pendingActionId: "pa-1" },
+          // THE SHAPE THE SERVER ACTUALLY SENDS. `ToolError` is
+          // `{ code, message, retryable, details }` — the queue metadata lives
+          // in `details` and the type has no top-level slot for it. This
+          // fixture used to be flat, matching a client that read
+          // `error.pendingActionId`, so the test passed while every real queued
+          // call reported `pendingActionId: null`. A fixture written against
+          // the implementation instead of the contract cannot catch the
+          // implementation being wrong about the contract.
+          error: {
+            code: "TOOL_QUEUED",
+            message: "queued",
+            retryable: false,
+            details: {
+              pendingActionId: "pa-1",
+              reason: "confirmation-required",
+              expiresAt: "2026-09-11T08:00:00.000Z",
+            },
+          },
         }),
     };
   };
@@ -558,8 +575,42 @@ test("a queued intent reads as 'asked the owner', not as a failure to retry", as
     assert.equal(payload.status, "awaiting_owner_approval");
     assert.equal(payload.retry, false);
     assert.equal(payload.pendingActionId, "pa-1");
+    assert.equal(payload.expiresAt, "2026-09-11T08:00:00.000Z");
     // It must not look like the plain failure shape the catch block produces.
     assert.equal(payload.success, undefined);
+  } finally {
+    global.fetch = origFetch;
+  }
+});
+
+test("a queued intent from an older appliance, with the id at the top level, is still named", async () => {
+  // The two ends release independently — a 90-day connect key outlives a server
+  // upgrade — so the harness can be newer than the appliance it talks to. The
+  // fallback exists for that, and is tested so it cannot be dropped as dead
+  // code by someone who only ever sees the current shape.
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    if ((opts.method || "GET") === "GET") return manifestFetch(u);
+
+    return {
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          success: false,
+          error: { code: "TOOL_QUEUED", message: "queued", pendingActionId: "pa-legacy" },
+        }),
+    };
+  };
+  try {
+    const api = makeApi();
+    await registerIntentTools(api);
+    const tool = api._toolFactories["memory_forget"]();
+    const payload = JSON.parse((await tool.execute("id", {})).content[0].text);
+
+    assert.equal(payload.pendingActionId, "pa-legacy");
+    assert.equal(payload.expiresAt, null);
   } finally {
     global.fetch = origFetch;
   }

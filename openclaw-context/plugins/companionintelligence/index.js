@@ -994,11 +994,29 @@ function createIntentTool(api, spec) {
         // something to retry; said plainly instead, with `retry: false` carried
         // explicitly so the instruction survives summarisation.
         if (payload && payload.error && payload.error.code === QUEUED_ERROR_CODE) {
+          // `details`, not the top level. `ToolError` on the server is
+          // `{ code, message, retryable, details }` and the queue metadata goes
+          // in `details` — there is no top-level slot for it in the type. This
+          // read was `payload.error.pendingActionId`, which is always
+          // undefined, so every queued call reported `pendingActionId: null`
+          // and the agent could not name the card it had just raised. The unit
+          // test built its fixture flat to match, which kept the bug green.
+          //
+          // The flat form is tolerated as a fallback only because the two ends
+          // release independently: a 90-day connect key outlives a server
+          // upgrade, so a harness can be older or newer than the appliance it
+          // is talking to.
+          const details = payload.error.details ?? {};
+
           return jsonResult({
             status: "awaiting_owner_approval",
             intent: spec.intent || spec.name,
             tool: spec.name,
-            pendingActionId: payload.error.pendingActionId ?? null,
+            pendingActionId:
+              details.pendingActionId ?? payload.error.pendingActionId ?? null,
+            // The owner has a deadline (24h by default). Worth telling the user,
+            // and it is already in the same object.
+            expiresAt: details.expiresAt ?? null,
             retry: false,
             message:
               "Companion Memory has asked the owner to approve this. It has NOT run. Tell the user you have requested approval; do not call this tool again for the same request.",
