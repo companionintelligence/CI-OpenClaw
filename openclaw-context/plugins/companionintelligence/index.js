@@ -948,11 +948,37 @@ async function executeIntentViaRest(config, intentName, input) {
 // An executable OpenClaw tool for one curated CI intent. Mirrors the memory
 // tools: authenticated requestJson transport, jsonResult payloads, and a
 // structured error result (never a throw) when CI-Server rejects or is down.
+// CI-Server's answer when an intent needs the owner's say-so. It arrives as a
+// normal HTTP 200 with this code in the body — NOT a 4xx — which is why it has
+// to be checked for explicitly rather than falling out of the error path.
+const QUEUED_ERROR_CODE = "TOOL_QUEUED";
+
+/** Does this intent need the owner to approve it before it runs? */
+function needsOwnerApproval(spec) {
+  return Boolean(spec.privacy && (spec.privacy.destructive || spec.privacy.external));
+}
+
+/**
+ * Tell the model, in the tool description, that the owner decides.
+ *
+ * Without this the agent discovers the gate only by calling and getting a result
+ * it will read as a plain failure — and the most likely next move for a model
+ * that just "failed" is to try again. A queued action retried in a loop is a
+ * pile of duplicate cards for one intent.
+ */
+function describeWithApprovalNote(spec) {
+  if (!needsOwnerApproval(spec)) {
+    return spec.description;
+  }
+
+  return `${spec.description}\n\nRequires the owner's approval: calling this does NOT perform it. Companion Memory queues an approval card and the owner answers on their own device. Report that you have asked and move on — do NOT call it again to check, and do not retry.`;
+}
+
 function createIntentTool(api, spec) {
   return {
     name: spec.name,
     label: spec.title || spec.name,
-    description: spec.description,
+    description: describeWithApprovalNote(spec),
     parameters: spec.parameters,
     execute: async (_toolCallId, params) => {
       const client = createClient(api);
@@ -962,6 +988,23 @@ function createIntentTool(api, spec) {
           spec.intent || spec.name,
           params ?? {},
         );
+
+        // A queue is not a failure, and must not read like one. The raw body has
+        // `success: false` and an error object, which a model will treat as
+        // something to retry; said plainly instead, with `retry: false` carried
+        // explicitly so the instruction survives summarisation.
+        if (payload && payload.error && payload.error.code === QUEUED_ERROR_CODE) {
+          return jsonResult({
+            status: "awaiting_owner_approval",
+            intent: spec.intent || spec.name,
+            tool: spec.name,
+            pendingActionId: payload.error.pendingActionId ?? null,
+            retry: false,
+            message:
+              "Companion Memory has asked the owner to approve this. It has NOT run. Tell the user you have requested approval; do not call this tool again for the same request.",
+          });
+        }
+
         return jsonResult(payload);
       } catch (error) {
         return jsonResult({
@@ -1000,8 +1043,18 @@ async function registerIntentTools(api, cfg) {
     const seen = new Set(RESERVED_TOOL_NAMES);
     for (const spec of manifestToToolSpecs(manifest)) {
       if (!spec.name || typeof spec.name !== "string") continue;
-      // Privacy filter: only read/write appliance-local intents become tools.
-      if (!spec.privacy || spec.privacy.destructive || spec.privacy.external) continue;
+      // Unlabelled intents stay out — no label means no way to warn the model.
+      if (!spec.privacy) continue;
+      // Destructive and external intents are NO LONGER hidden. They used to be
+      // skipped as "belt-and-braces" against a server 403, which was accurate
+      // when a connect key held `write`: capabilityAllows refused them before the
+      // gate, so registering them only bought confusing failures.
+      //
+      // CI-Server now mints these keys at `full` and queues anything irreversible
+      // as an approval card for the owner (see resolveToolGate's `managed-app`
+      // rule). Hiding the tools would therefore make the card unreachable — the
+      // agent cannot ask for what it cannot call. They are registered with the
+      // warning below instead, so the model knows the owner decides.
       // Collision filter: never shadow this plugin's own tools or an earlier intent.
       if (seen.has(spec.name)) {
         skipped.push(spec.name);

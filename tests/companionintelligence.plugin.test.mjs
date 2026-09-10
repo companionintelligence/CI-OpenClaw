@@ -206,7 +206,11 @@ await test("intent tools register from the catalog and execute via POST /api/int
       await new Promise((r) => setTimeout(r, 10));
     }
     assert.ok(factories["predictions_forecast"], "intent tool registered from the catalog");
-    assert.ok(!factories["memory_forget"], "destructive intent must not register");
+    // Registers now: CI-Server queues destructive intents as an approval card
+    // instead of refusing them, and a tool the agent cannot call is a card it can
+    // never ask for. Its description carries the owner-approval warning.
+    assert.ok(factories["memory_forget"], "destructive intent must register");
+    assert.match(factories["memory_forget"]().description, /Requires the owner's approval/);
     const result = await factories["predictions_forecast"]().execute("t1", { horizon: "24h" });
     const payload = JSON.parse(result.content[0].text);
     assert.equal(payload.success, true);
