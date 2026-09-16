@@ -1545,6 +1545,17 @@ function createConfigReconciler({
     // ("ci-hub": "http://host:11434") is truthy, so `|| {}` keeps it, and `{...string}`
     // spreads into {"0":"h","1":"t",...} — index-keyed junk that is schema-invalid and
     // gets the ENTIRE openclaw.json quarantined on the next boot.
+    // OpenClaw's model idle timeout follows `models.providers.<id>.timeoutSeconds`, and its
+    // built-in default is sized for a hosted API that answers in seconds. A Hub-managed engine
+    // is not that: the first byte of a streamed reply arrives only after the model is loaded and
+    // the prompt evaluated, and an agent turn here is ~160 KB of system prompt, tool schemas and
+    // history. Measured on beta-max (2026-09-15): 131.8 s to first byte for a 150 KB prompt into
+    // a cold qwen3.6:27b, 245 s under load — the default watchdog gave up at ~2 min every time,
+    // retried (re-sending the whole prompt), and surfaced "The model did not produce a response
+    // before the model idle timeout". Ten minutes is comfortably past the slowest cold start on
+    // the fleet; an operator who sets their own value keeps it.
+    const SELF_HOSTED_PROVIDER_TIMEOUT_SECONDS = 600;
+
     function syncOllamaApiProvider(providerId, label) {
       const current = isPlainObject(providers.node[providerId])
         ? providers.node[providerId]
@@ -1556,10 +1567,14 @@ function createConfigReconciler({
         api: "ollama",
         models: Array.isArray(current.models) ? current.models : [],
       };
+      if (typeof current.timeoutSeconds !== "number") {
+        next.timeoutSeconds = SELF_HOSTED_PROVIDER_TIMEOUT_SECONDS;
+      }
       if (
         current.baseUrl !== next.baseUrl ||
         current.apiKey !== next.apiKey ||
         current.api !== next.api ||
+        current.timeoutSeconds !== next.timeoutSeconds ||
         !Array.isArray(current.models)
       ) {
         providers.node[providerId] = next;

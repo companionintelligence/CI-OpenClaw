@@ -1494,6 +1494,36 @@ describe("reconcileConfig (end to end)", () => {
     );
   });
 
+  // OpenClaw's idle watchdog follows models.providers.<id>.timeoutSeconds; its default is sized for
+  // a hosted API. A Hub engine can take minutes to its first byte on an agent-sized prompt (131.8 s
+  // measured on beta-max), and the default watchdog killed every such turn.
+  test("gives the self-hosted providers a ten-minute idle timeout unless the operator set one", async () => {
+    dataDir = makeDataDir({
+      config: {
+        models: {
+          providers: {
+            "ci-hub": { models: [] },
+            ollama: { models: [], timeoutSeconds: 45 },
+          },
+        },
+      },
+      env: { OLLAMA_HOST: OLLAMA_DOWN },
+    });
+    const ctx = makeReconciler(dataDir);
+    await ctx.cfg.reconcileConfig();
+
+    const providers = readCfg(dataDir).models.providers;
+    assert.strictEqual(providers["ci-hub"].timeoutSeconds, 600);
+    // An operator's own number is theirs.
+    assert.strictEqual(providers.ollama.timeoutSeconds, 45);
+
+    // Idempotent: a second pass changes nothing and logs no provider sync.
+    const again = makeReconciler(dataDir);
+    await again.cfg.reconcileConfig();
+    assert.ok(!again.logs.some((l) => l.includes("synced ci-hub Ollama provider")));
+    assert.strictEqual(readCfg(dataDir).models.providers["ci-hub"].timeoutSeconds, 600);
+  });
+
   test("wires CI memory end to end when CI-Server credentials are present", async () => {
     await withOllama(CATALOG, async (baseUrl) => {
       dataDir = makeDataDir({
