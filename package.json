@@ -7,6 +7,7 @@
     "test:unit": "node --test",
     "test:sh": "for f in tests/*.test.sh; do [ -e \"$f\" ] || continue; bash \"$f\" || exit 1; done",
     "test:schema": "node tests/config-schema.gate.mjs",
+    "test:agent-turn": "node tests/agent-turn.gate.mjs",
     "check:ci-hub-plugin-drift": "scripts/check-ci-hub-plugin-drift.sh --check"
   },
   "dependencies": {

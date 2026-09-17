@@ -93,6 +93,9 @@ const HUB_CLOUD_PROVIDER_SPECS = [
   },
 ];
 
+/** Sidecar in the data dir recording the last Hub handout applied (see readHandoutRecord). */
+const HANDOUT_RECORD_FILENAME = "ci-hub-handout.json";
+
 const HUB_AUTHORITATIVE_ENV_KEYS = [
   "CI_SERVER_URL",
   "CI_SERVER_TOKEN",
@@ -271,6 +274,99 @@ function buildOllamaModelEntry(modelId, displayName, capabilities, numCtx) {
   };
 }
 
+/**
+ * Decide agents.defaults.model.primary from what the pool has and what the Hub handed out.
+ *
+ * The fleet failure this exists for (2026-09-17): a node's Hub moved its default from
+ * gemma3:1b — which cannot call tools — to qwen3-coder:30b, but the agent kept
+ * `ci-hub/gemma3:1b` because that id was still installed, and every turn failed with
+ * "gemma3:1b does not support tools". Three rules, in order:
+ *
+ *   1. A primary that is not `ci-hub/...` was chosen by an operator. Leave it alone.
+ *   2. A `ci-hub/...` primary that is no longer in the ci-hub catalog, or that the pool
+ *      REPORTS cannot call tools, is replaced. Unknown capabilities (a failed /api/show)
+ *      are not a report and never move it.
+ *   3. Otherwise, a primary equal to the one we last applied (`record.primary`) is ours
+ *      and follows the current handout; any other primary is an operator's pick and stays.
+ *      With no record (an install that predates it) we cannot tell, so a primary that
+ *      agrees with the current handout stays and anything else is treated as stale.
+ *
+ * The Hub's own choice is `ci-hub/auto`: the Hub resolves `auto` itself, so the config
+ * stays right across default changes without a rewrite. `auto` IS the Hub default,
+ * though, so when the pool reports that model has no tool support the Hub choice steps
+ * onto the first tool-capable installed model instead (added to the ci-hub catalog so the
+ * ref resolves). If there is none, the Hub's pick stands and `toolless` says why turns
+ * will fail.
+ *
+ * Pure: no I/O, no logging.
+ *
+ * @param {object} params
+ * @param {unknown} params.existingPrimary  agents.defaults.model.primary as found.
+ * @param {{defaultModel: string|null, primary: string}|null} params.record  Last handout applied.
+ * @param {object[]} params.hubModels       The ci-hub catalog (`auto` plus the Hub target).
+ * @param {string|null} params.hubTargetId  The installed model `auto` stands for.
+ * @param {object[]} params.ollamaModels    Every installed chat model, in pool order.
+ * @param {Record<string, boolean|null>} params.toolSupportById  From discoverOllamaModels.
+ * @returns {{primary: string|null, hubPrimary: string|null, hubModels: object[],
+ *            reason: string, toolless: string|null}}
+ */
+function resolveAgentPrimary({
+  existingPrimary,
+  record,
+  hubModels,
+  hubTargetId,
+  ollamaModels,
+  toolSupportById,
+}) {
+  const lacksTools = (id) => toolSupportById?.[id] === false;
+
+  let catalog = hubModels;
+  let hubPrimaryId = hubModels.some((model) => model.id === "auto")
+    ? "auto"
+    : hubTargetId ?? null;
+  let toolless = null;
+  if (hubPrimaryId && lacksTools(hubPrimaryId)) {
+    toolless = hubTargetId ?? hubPrimaryId;
+    const alternative = ollamaModels.find((model) => toolSupportById?.[model.id] === true);
+    if (alternative) {
+      hubPrimaryId = alternative.id;
+      if (!catalog.some((model) => model.id === alternative.id)) {
+        catalog = [...catalog, alternative];
+      }
+    }
+  }
+  const hubPrimary = hubPrimaryId ? `ci-hub/${hubPrimaryId}` : null;
+  const decide = (primary, reason) => ({
+    primary,
+    hubPrimary,
+    hubModels: catalog,
+    reason,
+    toolless,
+  });
+
+  if (typeof existingPrimary !== "string" || existingPrimary === "") {
+    return decide(hubPrimary, "unset");
+  }
+  if (!existingPrimary.startsWith("ci-hub/")) {
+    return decide(existingPrimary, "not-hub-managed");
+  }
+  const currentId = existingPrimary.slice("ci-hub/".length);
+  if (!catalog.some((model) => model.id === currentId)) {
+    return decide(hubPrimary, "not-in-catalog");
+  }
+  if (lacksTools(currentId)) {
+    return decide(hubPrimary, "no-tool-support");
+  }
+  if (record) {
+    return existingPrimary === record.primary
+      ? decide(hubPrimary, "follows-handout")
+      : decide(existingPrimary, "operator-choice");
+  }
+  return currentId === hubPrimaryId || currentId === hubTargetId
+    ? decide(existingPrimary, "consistent-with-handout")
+    : decide(hubPrimary, "stale");
+}
+
 // ---------------------------------------------------------------------------
 // The reconciler.
 // ---------------------------------------------------------------------------
@@ -311,6 +407,10 @@ function createConfigReconciler({
 
   const CONFIG_FILE = path.join(configDir, "openclaw.json");
   const ENV_FILE = path.join(configDir, ".env");
+  // Our own sidecar, NOT a key in openclaw.json: that schema is strict and an unknown key
+  // quarantines the whole file. Deliberately not named `openclaw.json.*`, which is
+  // OpenClaw's namespace for its backups and quarantine snapshots.
+  const HANDOUT_FILE = path.join(configDir, HANDOUT_RECORD_FILENAME);
 
   const CI_PLUGIN_PATH = pluginPaths.ciRuntime;
   const CI_MEMORY_PLUGIN_PATH = pluginPaths.ciMemory;
@@ -433,6 +533,50 @@ function createConfigReconciler({
     } catch {
       configWrittenAtMs = Date.now();
     }
+  }
+
+  /**
+   * The Hub handout we last applied to agents.defaults.model.primary:
+   * `{ defaultModel, primary }`, or null when none was ever recorded (fresh data dir, or
+   * written by an image that predates the record).
+   *
+   * This is what tells a stale Hub value from an operator's choice. A primary equal to
+   * `primary` here is the one WE set, so it follows the next handout; any other primary
+   * was picked by someone and is kept for as long as it still works.
+   */
+  function readHandoutRecord() {
+    try {
+      const record = JSON.parse(fs.readFileSync(HANDOUT_FILE, "utf8"));
+      if (isPlainObject(record) && typeof record.primary === "string") {
+        return {
+          defaultModel:
+            typeof record.defaultModel === "string" ? record.defaultModel : null,
+          primary: record.primary,
+        };
+      }
+    } catch {
+      // Missing or unreadable: behave as if nothing was recorded.
+    }
+    return null;
+  }
+
+  /** Persist the handout record, but only when it changed — a steady-state boot writes nothing. */
+  function writeHandoutRecord(record) {
+    const current = readHandoutRecord();
+    if (
+      current &&
+      current.defaultModel === record.defaultModel &&
+      current.primary === record.primary
+    ) {
+      return false;
+    }
+    fs.writeFileSync(
+      HANDOUT_FILE,
+      JSON.stringify({ ...record, appliedAt: new Date().toISOString() }, null, 2) + "\n",
+      { mode: 0o600 },
+    );
+    restrictToOwner(HANDOUT_FILE);
+    return true;
   }
 
   function ensureConfigDir() {
@@ -1142,6 +1286,10 @@ function createConfigReconciler({
     const ctxNum = ctxEntry ? Number(ctxEntry[1]) : Number.NaN;
     const contextLimit = Number.isFinite(ctxNum) && ctxNum > 0 ? ctxNum : undefined;
     return {
+      // Whether Ollama actually answered. A failed /api/show still yields an entry (with
+      // every capability off), but "we could not ask" is not "the model cannot call tools",
+      // and only the latter may move the agent's primary model.
+      known: payload != null,
       supportsTools: caps.includes("tools"),
       reasoning: caps.includes("thinking"),
       vision: caps.includes("vision"),
@@ -1155,6 +1303,9 @@ function createConfigReconciler({
    * Returns every non-embedding tag (for models.providers.ollama) and prepends an
    * "auto" alias pointing at DEFAULT_MODEL (or the first model) so ci-hub can keep a
    * stable Hub-default selection without listing the whole local fleet.
+   *
+   * `toolSupportById` maps each returned id (auto included) to true/false when Ollama
+   * reported capabilities, or null when /api/show failed and nobody knows.
    */
   async function discoverOllamaModels(ollamaBaseUrl, defaultModel) {
     const numCtx = resolveHubNumCtx();
@@ -1170,6 +1321,9 @@ function createConfigReconciler({
 
     const models = [];
     const seen = new Set();
+    const toolSupportById = {};
+    const toolSupport = (capabilities) =>
+      capabilities.known ? capabilities.supportsTools === true : null;
     const addModel = async (id, name) => {
       if (
         typeof id !== "string" ||
@@ -1183,6 +1337,7 @@ function createConfigReconciler({
       seen.add(id);
       const capabilities = await fetchOllamaModelCapabilities(ollamaBaseUrl, id);
       models.push(buildOllamaModelEntry(id, name || id, capabilities, numCtx));
+      toolSupportById[id] = toolSupport(capabilities);
       return true;
     };
 
@@ -1208,9 +1363,10 @@ function createConfigReconciler({
           numCtx,
         ),
       );
+      toolSupportById.auto = toolSupport(autoCapabilities);
     }
 
-    return { models, defaultModelAvailable, firstModelId };
+    return { models, defaultModelAvailable, firstModelId, toolSupportById };
   }
 
   // -------------------------------------------------------------------------
@@ -1331,7 +1487,10 @@ function createConfigReconciler({
    * actually changed. That is what makes reconcile converge: a steady-state boot must
    * not rewrite the file, or every restart would churn it.
    *
-   * No-ops entirely if there is no config to reconcile (fresh container, pre-onboard).
+   * A missing openclaw.json is created from scratch when the app is already configured
+   * (the Hub handed out inference settings, or a provider key exists) — see below. With
+   * nothing configured (pre-onboarding, the setup wizard's job) it no-ops and creates
+   * nothing.
    */
   async function reconcileConfig() {
     // A quarantine is not confined to the doctor call — the gateway also rejects the
@@ -1340,7 +1499,25 @@ function createConfigReconciler({
     // No-op on first boot, when we have not written anything to attribute it to.
     if (configWrittenAtMs) warnIfConfigClobbered(configWrittenAtMs);
 
-    const config = readConfig();
+    let changed = false;
+    let config = readConfig();
+    // Fresh data dir on a Hub-configured app: there is no openclaw.json yet, but the
+    // gateway is about to start anyway (isConfigured() is what startOpenclaw gates on).
+    // Returning early here used to hand the empty dir to `openclaw doctor --repair`,
+    // which writes a minimal config with no models section — and the gateway came up on
+    // it "not onboarded", falling back to a default model whose harness the image does
+    // not ship (beta-max: `Agent harness runtime "codex" is unavailable`), until the
+    // container happened to restart. Build the config here instead, so doctor validates
+    // a complete one, exactly as on every later boot.
+    //
+    // Only when the file is ABSENT. readConfig() also returns null for a file that exists
+    // but cannot be parsed (and has no usable .bak); overwriting that would destroy
+    // whatever an operator could still recover from it.
+    if (config === null && !fs.existsSync(CONFIG_FILE) && isConfigured()) {
+      config = {};
+      changed = true;
+      log.log("Patched config: created openclaw.json from the Hub handout (fresh data dir)");
+    }
     // Bail on a non-record top-level config (a hand-edited array or scalar): walking it
     // as a record would either attach named props that JSON.stringify silently drops
     // (an array churns the file every boot) or throw on the second path segment. Such a
@@ -1357,7 +1534,8 @@ function createConfigReconciler({
     // stale .env, so e.g. a Hub CI_SERVER_ENABLED="false" actually disables memory.
     applyHubAuthoritativeEnv(env);
 
-    let changed = false;
+    // The handout record to persist once openclaw.json is written (see writeHandoutRecord).
+    let pendingHandoutRecord = null;
 
     // Control UI behind the CI app proxy: trust rewritten local Origins.
     // OpenClaw 2026.9.1 removed gateway.controlUi.allowInsecureAuth; device-auth
@@ -1521,6 +1699,24 @@ function createConfigReconciler({
       log.log("Patched config: set gateway.bind to loopback");
     }
 
+    // Name the port the gateway really listens on. server.cjs starts it with
+    // `--port <gatewayPort>`, but that flag lives only on that one process: every OTHER
+    // openclaw command in the container (`openclaw agent`, `sessions`, `status`, and the
+    // agent's own shell calls) resolves the port from here and otherwise defaults to
+    // 18789 — which in this image is the SETUP PROXY, not the gateway. The proxy rewrites
+    // Origin for the browser Control UI, so the gateway treats the CLI as a browser
+    // client and refuses every write: `missing scope: operator.write` (core-3, beta-1,
+    // core-6 on 2026-09-17). Pointed straight at the gateway, the CLI authenticates with
+    // this file's gateway.auth.token and gets its normal operator scopes. Precedence is
+    // --port > OPENCLAW_GATEWAY_PORT > gateway.port, so the gateway process is unaffected.
+    if (config.gateway.port !== gatewayPort) {
+      config.gateway.port = gatewayPort;
+      changed = true;
+      log.log(
+        `Patched config: set gateway.port to ${gatewayPort} so the in-container CLI reaches the gateway, not the setup proxy`,
+      );
+    }
+
     // Mirror Hub-managed inference into OpenClaw:
     //   - models.providers.ci-hub  → Hub default / "auto" only (stable appliance primary)
     //   - models.providers.ollama  → full local tag catalog when Ollama is reachable
@@ -1594,18 +1790,56 @@ function createConfigReconciler({
         models: discoveredModels,
         defaultModelAvailable,
         firstModelId,
+        toolSupportById,
       } = await discoverOllamaModels(ollamaBaseUrl, defaultModel);
 
       if (discoveredModels.length > 0) {
         const hubTargetId = defaultModelAvailable || firstModelId;
-        const hubModels = discoveredModels.filter(
-          (model) =>
-            model.id === "auto" ||
-            (hubTargetId != null && model.id === hubTargetId),
-        );
         const ollamaModels = discoveredModels.filter(
           (model) => model.id !== "auto",
         );
+
+        // Decided before the catalogs are written: when the Hub default cannot call
+        // tools, the decision adds a tool-capable model to the ci-hub catalog.
+        const existingPrimary =
+          isPlainObject(config.agents) &&
+          isPlainObject(config.agents.defaults) &&
+          isPlainObject(config.agents.defaults.model)
+            ? config.agents.defaults.model.primary
+            : undefined;
+        const decision = resolveAgentPrimary({
+          existingPrimary,
+          record: readHandoutRecord(),
+          hubModels: discoveredModels.filter(
+            (model) =>
+              model.id === "auto" ||
+              (hubTargetId != null && model.id === hubTargetId),
+          ),
+          hubTargetId,
+          ollamaModels,
+          toolSupportById,
+        });
+        const hubModels = decision.hubModels;
+        if (decision.toolless) {
+          log.warn(
+            decision.hubPrimary &&
+              toolSupportById[decision.hubPrimary.slice("ci-hub/".length)] === true
+              ? `The pool reports the Hub default model ${decision.toolless} cannot call tools; ` +
+                  `using ${decision.hubPrimary} as the agent's model instead`
+              : `The pool reports the Hub default model ${decision.toolless} cannot call tools, ` +
+                  "and no installed model can — agent turns will fail until one is installed",
+          );
+        }
+        if (
+          decision.reason === "not-hub-managed" &&
+          existingPrimary.startsWith("ollama/") &&
+          toolSupportById[existingPrimary.slice("ollama/".length)] === false
+        ) {
+          log.warn(
+            `The agent's model ${existingPrimary} cannot call tools (the pool says so); ` +
+              "it was chosen explicitly, so it is left as is",
+          );
+        }
 
         if (
           JSON.stringify(nextHubProvider.models || []) !==
@@ -1665,38 +1899,34 @@ function createConfigReconciler({
           log.log("Patched config: merged ci-hub + ollama model options");
         }
 
-        const existingPrimary = isPlainObject(defaults.node.model)
-          ? defaults.node.model.primary
-          : undefined;
-        let primaryId = null;
-        if (
-          typeof existingPrimary === "string" &&
-          existingPrimary.startsWith("ci-hub/")
-        ) {
-          const currentId = existingPrimary.slice("ci-hub/".length);
-          if (hubModels.some((model) => model.id === currentId)) {
-            primaryId = currentId;
-          }
-        }
-        if (!primaryId) {
-          // Prefer Hub Auto when present — stable across Hub default model changes.
-          primaryId = hubModels.some((model) => model.id === "auto")
-            ? "auto"
-            : defaultModelAvailable || firstModelId;
-        }
-        if (primaryId) {
+        if (decision.primary) {
           // Record-guard the node we assign .primary into: on a scalar the assignment
           // silently no-ops, so `changed` would be set on every boot forever.
           const model = ensureRecordPathTracked(config, ["agents", "defaults", "model"]);
           changed = model.replaced || changed;
-          const nextPrimaryModel = `ci-hub/${primaryId}`;
-          if (model.node.primary !== nextPrimaryModel) {
-            model.node.primary = nextPrimaryModel;
+          if (model.node.primary !== decision.primary) {
+            const was = typeof existingPrimary === "string" && existingPrimary
+              ? existingPrimary
+              : null;
+            const why = {
+              "not-in-catalog": `${was} is no longer in the ci-hub catalog`,
+              "no-tool-support": `the pool reports ${was} cannot call tools`,
+              "follows-handout": `following the Hub handout (DEFAULT_MODEL=${defaultModel || "unset"}); was ${was}`,
+              stale: `${was} is a stale Hub default`,
+            }[decision.reason];
+            model.node.primary = decision.primary;
             changed = true;
             log.log(
-              `Patched config: set default agent model to ${nextPrimaryModel}`,
+              `Patched config: set default agent model to ${decision.primary}` +
+                (why ? ` (${why})` : ""),
             );
           }
+        }
+        if (decision.hubPrimary) {
+          pendingHandoutRecord = {
+            defaultModel: defaultModel || null,
+            primary: decision.hubPrimary,
+          };
         }
       } else {
         log.warn(
@@ -1724,6 +1954,8 @@ function createConfigReconciler({
         changed = true;
         log.log(`Patched config: set default agent model to ${nextPrimaryModel}`);
       }
+      // We chose it, so the next boot with a reachable pool may move it.
+      pendingHandoutRecord ??= { defaultModel, primary: nextPrimaryModel };
     }
 
     // Safety net for nodes reconcile only rewrites on an ACTIVE feature path. When
@@ -1754,6 +1986,11 @@ function createConfigReconciler({
     if (changed) {
       writeConfig(config);
     }
+    // After the config, never before: a record naming a primary that never reached
+    // openclaw.json would make the next boot mistake an operator's pick for ours.
+    if (pendingHandoutRecord) {
+      writeHandoutRecord(pendingHandoutRecord);
+    }
 
     // Sync gateway token to .env so the proxy always has it
     const token = auth.node.token;
@@ -1775,6 +2012,7 @@ function createConfigReconciler({
     writeEnv,
     readConfig,
     writeConfig,
+    readHandoutRecord,
     ensureConfigDir,
     buildChildEnv,
     applyHubAuthoritativeEnv,
@@ -1817,7 +2055,9 @@ module.exports = {
   BROWSER_PLUGIN_ID,
   CHROMIUM_EXECUTABLE_PATH,
   HOOKS_WAKE_TOKEN_ENV_REF,
+  HANDOUT_RECORD_FILENAME,
   // Stateless helpers: no I/O, no logging, no injected state.
+  resolveAgentPrimary,
   isPlainObject,
   ensureRecordPath,
   ensureRecordPathTracked,

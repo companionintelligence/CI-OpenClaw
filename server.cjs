@@ -214,6 +214,12 @@ function startOpenclaw({ repair = true } = {}) {
 
   // .finally() ensures the gateway starts even if doctor fails or rejects —
   // a degraded gateway is better than no gateway.
+  //
+  // Reconcile runs FIRST, and on a fresh data dir it creates openclaw.json from the Hub
+  // handout rather than skipping. Doctor must never be handed an empty dir: it writes a
+  // minimal config with no models section and the gateway comes up unconfigured on it
+  // (core-2 and beta-max, 2026-09-17). Doctor then validates the file we wrote, and
+  // warnIfConfigClobbered reports it if doctor had to quarantine it.
   console.log("Running openclaw doctor before gateway start...");
   startAfterReconcile()
     .finally(() => runDoctor().finally(spawnGateway));

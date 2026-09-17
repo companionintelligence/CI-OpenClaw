@@ -152,13 +152,28 @@ jobs:
           SCHEMA_GATE_OUTDIR: ${{ runner.temp }}/schema-gate
         run: npm run test:schema
 
+      # A real headless turn on that config, started the way QA and other apps start one inside
+      # the container: `openclaw agent`, no port/config/model override, against a live gateway and
+      # a stub Ollama. Catches the in-container CLI losing its way to the gateway (on 2026-09-17 it
+      # dialed the setup proxy and every turn was refused "missing scope: operator.write"), and
+      # reports whether upstream's `agent exec` provider bug is still there.
+      - name: Run a headless agent turn on the reconciled config
+        env:
+          CI: "true"
+          AGENT_TURN_GATE_OUTDIR: ${{ runner.temp }}/agent-turn-gate
+        run: npm run test:agent-turn
+
       - name: Upload the generated configs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           retention-days: 7
           name: openclaw-configs-${{ matrix.channel }}
-          path: ${{ runner.temp }}/schema-gate/
+          path: |
+            ${{ runner.temp }}/schema-gate/
+            ${{ runner.temp }}/agent-turn-gate/*.json
+            ${{ runner.temp }}/agent-turn-gate/*.log
+            ${{ runner.temp }}/agent-turn-gate/home/.openclaw/openclaw.json
           if-no-files-found: ignore
 
   plugin-integrity:

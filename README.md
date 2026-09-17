@@ -230,6 +230,21 @@ It runs on every PR (`.github/workflows/ci.yml`) and nightly against `openclaw@l
 as an advisory signal. Without the CLI on `PATH` it skips locally, but hard-fails when
 `CI` is set, so CI can never silently pass by not running it.
 
+#### Agent-turn gate
+
+Runs a real headless turn on the config reconcile writes for a fresh data dir. It starts a
+live `openclaw gateway` and sends `openclaw agent` with no port, config or model override,
+which is how QA and other apps start a turn inside the container. The turn must complete
+on `ci-hub/auto`, carrying the Hub-issued key. The gate also reports the setup-proxy path
+the fleet hit (`missing scope: operator.write`) and whether upstream's `agent exec` provider
+bug is still present.
+
+```bash
+npm run test:agent-turn
+```
+
+See [docs/operations/agent-automation.md](docs/operations/agent-automation.md).
+
 ### Verify in a running container
 
 ```bash

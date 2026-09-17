@@ -36,6 +36,8 @@ export const {
   normalizeEmbeddingsBaseUrl,
   isEmbeddingModel,
   buildOllamaModelEntry,
+  resolveAgentPrimary,
+  HANDOUT_RECORD_FILENAME,
 } = require(path.join(REPO, "config-reconcile.cjs"));
 
 // The three vendored plugin dirs really exist in a checkout, so fs.existsSync in
@@ -72,6 +74,7 @@ export function makeDataDir({ config = {}, env = {} } = {}) {
 
 export const cfgPath = (dir) => path.join(dir, "openclaw.json");
 export const envPath = (dir) => path.join(dir, ".env");
+export const handoutPath = (dir) => path.join(dir, HANDOUT_RECORD_FILENAME);
 export const readCfg = (dir) => JSON.parse(fs.readFileSync(cfgPath(dir), "utf8"));
 export const rmDir = (dir) => {
   if (dir) fs.rmSync(dir, { recursive: true, force: true });
@@ -112,15 +115,27 @@ export const CATALOG = {
  * tolerate-a-failing-model path is covered. Point OLLAMA_HOST at a closed port instead
  * of calling this to simulate Ollama being down (ECONNREFUSED is immediate, so the 5s
  * AbortSignal timeout never stalls the suite).
+ *
+ * `/api/chat` answers like Ollama too, for the gates that run a real OpenClaw turn: an
+ * NDJSON stream whose reply is `CHAT_REPLY`, or Ollama's own 400 when tools are sent to a
+ * model without the "tools" capability. `aliases` maps a model id the Hub pool resolves
+ * itself (`auto`) onto an installed one; aliases are never listed by /api/tags.
  */
-export async function withOllama(catalog, fn) {
+export const CHAT_REPLY = "STUB-OLLAMA-REPLY";
+
+export async function withOllama(catalog, fn, { aliases = {} } = {}) {
   const requests = [];
   const server = http.createServer((req, res) => {
     let raw = "";
     req.on("data", (chunk) => (raw += chunk));
     req.on("end", () => {
       const body = raw ? JSON.parse(raw) : null;
-      requests.push({ method: req.method, url: req.url, body });
+      requests.push({
+        method: req.method,
+        url: req.url,
+        body,
+        authorization: req.headers.authorization ?? null,
+      });
       const json = (code, payload) => {
         res.writeHead(code, { "Content-Type": "application/json" });
         res.end(JSON.stringify(payload));
@@ -130,8 +145,36 @@ export async function withOllama(catalog, fn) {
           models: Object.keys(catalog).map((name) => ({ name })),
         });
       }
+      if (req.url === "/api/chat") {
+        const modelId = aliases[body?.model] ?? body?.model;
+        const spec = catalog[modelId];
+        if (!spec || spec === "error") {
+          return json(404, { error: `model "${body?.model}" not found` });
+        }
+        const wantsTools = Array.isArray(body?.tools) && body.tools.length > 0;
+        if (wantsTools && !(spec.capabilities ?? []).includes("tools")) {
+          return json(400, { error: `registry.ollama.ai/library/${modelId} does not support tools` });
+        }
+        const at = new Date().toISOString();
+        res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+        res.write(
+          JSON.stringify({ model: body.model, created_at: at, message: { role: "assistant", content: CHAT_REPLY }, done: false }) + "\n",
+        );
+        res.end(
+          JSON.stringify({
+            model: body.model,
+            created_at: at,
+            message: { role: "assistant", content: "" },
+            done: true,
+            done_reason: "stop",
+            prompt_eval_count: 1,
+            eval_count: 1,
+          }) + "\n",
+        );
+        return;
+      }
       if (req.url === "/api/show") {
-        const spec = catalog[body?.name];
+        const spec = catalog[aliases[body?.name] ?? body?.name];
         if (!spec) return json(404, {});
         if (spec === "error") return json(500, { error: "boom" });
         return json(200, {
