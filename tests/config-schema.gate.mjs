@@ -166,6 +166,16 @@ const SCENARIOS = [
   { name: "capped-num-ctx", env: { CI_LLM_NUM_CTX: "131072" }, catalog: SMALL_MODEL },
   { name: "ollama-offline", env: MEM, offline: true },
   { name: "upgrade-from-legacy", env: { ...MEM, ...HUB }, seed: LEGACY },
+  // No openclaw.json at all on a Hub-configured app: reconcile builds the whole file,
+  // and that file is the one doctor and the gateway will read first.
+  {
+    name: "fresh-data-dir",
+    env: { ...MEM, ...HUB, OPENAI_API_KEY: "hub-issued", DEFAULT_MODEL: "qwen3:4b" },
+    seed: null,
+  },
+  // A Hub default that cannot call tools: the primary moves to a tool-capable model that
+  // reconcile adds to the ci-hub catalog, and that catalog must still validate.
+  { name: "hub-default-without-tools", env: { DEFAULT_MODEL: "llava:7b" } },
   // A hand-edited config with malformed nodes on paths that are INACTIVE here (Ollama
   // down, no creds), so nothing coerces them via a feature path. The reconciler's
   // safety net must still produce a schema-valid file; without it these scalars survive
@@ -183,7 +193,8 @@ async function generate(scenario) {
   const catalog = scenario.catalog ?? CATALOG;
   const run = async (baseUrl) => {
     const dir = makeDataDir({
-      config: scenario.seed ?? {},
+      // `seed: null` means no openclaw.json at all, not an empty one.
+      config: "seed" in scenario ? scenario.seed : {},
       env: { OLLAMA_HOST: baseUrl, ...scenario.env },
     });
     try {

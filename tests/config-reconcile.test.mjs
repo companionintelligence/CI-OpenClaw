@@ -25,6 +25,8 @@ import {
   ensureArrayPath,
   removeArrayItem,
   normalizeEmbeddingsBaseUrl,
+  resolveAgentPrimary,
+  HANDOUT_RECORD_FILENAME,
   makeDataDir,
   makeReconciler,
   withOllama,
@@ -32,6 +34,7 @@ import {
   readCfg,
   cfgPath,
   envPath,
+  handoutPath,
   rmDir,
   CATALOG,
   OLLAMA_DOWN,
@@ -1224,6 +1227,7 @@ describe("reconcileConfig (end to end)", () => {
       const config = readCfg(dataDir);
       assert.strictEqual(config.gateway.mode, "local");
       assert.strictEqual(config.gateway.bind, "loopback");
+      assert.strictEqual(config.gateway.port, 18790);
       assert.strictEqual(config.gateway.auth.mode, "token");
       assert.match(config.gateway.auth.token, /^[0-9a-f]{48}$/);
       assert.ok(!("allowInsecureAuth" in config.gateway.controlUi));
@@ -1352,6 +1356,7 @@ describe("reconcileConfig (end to end)", () => {
       const epoch = new Date(0);
       fs.utimesSync(cfgPath(dataDir), epoch, epoch);
       fs.utimesSync(envPath(dataDir), epoch, epoch);
+      fs.utimesSync(handoutPath(dataDir), epoch, epoch);
       ctx.logs.length = 0;
 
       await ctx.cfg.reconcileConfig();
@@ -1360,6 +1365,7 @@ describe("reconcileConfig (end to end)", () => {
       assert.strictEqual(fs.readFileSync(cfgPath(dataDir), "utf8"), first);
       assert.strictEqual(fs.statSync(cfgPath(dataDir)).mtimeMs, 0, "changed=false must skip writeConfig");
       assert.strictEqual(fs.statSync(envPath(dataDir)).mtimeMs, 0, "token already synced -> no writeEnv");
+      assert.strictEqual(fs.statSync(handoutPath(dataDir)).mtimeMs, 0, "same handout -> no record write");
     });
   });
 
@@ -1744,6 +1750,370 @@ describe("reconcileConfig (end to end)", () => {
       assert.ok(!("hubManaged" in providers.anthropic));
       assert.strictEqual(providers["ci-hub"].api, "ollama");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveAgentPrimary — which model the agent runs on, as a pure decision.
+//
+// The fleet incident (core-4, 2026-09-17): the Hub moved its default from gemma3:1b, which
+// cannot call tools, to qwen3-coder:30b. The agent kept `ci-hub/gemma3:1b` because that id
+// was still installed, and every turn failed "gemma3:1b does not support tools".
+// ---------------------------------------------------------------------------
+describe("resolveAgentPrimary", () => {
+  const entry = (id) => ({ id, name: id });
+  const TOOLS = { auto: true, "qwen3-coder:30b": true, "llama3.1:8b": true, "gemma3:1b": false };
+  const base = {
+    record: null,
+    hubModels: [entry("auto"), entry("qwen3-coder:30b")],
+    hubTargetId: "qwen3-coder:30b",
+    ollamaModels: [entry("gemma3:1b"), entry("qwen3-coder:30b"), entry("llama3.1:8b")],
+    toolSupportById: TOOLS,
+  };
+
+  test("no primary yet: the Hub's own choice, ci-hub/auto", () => {
+    const d = resolveAgentPrimary({ ...base, existingPrimary: undefined });
+    assert.strictEqual(d.primary, "ci-hub/auto");
+    assert.strictEqual(d.hubPrimary, "ci-hub/auto");
+    assert.strictEqual(d.reason, "unset");
+  });
+
+  test("an operator's non-Hub primary is never touched, whatever the handout says", () => {
+    for (const existingPrimary of ["anthropic/claude-sonnet-4-6", "ollama/llama3.1:8b", "ollama/gemma3:1b"]) {
+      const d = resolveAgentPrimary({
+        ...base,
+        existingPrimary,
+        record: { defaultModel: "gemma3:1b", primary: "ci-hub/auto" },
+      });
+      assert.strictEqual(d.primary, existingPrimary);
+      assert.strictEqual(d.reason, "not-hub-managed");
+    }
+  });
+
+  // The incident, on the broad ci-hub catalog 2026.8.5 wrote: gemma3:1b is still LISTED, so
+  // "is it installed?" alone kept it. What the pool reports about tools must decide.
+  test("drops a still-listed ci-hub primary the pool reports cannot call tools", () => {
+    const d = resolveAgentPrimary({
+      ...base,
+      existingPrimary: "ci-hub/gemma3:1b",
+      hubModels: [entry("auto"), entry("qwen3-coder:30b"), entry("gemma3:1b")],
+    });
+    assert.strictEqual(d.primary, "ci-hub/auto");
+    assert.strictEqual(d.reason, "no-tool-support");
+  });
+
+  test("...even when an operator picked it: a model that cannot call tools fails every turn", () => {
+    const d = resolveAgentPrimary({
+      ...base,
+      existingPrimary: "ci-hub/gemma3:1b",
+      record: { defaultModel: "qwen3-coder:30b", primary: "ci-hub/auto" },
+      hubModels: [entry("auto"), entry("qwen3-coder:30b"), entry("gemma3:1b")],
+    });
+    assert.strictEqual(d.primary, "ci-hub/auto");
+  });
+
+  test("unknown capabilities (a failed /api/show) are not a report and move nothing", () => {
+    const d = resolveAgentPrimary({
+      ...base,
+      existingPrimary: "ci-hub/qwen3-coder:30b",
+      toolSupportById: { ...TOOLS, "qwen3-coder:30b": null },
+    });
+    assert.strictEqual(d.primary, "ci-hub/qwen3-coder:30b");
+  });
+
+  test("a primary we applied follows the next handout, even while it is still listed", () => {
+    const d = resolveAgentPrimary({
+      ...base,
+      existingPrimary: "ci-hub/llama3.1:8b",
+      record: { defaultModel: "llama3.1:8b", primary: "ci-hub/llama3.1:8b" },
+      hubModels: [entry("auto"), entry("qwen3-coder:30b"), entry("llama3.1:8b")],
+    });
+    assert.strictEqual(d.primary, "ci-hub/auto");
+    assert.strictEqual(d.reason, "follows-handout");
+  });
+
+  test("a usable ci-hub primary that differs from the record is an operator's pick and stays", () => {
+    const d = resolveAgentPrimary({
+      ...base,
+      existingPrimary: "ci-hub/qwen3-coder:30b",
+      record: { defaultModel: "qwen3-coder:30b", primary: "ci-hub/auto" },
+    });
+    assert.strictEqual(d.primary, "ci-hub/qwen3-coder:30b");
+    assert.strictEqual(d.reason, "operator-choice");
+    assert.strictEqual(d.hubPrimary, "ci-hub/auto", "the record still tracks the Hub's own choice");
+  });
+
+  test("an operator's pick that left the catalog is replaced", () => {
+    const d = resolveAgentPrimary({
+      ...base,
+      existingPrimary: "ci-hub/qwen3:4b",
+      record: { defaultModel: "qwen3:4b", primary: "ci-hub/auto" },
+    });
+    assert.strictEqual(d.primary, "ci-hub/auto");
+    assert.strictEqual(d.reason, "not-in-catalog");
+  });
+
+  test("no record (older image): a primary that agrees with the handout stays, anything else is stale", () => {
+    const kept = resolveAgentPrimary({ ...base, existingPrimary: "ci-hub/qwen3-coder:30b" });
+    assert.strictEqual(kept.primary, "ci-hub/qwen3-coder:30b");
+    assert.strictEqual(kept.reason, "consistent-with-handout");
+
+    const stale = resolveAgentPrimary({
+      ...base,
+      existingPrimary: "ci-hub/llama3.1:8b",
+      hubModels: [entry("auto"), entry("qwen3-coder:30b"), entry("llama3.1:8b")],
+    });
+    assert.strictEqual(stale.primary, "ci-hub/auto");
+    assert.strictEqual(stale.reason, "stale");
+  });
+
+  test("a Hub default that cannot call tools: step onto a tool-capable model and list it under ci-hub", () => {
+    const d = resolveAgentPrimary({
+      ...base,
+      existingPrimary: "ci-hub/auto",
+      hubModels: [entry("auto"), entry("gemma3:1b")],
+      hubTargetId: "gemma3:1b",
+      toolSupportById: { ...TOOLS, auto: false },
+    });
+    assert.strictEqual(d.primary, "ci-hub/qwen3-coder:30b", "first tool-capable model in pool order");
+    assert.strictEqual(d.toolless, "gemma3:1b");
+    assert.deepStrictEqual(
+      d.hubModels.map((m) => m.id),
+      ["auto", "gemma3:1b", "qwen3-coder:30b"],
+      "the ref must resolve, so the model joins the ci-hub catalog",
+    );
+  });
+
+  test("a Hub default that cannot call tools, and nothing installed that can: the Hub's pick stands, flagged", () => {
+    const d = resolveAgentPrimary({
+      ...base,
+      existingPrimary: undefined,
+      hubModels: [entry("auto"), entry("gemma3:1b")],
+      hubTargetId: "gemma3:1b",
+      ollamaModels: [entry("gemma3:1b")],
+      toolSupportById: { auto: false, "gemma3:1b": false },
+    });
+    assert.strictEqual(d.primary, "ci-hub/auto");
+    assert.strictEqual(d.toolless, "gemma3:1b");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Hub handout, end to end: what openclaw.json and the handout record look like
+// across boots as the Hub changes its mind.
+// ---------------------------------------------------------------------------
+describe("reconcileConfig follows the Hub handout", () => {
+  // The pool core-4 had: a default that cannot call tools, and one that can.
+  const POOL = {
+    "gemma3:1b": { capabilities: ["completion"], contextLength: 32768 },
+    "qwen3-coder:30b": { capabilities: ["completion", "tools"], contextLength: 262144 },
+  };
+  const boot = async (dir, env) => {
+    const envFile = envPath(dir);
+    const kept = fs.existsSync(envFile)
+      ? fs.readFileSync(envFile, "utf8").split("\n").filter((l) => l && !/^(DEFAULT_MODEL|OLLAMA_HOST)=/.test(l))
+      : [];
+    // Like bootstrap-from-hub.sh: Hub-managed keys are rewritten, everything else is kept.
+    fs.writeFileSync(envFile, [...kept, ...Object.entries(env).map(([k, v]) => `${k}=${v}`)].join("\n") + "\n");
+    const ctx = makeReconciler(dir);
+    await ctx.cfg.reconcileConfig();
+    return { ...ctx, config: readCfg(dir), record: ctx.cfg.readHandoutRecord() };
+  };
+
+  // What an image built from 2026.8.5 left on disk: ci-hub listed every installed model and the
+  // primary was the concrete default of the day.
+  const LEGACY_8_5 = {
+    wizard: { lastRunAt: "2026-08-10T10:15:00.000Z" },
+    models: {
+      providers: {
+        "ci-hub": {
+          api: "ollama",
+          models: [{ id: "auto" }, { id: "qwen3-coder:30b" }, { id: "gemma3:1b" }],
+        },
+      },
+    },
+    agents: { defaults: { model: { primary: "ci-hub/gemma3:1b" } } },
+  };
+
+  test("core-4: upgrading onto a Hub that moved off gemma3:1b drops the stale primary", async () => {
+    await withOllama(POOL, async (baseUrl) => {
+      dataDir = makeDataDir({ config: LEGACY_8_5 });
+      const { config, record, logs } = await boot(dataDir, { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "qwen3-coder:30b" });
+
+      assert.strictEqual(config.agents.defaults.model.primary, "ci-hub/auto");
+      assert.deepStrictEqual(config.models.providers["ci-hub"].models.map((m) => m.id), ["auto", "qwen3-coder:30b"]);
+      assert.strictEqual(config.models.providers["ci-hub"].models[0].compat.supportsTools, true);
+      assert.deepStrictEqual(record, { defaultModel: "qwen3-coder:30b", primary: "ci-hub/auto" });
+      assert.ok(
+        logs.some((l) => l.includes("set default agent model to ci-hub/auto") && l.includes("ci-hub/gemma3:1b")),
+        "the change names what it replaced",
+      );
+    });
+  });
+
+  test("a Hub default without tool support never becomes the primary, and the primary follows when the Hub fixes it", async () => {
+    await withOllama(POOL, async (baseUrl) => {
+      dataDir = makeDataDir({ config: {} });
+
+      const first = await boot(dataDir, { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "gemma3:1b" });
+      assert.strictEqual(first.config.agents.defaults.model.primary, "ci-hub/qwen3-coder:30b");
+      assert.ok("ci-hub/qwen3-coder:30b" in first.config.agents.defaults.models);
+      assert.ok(first.config.models.providers["ci-hub"].models.some((m) => m.id === "qwen3-coder:30b"));
+      assert.ok(first.logs.some((l) => l.includes("gemma3:1b cannot call tools")));
+      assert.deepStrictEqual(first.record, { defaultModel: "gemma3:1b", primary: "ci-hub/qwen3-coder:30b" });
+
+      const second = await boot(dataDir, { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "qwen3-coder:30b" });
+      assert.strictEqual(second.config.agents.defaults.model.primary, "ci-hub/auto", "ours, so it follows the handout");
+      assert.deepStrictEqual(second.record, { defaultModel: "qwen3-coder:30b", primary: "ci-hub/auto" });
+    });
+  });
+
+  test("an operator's pick survives reboots and handout changes; a stale Hub value does not", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({ config: {} });
+      await boot(dataDir, { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "qwen3:4b" });
+
+      // The operator pins the concrete default instead of auto.
+      const edited = readCfg(dataDir);
+      edited.agents.defaults.model.primary = "ci-hub/qwen3:4b";
+      fs.writeFileSync(cfgPath(dataDir), JSON.stringify(edited, null, 2));
+      const again = await boot(dataDir, { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "qwen3:4b" });
+      assert.strictEqual(again.config.agents.defaults.model.primary, "ci-hub/qwen3:4b");
+
+      // ...then moves to a cloud model; the Hub changes its default twice.
+      edited.agents.defaults.model.primary = "anthropic/claude-sonnet-4-6";
+      fs.writeFileSync(cfgPath(dataDir), JSON.stringify({ ...again.config, agents: edited.agents }, null, 2));
+      await boot(dataDir, { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "llama3.1:8b" });
+      const last = await boot(dataDir, { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "qwen3:4b" });
+      assert.strictEqual(last.config.agents.defaults.model.primary, "anthropic/claude-sonnet-4-6");
+      assert.deepStrictEqual(last.record, { defaultModel: "qwen3:4b", primary: "ci-hub/auto" });
+    });
+  });
+
+  test("the record is only rewritten when the handout changes", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({ config: {} });
+      await boot(dataDir, { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "qwen3:4b" });
+      const epoch = new Date(0);
+      fs.utimesSync(handoutPath(dataDir), epoch, epoch);
+
+      await boot(dataDir, { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "qwen3:4b" });
+      assert.strictEqual(fs.statSync(handoutPath(dataDir)).mtimeMs, 0, "same handout, no write");
+      assertPrivateFileMode(handoutPath(dataDir));
+
+      await boot(dataDir, { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "llama3.1:8b" });
+      assert.notStrictEqual(fs.statSync(handoutPath(dataDir)).mtimeMs, 0);
+      assert.strictEqual(JSON.parse(fs.readFileSync(handoutPath(dataDir), "utf8")).defaultModel, "llama3.1:8b");
+    });
+  });
+
+  test("an unreadable record is treated as no record", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({ config: { agents: { defaults: { model: { primary: "ci-hub/qwen3:4b" } } } } });
+      fs.writeFileSync(handoutPath(dataDir), "{not json");
+      const { config, record } = await boot(dataDir, { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "qwen3:4b" });
+      assert.strictEqual(config.agents.defaults.model.primary, "ci-hub/qwen3:4b", "agrees with the handout, so it stays");
+      assert.deepStrictEqual(record, { defaultModel: "qwen3:4b", primary: "ci-hub/auto" });
+    });
+  });
+
+  test("with the pool unreachable, nothing about the primary changes and no record is invented", async () => {
+    dataDir = makeDataDir({ config: { agents: { defaults: { model: { primary: "ci-hub/gemma3:1b" } } } } });
+    const { config, record } = await boot(dataDir, { OLLAMA_HOST: OLLAMA_DOWN, DEFAULT_MODEL: "qwen3-coder:30b" });
+    assert.strictEqual(config.agents.defaults.model.primary, "ci-hub/gemma3:1b");
+    assert.strictEqual(record, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A fresh data dir on a Hub-configured app (core-2 after its data dir was recreated;
+// beta-max: "Agent harness runtime \"codex\" is unavailable"). reconcile used to return
+// early with no openclaw.json, `doctor --repair` then wrote a config with no models
+// section, and the gateway came up on it unconfigured.
+// ---------------------------------------------------------------------------
+describe("reconcileConfig on a fresh data dir", () => {
+  const HANDOUT = (baseUrl) => ({
+    OPENAI_API_BASE: `${baseUrl}/v1`,
+    OPENAI_API_KEY: "hub-issued",
+    OLLAMA_HOST: baseUrl,
+    DEFAULT_MODEL: "qwen3:4b",
+    CI_LLM_NUM_CTX: "16384",
+  });
+
+  test("builds the whole config from the Hub handout, before doctor ever sees the dir", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({ config: null, env: HANDOUT(baseUrl) });
+      const { cfg, logs } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+
+      assert.ok(fs.existsSync(cfgPath(dataDir)), "openclaw.json must exist after the first reconcile");
+      const config = readCfg(dataDir);
+      assert.strictEqual(config.agents.defaults.model.primary, "ci-hub/auto");
+      assert.deepStrictEqual(config.models.providers["ci-hub"].models.map((m) => m.id), ["auto", "qwen3:4b"]);
+      assert.strictEqual(config.models.providers["ci-hub"].baseUrl, baseUrl);
+      assert.strictEqual(config.gateway.mode, "local");
+      assert.match(config.gateway.auth.token, /^[0-9a-f]{48}$/);
+      assert.strictEqual(cfg.readEnv().OPENCLAW_GATEWAY_TOKEN, config.gateway.auth.token);
+      assert.deepStrictEqual(cfg.readHandoutRecord(), { defaultModel: "qwen3:4b", primary: "ci-hub/auto" });
+      assertPrivateFileMode(cfgPath(dataDir));
+      assert.ok(logs.some((l) => l.includes("created openclaw.json from the Hub handout")));
+      assertNoIndexKeys(config);
+    });
+  });
+
+  test("the created config is already converged: the next boot patches nothing", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({ config: null, env: HANDOUT(baseUrl) });
+      await makeReconciler(dataDir).cfg.reconcileConfig();
+      const next = makeReconciler(dataDir);
+      await next.cfg.reconcileConfig();
+      assert.deepStrictEqual(next.patches(), []);
+    });
+  });
+
+  test("with the pool unreachable it still writes a startable config naming the Hub default", async () => {
+    dataDir = makeDataDir({ config: null, env: { ...HANDOUT(OLLAMA_DOWN) } });
+    await makeReconciler(dataDir).cfg.reconcileConfig();
+    const config = readCfg(dataDir);
+    assert.strictEqual(config.agents.defaults.model.primary, "ci-hub/qwen3:4b");
+    assert.strictEqual(config.models.providers["ci-hub"].api, "ollama");
+  });
+
+  test("never overwrites an openclaw.json that exists but cannot be parsed", async () => {
+    await withOllama(CATALOG, async (baseUrl) => {
+      dataDir = makeDataDir({ config: null, env: HANDOUT(baseUrl) });
+      fs.writeFileSync(cfgPath(dataDir), "{ half a config");
+      await makeReconciler(dataDir).cfg.reconcileConfig();
+      assert.strictEqual(fs.readFileSync(cfgPath(dataDir), "utf8"), "{ half a config");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// gateway.port — where every in-container `openclaw` command dials.
+//
+// The gateway listens on 18790 (server.cjs passes --port). Without gateway.port the CLI
+// defaults to 18789, which in this image is the setup proxy; the proxy's browser-shaped
+// Origin makes the gateway refuse the CLI "missing scope: operator.write" (core-3, beta-1,
+// core-6 on 2026-09-17), so no headless turn could run on an install's own config.
+// ---------------------------------------------------------------------------
+describe("gateway.port", () => {
+  test("is pinned to the port the gateway really listens on", async () => {
+    dataDir = makeDataDir({ config: {}, env: { OLLAMA_HOST: OLLAMA_DOWN } });
+    await makeReconciler(dataDir).cfg.reconcileConfig();
+    assert.strictEqual(readCfg(dataDir).gateway.port, 18790);
+  });
+
+  test("corrects a port pointing at the setup proxy, and then stays put", async () => {
+    dataDir = makeDataDir({ config: { gateway: { port: 18789 } }, env: { OLLAMA_HOST: OLLAMA_DOWN } });
+    const first = makeReconciler(dataDir);
+    await first.cfg.reconcileConfig();
+    assert.strictEqual(readCfg(dataDir).gateway.port, 18790);
+    assert.ok(first.patches().some((l) => l.includes("gateway.port")));
+
+    const second = makeReconciler(dataDir);
+    await second.cfg.reconcileConfig();
+    assert.ok(!second.patches().some((l) => l.includes("gateway.port")));
   });
 });
 
