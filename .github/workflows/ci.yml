@@ -13,6 +13,14 @@ on:
     # schema tightening surfaces before the version-bump PR lands.
     - cron: "0 5 * * *"
   workflow_dispatch:
+    inputs:
+      probe_latest:
+        description: >-
+          Also run the schema gate against openclaw@latest — the same advisory probe the
+          nightly runs. Lets a PR that touches the gate prove the latest leg on demand
+          instead of waiting for 05:00 UTC. Still non-blocking.
+        type: boolean
+        default: false
   # Called by docker-publish.yml so a red suite cannot ship an image.
   workflow_call:
     inputs:
@@ -103,7 +111,11 @@ jobs:
       matrix:
         # The pinned channel blocks PRs. The nightly also probes openclaw@latest, purely
         # as an early warning; it never blocks a PR on a version we have not adopted.
-        channel: ${{ github.event_name == 'schedule' && fromJSON('["pinned","latest"]') || fromJSON('["pinned"]') }}
+        #
+        # `inputs.probe_latest` adds that leg to a manual dispatch too. It is null under
+        # pull_request/push and under workflow_call (docker-publish.yml sets only `ref`),
+        # so a release gate stays pinned-only and never grows an advisory red X.
+        channel: ${{ (github.event_name == 'schedule' || inputs.probe_latest) && fromJSON('["pinned","latest"]') || fromJSON('["pinned"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
