@@ -35,6 +35,23 @@ on:
 permissions:
   contents: read
 
+env:
+  # The Node the jobs that install the openclaw CLI run on.
+  #
+  # Upstream openclaw dropped Node 22 in 2026.9.3: `engines.node` went from
+  # `>=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0` to `>=24.16.0 <25 || >=26.1.0`,
+  # and its preinstall script HARD-ERRORS on an unsupported Node rather than
+  # warning. On Node 22 the nightly `latest` leg therefore died in `npm install
+  # -g` and never reached the schema check at all — the gate was red for an
+  # install failure, not for schema drift.
+  #
+  # Node 24 satisfies both the pinned range and the current one, so a single
+  # value covers both matrix channels. Keep it inside the intersection of the
+  # pinned and latest `engines.node` when either moves:
+  #   npm view "openclaw@$(scripts/openclaw-pin.sh)" engines.node
+  #   npm view openclaw@latest engines.node
+  OPENCLAW_NODE_VERSION: "24"
+
 concurrency:
   # Keyed on the workflow name as well as the ref. When docker-publish.yml calls this
   # workflow, github.workflow resolves to the CALLER's name, so a publish gate lands in
@@ -97,7 +114,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          # Not "22": the openclaw CLI installed below refuses to install on it.
+          node-version: ${{ env.OPENCLAW_NODE_VERSION }}
 
       - name: Resolve the openclaw version
         id: resolve
@@ -132,8 +150,11 @@ jobs:
         with:
           path: ~/.npm-global
           # Keyed on the version itself, so the cache invalidates exactly when the pin
-          # moves and can never go stale.
-          key: openclaw-${{ runner.os }}-${{ steps.resolve.outputs.version }}
+          # moves and can never go stale. Keyed on the Node major too: openclaw pulls
+          # native modules (koffi, tree-sitter-bash), so a tree built under one Node ABI
+          # must never be restored under another — which is exactly what the cache shared
+          # with plugin-package would do if the two jobs' Node versions ever diverged.
+          key: openclaw-${{ runner.os }}-node${{ env.OPENCLAW_NODE_VERSION }}-${{ steps.resolve.outputs.version }}
 
       - name: Install openclaw@${{ steps.resolve.outputs.version }}
         run: |
@@ -319,7 +340,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          # Not "22": the openclaw CLI installed below refuses to install on it.
+          node-version: ${{ env.OPENCLAW_NODE_VERSION }}
 
       - name: Resolve the openclaw version
         id: resolve
@@ -339,7 +361,10 @@ jobs:
           # Shared with the schema gate, which runs in parallel: on a cold key both
           # download and both try to save it (one loses the race, harmlessly). On a
           # warm key — the common case, since the pin moves rarely — neither pays.
-          key: openclaw-${{ runner.os }}-${{ steps.resolve.outputs.version }}
+          # Sharing is only safe while both jobs run the same Node, hence the Node major
+          # in the key: openclaw ships native modules, and a wrong-ABI restore would
+          # surface as a load failure far from its cause.
+          key: openclaw-${{ runner.os }}-node${{ env.OPENCLAW_NODE_VERSION }}-${{ steps.resolve.outputs.version }}
 
       - name: Install openclaw@${{ steps.resolve.outputs.version }}
         run: |
