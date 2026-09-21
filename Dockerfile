@@ -3,8 +3,33 @@
 
 FROM node:22-trixie-slim
 
-# Install global deps
-RUN apt-get update && apt-get install -y --no-install-recommends sudo ca-certificates curl git build-essential python3 procps file chromium && rm -rf /var/lib/apt/lists/*
+# Install global deps.
+#
+# Python is part of the agent's sandbox, not just node-gyp's build dependency.
+# A bare `python3` is Debian's minimal split — no pip, no ensurepip, so even
+# `python3 -m venv` fails — which is how a coding task ended with the agent
+# reporting "unable to run the tests (missing pip/python packages)".
+# python3-pip + python3-venv complete the interpreter; pytest and httpx ride
+# along as apt packages so a test suite runs against the system interpreter
+# with no network at all; python-is-python3 gives scripts that call plain
+# `python` something to find. Roughly 25 MB on top of the base image.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      sudo ca-certificates curl git build-essential procps file chromium \
+      python3 python3-pip python3-venv python-is-python3 python3-pytest python3-httpx \
+    && rm -rf /var/lib/apt/lists/* \
+    # Debian marks its interpreter "externally managed" (PEP 668), which turns a
+    # plain `pip install <pkg>` into an error. This interpreter exists for the
+    # agent, so drop the marker: as `node`, pip then defaults to a user install
+    # under $HOME (/data/.local — persistent, and on PATH below). A per-project
+    # venv (python3 -m venv / uv venv) stays the recommended route.
+    && rm -f /usr/lib/python3*/EXTERNALLY-MANAGED
+
+# uv: fast venv / package / tool manager (uv venv, uv pip, uv run, uvx).
+# Copied from the official image rather than curl|sh so the pin is a digest
+# and the multi-arch build picks the matching static binary per platform.
+# ~55 MB. Bump the version and digest together (docker buildx imagetools
+# inspect ghcr.io/astral-sh/uv:<version> prints the index digest).
+COPY --from=ghcr.io/astral-sh/uv:0.12.17@sha256:10787c682e4184e4f290de1171fd4703dc63de99221f10fe1c99002ce7fa9acc /uv /uvx /usr/local/bin/
 
 # Set home directory
 ENV HOME=/data
@@ -41,8 +66,10 @@ RUN /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/instal
 RUN printf '#!/bin/bash\n# Skip flags (e.g. --user) to find the actual subcommand\ncmd=""\nfor arg in "$@"; do\n  case "$arg" in\n    -*) ;;\n    *) cmd="$arg"; break ;;\n  esac\ndone\ncase "$cmd" in\n  restart|stop) pkill -f "^openclaw-gateway([[:space:]]|$)" 2>/dev/null || true ;;\n  start) echo "openclaw-gateway is managed by the container" ;;\n  *) exit 0 ;;\nesac\n' | sudo tee /usr/local/bin/systemctl \
     && sudo chmod +x /usr/local/bin/systemctl
 
-# Replace apt/apt-get with script telling openclaw to use brew
-RUN printf '#!/bin/bash\necho "Error: apt is not available. Please use brew instead." >&2\necho "Example: brew install <package>" >&2\nexit 1\n' | sudo tee /usr/local/bin/use-brew \
+# Replace apt/apt-get with a script that points the agent at the package
+# managers this sandbox does have. Each of those persists under /data, so the
+# hint doubles as the "where do my installs go" answer.
+RUN printf '#!/bin/bash\necho "Error: apt is not available in this sandbox. Use:" >&2\necho "  system tools:    brew install <package>" >&2\necho "  python packages: python3 -m venv .venv && . .venv/bin/activate && pip install <package>" >&2\necho "                   (or uv venv / uv pip install / uv run — uv is preinstalled; pytest and httpx already are)" >&2\necho "  node packages:   npm install -g <package>" >&2\nexit 1\n' | sudo tee /usr/local/bin/use-brew \
     && sudo chmod +x /usr/local/bin/use-brew \
     && sudo ln -s /usr/local/bin/use-brew /usr/local/bin/apt \
     && sudo ln -s /usr/local/bin/use-brew /usr/local/bin/apt-get
@@ -98,8 +125,9 @@ RUN sudo chmod +x /app/bootstrap-from-hub.sh /app/bootstrap-ci-memory.sh /app/bo
 RUN sudo mv /data /home-skeleton
 RUN sudo mv /home/linuxbrew /home-skeleton/linuxbrew
 
-# Setup PATH
-ENV PATH="/data/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
+# Setup PATH. /data/.local/bin is where `pip install` (user install, see the
+# PEP 668 note above) and `uv tool install` put their entry points.
+ENV PATH="/data/.local/bin:/data/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
 
 # Run the setup/proxy server through the bootstrap entrypoint
 ENTRYPOINT ["/app/entrypoint.sh"]

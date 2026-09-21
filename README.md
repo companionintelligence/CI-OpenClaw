@@ -13,13 +13,53 @@ This is a containerized version of OpenClaw with seamless onboarding on the CI m
 - Sandboxing so OpenClaw runs in its own environment that can't mess up other CI apps
 - Automatic gateway token management
 - Homebrew pre-installed for OpenClaw to install additional tools configured in a way that will persist between app updates
-- apt/apt-get disabled with a message telling openclaw to use brew instead
+- apt/apt-get disabled with a message pointing OpenClaw at the package managers the sandbox does have (brew, pip/venv/uv, npm)
+- A complete Python 3 toolchain for coding tasks — `python3`, `pip`, `venv`, `uv`, with `pytest` and `httpx` preinstalled — see [Sandbox toolchain](#sandbox-toolchain)
 - Globally installed node modules persisted between app updates
 - A bundled `companionintelligence` memory plugin that can use CI-Server as OpenClaw's active memory backend when `CI_SERVER_URL` and `CI_SERVER_TOKEN` are configured
 - Automatic Hub MCP tool access via a native `mcp.servers.ci-hub` entry in `openclaw.json` (Streamable HTTP), registered when the Hub injects `HUB_URL` / `HUB_MCP_API_KEY` (default on CI marketplace installs with MCP enabled). A bundled `ci-hub` plugin additionally provides the wake endpoint (it also implements app-event SSE, disabled by default). The `ci-hub` model provider is written to `openclaw.json` by the setup server (`config-reconcile.cjs`), not by the plugin — see the note below.
 - Security features that complicate setup disabled which are not required on the CI marketplace due to OpenClaw already being protected when running behind the CI app proxy
 
 This creates a seamless one-click install experience for OpenClaw on the CI marketplace.
+
+## Sandbox toolchain
+
+The agent runs its shell commands inside this container, as the unprivileged `node` user with
+`HOME=/data` (the app's persistent volume). The image is meant to be self-sufficient for common
+coding tasks without root:
+
+| Need | What is there | Where installs land |
+|---|---|---|
+| Python | `python3` / `python` 3.13, `pip`, `python3 -m venv`, `uv` / `uvx`; `pytest` and `httpx` preinstalled | a project venv (`.venv` in the workspace), or `/data/.local` for `pip install` / `uv tool install` |
+| Node | `node` 22, `npm` | `/data/.npm-global` for `npm install -g` |
+| System tools | Homebrew (`brew install jq ffmpeg ripgrep …`) | `/home/linuxbrew` (bind-mounted from the app data dir) |
+| Browser | headless Chromium | — |
+
+Everything under `/data` survives app updates; anything installed with `sudo` outside it
+(`sudo pip install`, `sudo apt` is shimmed away) is lost on the next image.
+
+Typical Python flow the agent can run as-is:
+
+```bash
+# system interpreter already has pytest + httpx, no network needed
+python3 -m pytest
+
+# per-project environment in the workspace
+python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt pytest httpx
+# or, with uv (faster, resolves against the same system interpreter)
+uv venv && uv pip install -r requirements.txt pytest httpx && uv run pytest
+```
+
+Debian's PEP 668 "externally managed" marker is removed in this image, so a plain
+`pip install <pkg>` as `node` falls back to a user install under `/data/.local` instead of
+erroring. `/data/.local/bin` is on `PATH` so the entry points it (and `uv tool install`)
+creates are runnable. The per-project venv is still the recommended route — it keeps a
+task's dependencies out of the shared user site.
+
+`uv` is copied from `ghcr.io/astral-sh/uv` (pinned by version and digest in the `Dockerfile`)
+so the multi-arch build gets the right static binary per platform. `pytest`/`httpx` are the
+Debian trixie packages (`python3-pytest`, `python3-httpx`), which keeps them apt-managed and
+importable from the system interpreter.
 
 ## Companion Intelligence memory setup
 
