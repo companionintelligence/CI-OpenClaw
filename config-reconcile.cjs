@@ -1255,6 +1255,30 @@ function createConfigReconciler({
     return hubNumCtx;
   }
 
+  // Idle-timeout floor for the Hub-managed providers (`models.providers.<id>.timeoutSeconds`).
+  // OpenClaw's watchdog counts from the request until the first streamed byte, and a Hub
+  // engine sends nothing until the whole prompt is prefilled — so the budget has to cover the
+  // pool's queue wait plus a full-window prefill. Measured 2026-09-20 on core-2 through the
+  // pool: a ~45k-token agent turn prefills at 450-600 tok/s on Strix Halo, first byte at
+  // 70-85 s plus queue time; the previous ten-minute default was still short of the 900 s
+  // that fixed the installs by hand. Budget the Hub's window at half the measured rate (for
+  // slower engines and a busy pool) plus five minutes of queue headroom, never under 900 s.
+  // CI_LLM_TIMEOUT_SECONDS (container, then .env) replaces the derived floor outright.
+  const SELF_HOSTED_PROVIDER_TIMEOUT_SECONDS = 900;
+  const PREFILL_TOKENS_PER_SECOND = 300;
+  const POOL_QUEUE_HEADROOM_SECONDS = 300;
+  function resolveProviderTimeoutSeconds() {
+    const raw =
+      containerEnv.CI_LLM_TIMEOUT_SECONDS || readEnv().CI_LLM_TIMEOUT_SECONDS || "";
+    const explicit = Number.parseInt(raw, 10);
+    if (Number.isFinite(explicit) && explicit > 0) return explicit;
+    const numCtx = resolveHubNumCtx();
+    const derived = numCtx
+      ? Math.ceil(numCtx / PREFILL_TOKENS_PER_SECOND) + POOL_QUEUE_HEADROOM_SECONDS
+      : 0;
+    return Math.max(SELF_HOSTED_PROVIDER_TIMEOUT_SECONDS, derived);
+  }
+
   // -------------------------------------------------------------------------
   // Ollama discovery
   // -------------------------------------------------------------------------
@@ -1745,12 +1769,12 @@ function createConfigReconciler({
     // built-in default is sized for a hosted API that answers in seconds. A Hub-managed engine
     // is not that: the first byte of a streamed reply arrives only after the model is loaded and
     // the prompt evaluated, and an agent turn here is ~160 KB of system prompt, tool schemas and
-    // history. Measured on beta-max (2026-09-15): 131.8 s to first byte for a 150 KB prompt into
-    // a cold qwen3.6:27b, 245 s under load — the default watchdog gave up at ~2 min every time,
-    // retried (re-sending the whole prompt), and surfaced "The model did not produce a response
-    // before the model idle timeout". Ten minutes is comfortably past the slowest cold start on
-    // the fleet; an operator who sets their own value keeps it.
-    const SELF_HOSTED_PROVIDER_TIMEOUT_SECONDS = 600;
+    // history. The default watchdog gave up at ~2 min every time, retried (re-sending the whole
+    // prompt), and surfaced "The model did not produce a response before the model idle
+    // timeout". The floor is a Hub-derived budget (resolveProviderTimeoutSeconds): an operator
+    // who raised it keeps their number, one who lowered it — or a config written by an older
+    // image with a shorter default — is brought up to it.
+    const providerTimeoutSeconds = resolveProviderTimeoutSeconds();
 
     function syncOllamaApiProvider(providerId, label) {
       const current = isPlainObject(providers.node[providerId])
@@ -1761,11 +1785,12 @@ function createConfigReconciler({
         baseUrl: ollamaBaseUrl,
         apiKey: inferenceApiKey,
         api: "ollama",
+        timeoutSeconds: Math.max(
+          providerTimeoutSeconds,
+          Number.isFinite(current.timeoutSeconds) ? current.timeoutSeconds : 0,
+        ),
         models: Array.isArray(current.models) ? current.models : [],
       };
-      if (typeof current.timeoutSeconds !== "number") {
-        next.timeoutSeconds = SELF_HOSTED_PROVIDER_TIMEOUT_SECONDS;
-      }
       if (
         current.baseUrl !== next.baseUrl ||
         current.apiKey !== next.apiKey ||
@@ -2030,6 +2055,7 @@ function createConfigReconciler({
     resolveOllamaBaseUrl,
     resolveInferenceApiKey,
     resolveHubNumCtx,
+    resolveProviderTimeoutSeconds,
     fetchOllamaModelCapabilities,
     discoverOllamaModels,
     // state queries

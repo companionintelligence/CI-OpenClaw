@@ -1084,6 +1084,36 @@ describe("resolvers", () => {
     }
     dataDir = undefined;
   });
+
+  test("resolveProviderTimeoutSeconds floors at 900 s without a Hub context window", () => {
+    assert.strictEqual(makeReconciler(dataDir).cfg.resolveProviderTimeoutSeconds(), 900);
+  });
+
+  test("resolveProviderTimeoutSeconds keeps the floor for windows a prefill covers in time", () => {
+    // 131072 / 300 + 300 = 737 s: still under the floor.
+    const { cfg } = makeReconciler(dataDir, { containerEnv: { CI_LLM_NUM_CTX: "131072" } });
+    assert.strictEqual(cfg.resolveProviderTimeoutSeconds(), 900);
+  });
+
+  test("resolveProviderTimeoutSeconds grows with a large Hub context window", () => {
+    const { cfg } = makeReconciler(dataDir, { containerEnv: { CI_LLM_NUM_CTX: "524288" } });
+    assert.strictEqual(cfg.resolveProviderTimeoutSeconds(), Math.ceil(524288 / 300) + 300);
+  });
+
+  test("resolveProviderTimeoutSeconds: CI_LLM_TIMEOUT_SECONDS wins, container first, even below the floor", () => {
+    rmDir(dataDir);
+    dataDir = makeDataDir({ env: { CI_LLM_TIMEOUT_SECONDS: "1500", CI_LLM_NUM_CTX: "524288" } });
+    assert.strictEqual(makeReconciler(dataDir).cfg.resolveProviderTimeoutSeconds(), 1500, ".env value");
+    const { cfg } = makeReconciler(dataDir, { containerEnv: { CI_LLM_TIMEOUT_SECONDS: "300" } });
+    assert.strictEqual(cfg.resolveProviderTimeoutSeconds(), 300, "an explicit operator value is exact, not floored");
+  });
+
+  test("resolveProviderTimeoutSeconds ignores zero, negative and non-numeric overrides", () => {
+    for (const raw of ["0", "-1", "abc", ""]) {
+      const { cfg } = makeReconciler(dataDir, { containerEnv: { CI_LLM_TIMEOUT_SECONDS: raw } });
+      assert.strictEqual(cfg.resolveProviderTimeoutSeconds(), 900, `for ${JSON.stringify(raw)}`);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1501,9 +1531,10 @@ describe("reconcileConfig (end to end)", () => {
   });
 
   // OpenClaw's idle watchdog follows models.providers.<id>.timeoutSeconds; its default is sized for
-  // a hosted API. A Hub engine can take minutes to its first byte on an agent-sized prompt (131.8 s
-  // measured on beta-max), and the default watchdog killed every such turn.
-  test("gives the self-hosted providers a ten-minute idle timeout unless the operator set one", async () => {
+  // a hosted API. A Hub engine can take minutes to its first byte on an agent-sized prompt (70-85 s
+  // of prefill plus pool queue time measured on core-2, 2026-09-20), and the default watchdog
+  // killed every such turn. The floor is 900 s — the value that fixed the installs by hand.
+  test("gives the self-hosted providers a fifteen-minute idle timeout floor", async () => {
     dataDir = makeDataDir({
       config: {
         models: {
@@ -1519,15 +1550,57 @@ describe("reconcileConfig (end to end)", () => {
     await ctx.cfg.reconcileConfig();
 
     const providers = readCfg(dataDir).models.providers;
-    assert.strictEqual(providers["ci-hub"].timeoutSeconds, 600);
-    // An operator's own number is theirs.
-    assert.strictEqual(providers.ollama.timeoutSeconds, 45);
+    assert.strictEqual(providers["ci-hub"].timeoutSeconds, 900, "unset -> the floor");
+    // A number below the floor guarantees the retry storm the floor exists to prevent.
+    assert.strictEqual(providers.ollama.timeoutSeconds, 900, "45 s is raised to the floor");
 
     // Idempotent: a second pass changes nothing and logs no provider sync.
     const again = makeReconciler(dataDir);
     await again.cfg.reconcileConfig();
-    assert.ok(!again.logs.some((l) => l.includes("synced ci-hub Ollama provider")));
-    assert.strictEqual(readCfg(dataDir).models.providers["ci-hub"].timeoutSeconds, 600);
+    assert.ok(!again.logs.some((l) => l.includes("Ollama provider")));
+    assert.strictEqual(readCfg(dataDir).models.providers["ci-hub"].timeoutSeconds, 900);
+  });
+
+  // The 2026.9.17 image wrote timeoutSeconds: 600 to every install it touched; an upgrade must
+  // bring those up, while an operator who raised the value above the floor keeps their number.
+  test("raises an older image's 600 s default and keeps an operator's higher value", async () => {
+    dataDir = makeDataDir({
+      config: {
+        models: {
+          providers: {
+            "ci-hub": { models: [], timeoutSeconds: 600 },
+            ollama: { models: [], timeoutSeconds: 1200 },
+          },
+        },
+      },
+      env: { OLLAMA_HOST: OLLAMA_DOWN },
+    });
+    const ctx = makeReconciler(dataDir);
+    await ctx.cfg.reconcileConfig();
+
+    const providers = readCfg(dataDir).models.providers;
+    assert.strictEqual(providers["ci-hub"].timeoutSeconds, 900);
+    assert.strictEqual(providers.ollama.timeoutSeconds, 1200);
+    assert.ok(ctx.logs.some((l) => l.includes("synced ci-hub Ollama provider")));
+  });
+
+  // A bigger Hub context window means a longer prefill before the first byte; the floor scales
+  // with it, and CI_LLM_TIMEOUT_SECONDS (the marketplace form field) replaces the derived value.
+  test("scales the idle timeout with CI_LLM_NUM_CTX and honors CI_LLM_TIMEOUT_SECONDS", async () => {
+    dataDir = makeDataDir({
+      config: {},
+      env: { OLLAMA_HOST: OLLAMA_DOWN, CI_LLM_NUM_CTX: "262144" },
+    });
+    const derived = makeReconciler(dataDir);
+    await derived.cfg.reconcileConfig();
+    // ceil(262144 / 300 tok/s) + 300 s of queue headroom.
+    assert.strictEqual(readCfg(dataDir).models.providers["ci-hub"].timeoutSeconds, 1174);
+    assert.strictEqual(readCfg(dataDir).models.providers.ollama.timeoutSeconds, 1174);
+
+    const explicit = makeReconciler(dataDir, { containerEnv: { CI_LLM_TIMEOUT_SECONDS: "1800" } });
+    await explicit.cfg.reconcileConfig();
+    assert.strictEqual(readCfg(dataDir).models.providers["ci-hub"].timeoutSeconds, 1800);
+    assert.strictEqual(readCfg(dataDir).models.providers.ollama.timeoutSeconds, 1800);
   });
 
   test("wires CI memory end to end when CI-Server credentials are present", async () => {
