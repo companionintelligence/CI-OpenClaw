@@ -39,6 +39,13 @@ RUN mkdir -p /data && chown node:node /data
 # Install OpenClaw globally from npm.
 # Keep @openclaw/duckduckgo-plugin on the same version when bumping this pin —
 # it is unpacked into /app/openclaw-context/plugins/duckduckgo after COPY below.
+#
+# This pin and the `FROM node:` base at the top of this file are coupled: openclaw
+# declares `engines.node` and its preinstall script hard-errors on an unsupported
+# Node, so a pin the base cannot run fails this RUN outright. 2026.9.3 dropped
+# Node 22 (`>=24.16.0 <25 || >=26.1.0`), so this base caps the pin at 2026.9.2 —
+# moving past it needs the base on node:24 in the same commit. Check before bumping:
+#   npm view openclaw@<new-version> engines.node
 RUN npm install -g openclaw@2026.9.1
 
 # Redirect future npm global installs to persistent volume
