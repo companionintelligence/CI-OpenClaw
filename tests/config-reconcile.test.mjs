@@ -1781,6 +1781,12 @@ describe("reconcileConfig (end to end)", () => {
           `${id} must not carry hubManaged (schema-invalid)`,
         );
       }
+      // Registering a provider in models.providers isn't enough to make it pickable —
+      // it also needs a matching entry in agents.defaults.models.
+      assert.ok("openai/gpt-4o" in config.agents.defaults.models);
+      assert.ok("anthropic/claude-opus-4" in config.agents.defaults.models);
+      assert.ok("google/gemini-2.5-pro" in config.agents.defaults.models);
+      assert.ok("github-copilot/gpt-4o" in config.agents.defaults.models);
       assert.ok(patches().some((line) => line.includes("synced openai cloud provider")));
 
       const first = JSON.stringify(config);
@@ -1808,20 +1814,31 @@ describe("reconcileConfig (end to end)", () => {
               },
             },
           },
+          agents: {
+            defaults: {
+              models: { "openai/gpt-4o": {}, "anthropic/claude-opus-4": {} },
+            },
+          },
         },
         env: {
           OLLAMA_HOST: baseUrl,
           CI_CLOUD_ANTHROPIC_API_KEY: "sk-ant",
+          CI_CLOUD_ANTHROPIC_MODEL: "claude-opus-4",
         },
       });
       const { cfg } = makeReconciler(dataDir);
       await cfg.reconcileConfig();
 
-      const providers = readCfg(dataDir).models.providers;
+      const config = readCfg(dataDir);
+      const providers = config.models.providers;
       assert.strictEqual(providers.openai, undefined);
       assert.strictEqual(providers.anthropic.apiKey, "sk-ant");
       assert.ok(!("hubManaged" in providers.anthropic));
       assert.strictEqual(providers["ci-hub"].api, "ollama");
+      // A provider dropped from models.providers must also drop out of the
+      // selectable-models list; a still-configured one must stay pickable.
+      assert.ok(!Object.keys(config.agents.defaults.models).some((k) => k.startsWith("openai/")));
+      assert.ok("anthropic/claude-opus-4" in config.agents.defaults.models);
     });
   });
 });

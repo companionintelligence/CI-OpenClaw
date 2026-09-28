@@ -23,6 +23,8 @@ npm install   # install
 docker compose up --build   # dev
 npm test   # unit + bootstrap shell suites (no install needed)
 npm run test:schema   # validate openclaw.json against OpenClaw's own schema (needs the openclaw CLI)
+npm run test:agent-turn   # headless agent-turn gate against a fresh reconciled config (needs Docker; see docs/operations/agent-automation.md)
+npm run check:ci-hub-plugin-drift   # verify the vendored ci-hub plugin bundle against a CI-Hub checkout
 docker compose build   # build
 ```
 

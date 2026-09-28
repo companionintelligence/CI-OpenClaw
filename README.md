@@ -210,10 +210,10 @@ The plugin calls:
 - `GET /api/agent/intents` (falls back to `GET /api/intents`)
 - `POST /api/intents/:name/execute` (tried as `POST /api/agent/intents/:name/execute` first)
 
-`POST /api/memory/write` is the durable write endpoint for explicit notes. Older
-Hermes docs may mention `/api/memory/note`; CI-OpenClaw uses `/write` first and
-only falls back to `/note` for compatibility. `POST /api/memory/turn` is the
-transcript-ingest endpoint used by automatic turn-sync.
+`POST /api/memory/write` is the durable write endpoint for explicit notes. It
+replaced the older Hermes `/api/memory/note` route on 2026-06-03; CI-OpenClaw
+calls only `/write` and does not fall back to `/note`, which no longer exists.
+`POST /api/memory/turn` is the transcript-ingest endpoint used by automatic turn-sync.
 
 ### Unit tests
 
@@ -323,7 +323,7 @@ Two plugin behaviours are **not** what they used to be:
 - **`HUB_MCP_LEGACY_CLIENT=true` is no longer a working rollback.** It registered Hub tools in-plugin after awaiting `tools/list`, but OpenClaw requires `register()` to be synchronous and closes the plugin API once it returns — a late `registerTool()` is silently discarded. The flag now logs an error instead of pretending to work. Hub tools come from `mcp.servers.ci-hub`.
 - **The plugin no longer registers an inference/model provider** (the `CI_HUB_PLUGIN_INFERENCE` opt-in is gone). A provider registered through the plugin API resolves its transport against OpenClaw's api-provider registry, which has no `ollama` implementation — so a plugin-registered `ci-hub` provider with `api: "ollama"` made the first LLM call fail with `No API provider registered for api: ollama`, taking chat down. (A provider declared in `openclaw.json` resolves `ollama` fine, via a separate provider-runtime path the plugin API never reaches.) `server.cjs` / `config-reconcile.cjs` already write the working `models.providers.ci-hub` into `openclaw.json` — the single source of truth for the `ci-hub` provider on an appliance. See companionintelligence/CI-Hub#895.
 
-Hub → Settings → AI cloud tokens (`CI_CLOUD_OPENAI_*`, `CI_CLOUD_ANTHROPIC_*`, `CI_CLOUD_GOOGLE_*`, `CI_CLOUD_GITHUB_COPILOT_*`) are additive. `config-reconcile.cjs` writes `models.providers.{openai,anthropic,google,github-copilot}` so those providers appear in the picker **alongside** `ci-hub`. Local Ollama/vLLM stays the default when healthy. Removing a Hub key removes that provider on the next restart. Do not put a `hubManaged` flag on those entries — OpenClaw's schema rejects unknown keys and quarantines the whole file.
+Hub → Settings → AI cloud tokens (`CI_CLOUD_OPENAI_*`, `CI_CLOUD_ANTHROPIC_*`, `CI_CLOUD_GOOGLE_*`, `CI_CLOUD_GITHUB_COPILOT_*`) are additive. `config-reconcile.cjs` writes `models.providers.{openai,anthropic,google,github-copilot}` so those providers appear in the picker **alongside** `ci-hub`. Local Ollama stays the default when healthy. (vLLM is referenced elsewhere as a future local backend, but `config-reconcile.cjs` only implements Ollama-native discovery/protocol today — pointing it at a vLLM server will not work yet.) Removing a Hub key removes that provider on the next restart. Do not put a `hubManaged` flag on those entries — OpenClaw's schema rejects unknown keys and quarantines the whole file.
 
 If Hub MCP is disabled (`HUB_MCP_ENABLED=false` in the container env), bootstrap steps no-op gracefully (and remove any prior `mcp.servers.ci-hub` entry). Run `cihub mcp setup` on the Hub to provision a key for existing installs.
 
@@ -362,4 +362,4 @@ Verify against a checkout without changing anything: `npm run check:ci-hub-plugi
 
 ## License
 
-MIT
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) — see [LICENSE](LICENSE) and the [License FAQ](docs/License-FAQ.md) for what that means in practice.

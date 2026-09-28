@@ -10,7 +10,7 @@ of this repository stands on them.
 without it. See [NOTICE.md](NOTICE.md) for the licence terms that govern that
 derivation.
 
-## 3. Runtime dependencies
+## 2. Runtime dependencies
 
 | | Project | Licence | What it does |
 | :-: | --- | --- | --- |
