@@ -1192,11 +1192,36 @@ function createConfigReconciler({
    */
   function syncCloudProviders(config, env, providers) {
     let changed = false;
-    for (const spec of HUB_CLOUD_PROVIDER_SPECS) {
-      const apiKey = resolveEnvValue(env, spec.key);
-      const current = isPlainObject(providers.node[spec.id])
+    // Registering a cloud provider in models.providers doesn't make it selectable —
+    // it also needs an entry in agents.defaults.models, the same way the ci-hub and
+    // ollama catalogs do a few hundred lines up. Only touch a spec's own `${id}/*`
+    // keys when this sync actually owns that id this run (it's Hub-managed now, or
+    // it was a moment ago) — an unrelated hand-authored `anthropic/...` entry with no
+    // Hub key and no prior models.providers.anthropic is not ours to prune.
+    //
+    // Resolve every spec's apiKey/current up front so we can also tell, before
+    // touching anything, whether no cloud provider is or was ever active — a config
+    // with zero Hub cloud creds must not gain an empty agents.defaults node.
+    const specStates = HUB_CLOUD_PROVIDER_SPECS.map((spec) => ({
+      spec,
+      apiKey: resolveEnvValue(env, spec.key),
+      current: isPlainObject(providers.node[spec.id])
         ? providers.node[spec.id]
-        : null;
+        : null,
+    }));
+    const anyActive = specStates.some(({ apiKey, current }) => apiKey || current);
+    const defaults = anyActive
+      ? ensureRecordPathTracked(config, ["agents", "defaults"])
+      : null;
+    if (defaults) {
+      changed = defaults.replaced || changed;
+    }
+    const existingModels = defaults && isPlainObject(defaults.node.models)
+      ? defaults.node.models
+      : {};
+    const mergedModels = { ...existingModels };
+    let modelsChanged = false;
+    for (const { spec, apiKey, current } of specStates) {
       if (!apiKey) {
         if (current) {
           delete providers.node[spec.id];
@@ -1204,6 +1229,12 @@ function createConfigReconciler({
           log.log(
             `Patched config: removed ${spec.id} cloud provider (Hub key absent)`,
           );
+          for (const key of Object.keys(mergedModels)) {
+            if (key.startsWith(`${spec.id}/`)) {
+              delete mergedModels[key];
+              modelsChanged = true;
+            }
+          }
         }
         continue;
       }
@@ -1237,6 +1268,22 @@ function createConfigReconciler({
         changed = true;
         log.log(`Patched config: synced ${spec.id} cloud provider`);
       }
+      const desiredKey = modelId ? `${spec.id}/${modelId}` : null;
+      for (const key of Object.keys(mergedModels)) {
+        if (key.startsWith(`${spec.id}/`) && key !== desiredKey) {
+          delete mergedModels[key];
+          modelsChanged = true;
+        }
+      }
+      if (desiredKey && !(desiredKey in mergedModels)) {
+        mergedModels[desiredKey] = existingModels[desiredKey] || {};
+        modelsChanged = true;
+      }
+    }
+    if (defaults && modelsChanged) {
+      defaults.node.models = mergedModels;
+      changed = true;
+      log.log("Patched config: merged cloud provider model options");
     }
     return changed;
   }
@@ -1902,24 +1949,33 @@ function createConfigReconciler({
         const existingModels = isPlainObject(defaults.node.models)
           ? defaults.node.models
           : {};
-        const mergedModels = Object.fromEntries(
-          Object.entries(existingModels).filter(
-            ([key]) =>
-              !key.startsWith("ci-hub/") && !key.startsWith("ollama/"),
-          ),
-        );
-        for (const model of hubModels) {
-          const key = `ci-hub/${model.id}`;
-          mergedModels[key] = existingModels[key] || {};
+        // Mutate in place rather than filter-then-rebuild: a filtered-and-reinserted
+        // object always re-appends ci-hub/ollama keys after whatever other-prefixed
+        // keys (e.g. a cloud provider's) happened to precede them, which reorders the
+        // record and makes `changed` fire on an otherwise-idempotent reconcile every
+        // time a non-ci-hub/ollama key is also present.
+        const desiredModelKeys = new Set([
+          ...hubModels.map((model) => `ci-hub/${model.id}`),
+          ...ollamaModels.map((model) => `ollama/${model.id}`),
+        ]);
+        let modelsChanged = false;
+        for (const key of Object.keys(existingModels)) {
+          if (
+            (key.startsWith("ci-hub/") || key.startsWith("ollama/")) &&
+            !desiredModelKeys.has(key)
+          ) {
+            delete existingModels[key];
+            modelsChanged = true;
+          }
         }
-        for (const model of ollamaModels) {
-          const key = `ollama/${model.id}`;
-          mergedModels[key] = existingModels[key] || {};
+        for (const key of desiredModelKeys) {
+          if (!(key in existingModels)) {
+            existingModels[key] = {};
+            modelsChanged = true;
+          }
         }
-        if (
-          JSON.stringify(defaults.node.models || {}) !== JSON.stringify(mergedModels)
-        ) {
-          defaults.node.models = mergedModels;
+        if (modelsChanged) {
+          defaults.node.models = existingModels;
           changed = true;
           log.log("Patched config: merged ci-hub + ollama model options");
         }
