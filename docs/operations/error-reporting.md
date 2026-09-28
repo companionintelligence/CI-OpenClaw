@@ -239,6 +239,8 @@ is never loaded at all, which is the strongest form of "no outbound traffic".
   posture only becomes real for users once the DSN and the toggle ship
   **together**. Shipping the DSN without the toggle would mean on-by-default with
   no user-facing way to turn it off.
-- **Release + source map upload in CI.** `docker-publish.yml` does not pass
-  `SENTRY_RELEASE` or upload source maps. Not needed while the wrapper ships
-  unbundled CommonJS.
+- **Source map upload.** Not applicable — the wrapper ships unbundled
+  CommonJS, so there is nothing to source-map. `SENTRY_RELEASE` itself is
+  already passed: `docker-publish.yml` bakes
+  `SENTRY_RELEASE=ci-openclaw-server@<tag>` as a build-arg alongside
+  `SENTRY_DSN` on every release build.

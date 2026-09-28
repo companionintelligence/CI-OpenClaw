@@ -36,6 +36,9 @@ npm test
 # Needs the CLI: npm i -g "openclaw@$(scripts/openclaw-pin.sh)"
 npm run test:schema
 
+# Headless agent-turn gate against a fresh reconciled config (needs Docker)
+npm run test:agent-turn
+
 # Build for production
 docker compose build
 ```

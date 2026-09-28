@@ -24,6 +24,7 @@ npm install
 docker compose up --build
 npm test   # unit + bootstrap shell suites (no install needed)
 npm run test:schema   # validate openclaw.json against OpenClaw's own schema (needs the openclaw CLI)
+npm run test:agent-turn   # headless agent-turn gate against a fresh reconciled config (needs Docker)
 ```
 
 ## Rules
