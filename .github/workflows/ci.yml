@@ -4,14 +4,44 @@ name: CI
 # August 2026 org-wide cost pass). Found during an org-level CI/CD health audit:
 # ordinary PRs against master/main had zero automatic signal — 145 commits and
 # 73 merged PRs in 60 days with nothing checking them.
+# >>> ci-local:gated original triggers below, restore with `ci-local restore`
+# on:
+#   pull_request:
+#   push:
+#     branches: [master, main]
+#   schedule:
+#     # Advisory nightly run that also validates against openclaw@latest, so an upstream
+#     # schema tightening surfaces before the version-bump PR lands.
+#     - cron: "0 5 * * *"
+#   workflow_dispatch:
+#     inputs:
+#       probe_latest:
+#         description: >-
+#           Also run the schema gate against openclaw@latest — the same advisory probe the
+#           nightly runs. Lets a PR that touches the gate prove the latest leg on demand
+#           instead of waiting for 05:00 UTC. Still non-blocking.
+#         type: boolean
+#         default: false
+#   # Called by docker-publish.yml so a red suite cannot ship an image.
+#   workflow_call:
+#     inputs:
+#       ref:
+#         description: >-
+#           Ref to test. The publish workflow passes the exact ref it is about to check
+#           out and build — the release tag — so the gate and the build can never
+#           disagree about the tree. Leave empty to test the ref that triggered the run.
+#         type: string
+#         required: false
+#         default: ""
+#     secrets:
+#       CI_HUB_READ_TOKEN:
+#         description: >-
+#           Fine-grained PAT with CI-Hub Contents: read, used by the plugin-integrity job to
+#           rebuild the vendored bundle from source. Passed explicitly by docker-publish.yml
+#           (not `secrets: inherit`) so only this one secret crosses into the called workflow.
+#         required: false
+# <<< ci-local:gated
 on:
-  pull_request:
-  push:
-    branches: [master, main]
-  schedule:
-    # Advisory nightly run that also validates against openclaw@latest, so an upstream
-    # schema tightening surfaces before the version-bump PR lands.
-    - cron: "0 5 * * *"
   workflow_dispatch:
     inputs:
       probe_latest:

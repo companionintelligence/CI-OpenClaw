@@ -39,13 +39,27 @@ name: Publish memory plugin to npm
 # trusted publishing generates provenance automatically, it would at minimum need
 # NPM_CONFIG_PROVENANCE=false. Not adopted here because it is unverified for this
 # repo's shape; the token path above is known to work.
+# >>> ci-local:gated original triggers below, restore with `ci-local restore`
+# on:
+#   push:
+#     tags:
+#       # Release tags are YYYY.M.D with an optional same-day suffix. Identical to
+#       # docker-publish.yml's glob, so a release tag means the same thing to both and
+#       # a tag either produces both artifacts or neither.
+#       - "[0-9]*.[0-9]*.[0-9]*"
+#   workflow_dispatch:
+#     inputs:
+#       tag:
+#         description: "Existing release tag to publish (for example 2026.8.1)"
+#         required: true
+#         type: string
+#       dry_run:
+#         description: "Pack and compare, but do not publish"
+#         required: false
+#         default: false
+#         type: boolean
+# <<< ci-local:gated
 on:
-  push:
-    tags:
-      # Release tags are YYYY.M.D with an optional same-day suffix. Identical to
-      # docker-publish.yml's glob, so a release tag means the same thing to both and
-      # a tag either produces both artifacts or neither.
-      - "[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
     inputs:
       tag:
