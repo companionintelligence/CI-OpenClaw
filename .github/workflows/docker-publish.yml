@@ -1,21 +1,35 @@
 name: Docker Build and Push
+# >>> ci-local:gated original triggers below, restore with `ci-local restore`
+# on:
+#   # Release tags only. This was `"*"`, which meant the runbook's own
+#   # "push a test tag to verify" recipe published a real image and moved
+#   # :latest onto it.
+#   #
+#   # Narrowed further to three segments, matching npm-publish.yml so a release tag
+#   # means the same thing to both. The earlier `[0-9]*` also matched `1-scratch`,
+#   # which would start a full CI gate (this workflow calls ci.yml) before anything
+#   # rejected it. Checked against all 22 tags this repo has ever had: every one is
+#   # YYYY.M.D and matches, so nothing that ever released is excluded. The trailing
+#   # `*` absorbs a same-day `.N` suffix.
+#   #
+#   # Still a coarse filter, not validation — a glob is not a regex, so `1-scratch.0.0`
+#   # gets through. It only limits how much machinery a junk tag can start.
+#   push:
+#     tags:
+#       - "[0-9]*.[0-9]*.[0-9]*"
+#   workflow_dispatch:
+#     inputs:
+#       tag:
+#         description: "Existing release tag to (re)publish (for example 2026.6.1)"
+#         required: true
+#         type: string
+#       dry_run:
+#         description: "Build without pushing to GHCR or touching the Release"
+#         required: false
+#         default: false
+#         type: boolean
+# <<< ci-local:gated
 on:
-  # Release tags only. This was `"*"`, which meant the runbook's own
-  # "push a test tag to verify" recipe published a real image and moved
-  # :latest onto it.
-  #
-  # Narrowed further to three segments, matching npm-publish.yml so a release tag
-  # means the same thing to both. The earlier `[0-9]*` also matched `1-scratch`,
-  # which would start a full CI gate (this workflow calls ci.yml) before anything
-  # rejected it. Checked against all 22 tags this repo has ever had: every one is
-  # YYYY.M.D and matches, so nothing that ever released is excluded. The trailing
-  # `*` absorbs a same-day `.N` suffix.
-  #
-  # Still a coarse filter, not validation — a glob is not a regex, so `1-scratch.0.0`
-  # gets through. It only limits how much machinery a junk tag can start.
-  push:
-    tags:
-      - "[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
     inputs:
       tag:
