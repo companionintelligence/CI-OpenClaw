@@ -1143,6 +1143,28 @@ describe("discoverOllamaModels", () => {
     });
   });
 
+  test("matches a bare DEFAULT_MODEL to the pool's name:latest tag", async () => {
+    const tagged = {
+      "Qwen3-0.6B-GGUF:latest": { capabilities: ["tools"], contextLength: 40000 },
+      "Qwen3-Coder-Q6_K.gguf:latest": { capabilities: ["tools"], contextLength: 262144 },
+      "nomic-embed-text:latest": { capabilities: [], contextLength: 2048 },
+    };
+    await withOllama(tagged, async (baseUrl) => {
+      dataDir = makeDataDir({ env: { CI_LLM_NUM_CTX: "262144" } });
+      const { cfg } = makeReconciler(dataDir);
+      const { models, defaultModelAvailable } = await cfg.discoverOllamaModels(
+        baseUrl,
+        "Qwen3-Coder-Q6_K.gguf",
+      );
+      assert.strictEqual(defaultModelAvailable, "Qwen3-Coder-Q6_K.gguf:latest");
+      assert.strictEqual(models[0].id, "auto");
+      assert.strictEqual(models[0].name, "Hub Auto (Qwen3-Coder-Q6_K.gguf:latest)");
+      assert.strictEqual(models[0].contextWindow, 262144);
+      assert.strictEqual(models[0].params.num_ctx, 262144);
+      assert.ok(!models.some((model) => model.id.includes("embed")));
+    });
+  });
+
   test("auto falls back to the first model when DEFAULT_MODEL is not installed", async () => {
     await withOllama(CATALOG, async (baseUrl) => {
       dataDir = makeDataDir();
@@ -1465,6 +1487,62 @@ describe("reconcileConfig (end to end)", () => {
       assert.ok("ollama/qwen3:4b" in agentModels);
       assert.ok("ollama/llava:7b" in agentModels);
       assert.ok(!("ci-hub/llava:7b" in agentModels));
+      assert.deepStrictEqual(config.agents.defaults.modelPolicy.allow, [
+        "ci-hub/auto",
+        "ci-hub/qwen3:4b",
+        "ollama/llama3.1:8b",
+        "ollama/qwen3:4b",
+        "ollama/llava:7b",
+      ]);
+    });
+  });
+
+  test("lists every downloaded chat model and points Hub Auto at a bare DEFAULT_MODEL", async () => {
+    const tagged = {
+      "Qwen3-0.6B-GGUF:latest": { capabilities: ["tools"], contextLength: 40000 },
+      "Qwen3-Coder-Q6_K.gguf:latest": { capabilities: ["tools"], contextLength: 262144 },
+      "Qwen3.6-35B-A3B-GGUF:latest": { capabilities: ["tools", "vision"], contextLength: 65536 },
+      "nomic-embed-text:latest": { capabilities: [], contextLength: 2048 },
+    };
+    await withOllama(tagged, async (baseUrl) => {
+      dataDir = makeDataDir({
+        config: {
+          agents: {
+            defaults: {
+              model: { primary: "ollama/Qwen3-0.6B-GGUF:latest" },
+              modelPolicy: {
+                allow: [
+                  "ci-hub/auto",
+                  "ci-hub/Qwen3-0.6B-GGUF:latest",
+                  "ollama/Qwen3-0.6B-GGUF:latest",
+                  "anthropic/*",
+                ],
+              },
+            },
+          },
+        },
+        env: { OLLAMA_HOST: baseUrl, DEFAULT_MODEL: "Qwen3-Coder-Q6_K.gguf", CI_LLM_NUM_CTX: "262144" },
+      });
+      const { cfg } = makeReconciler(dataDir);
+      await cfg.reconcileConfig();
+      const config = readCfg(dataDir);
+      const auto = config.models.providers["ci-hub"].models[0];
+      assert.strictEqual(auto.id, "auto");
+      assert.strictEqual(auto.name, "Hub Auto (Qwen3-Coder-Q6_K.gguf:latest)");
+      assert.strictEqual(auto.contextWindow, 262144);
+      assert.strictEqual(config.agents.defaults.model.primary, "ci-hub/auto");
+      assert.deepStrictEqual(config.agents.defaults.modelPolicy.allow, [
+        "ci-hub/auto",
+        "ci-hub/Qwen3-Coder-Q6_K.gguf:latest",
+        "ollama/Qwen3-0.6B-GGUF:latest",
+        "ollama/Qwen3-Coder-Q6_K.gguf:latest",
+        "ollama/Qwen3.6-35B-A3B-GGUF:latest",
+        "anthropic/*",
+      ]);
+      assert.ok(
+        !config.agents.defaults.modelPolicy.allow.some((ref) => ref.includes("embed")),
+        "the embedder is not a chat model",
+      );
     });
   });
 
@@ -1868,15 +1946,26 @@ describe("resolveAgentPrimary", () => {
     assert.strictEqual(d.reason, "unset");
   });
 
-  test("an operator's non-Hub primary is never touched, whatever the handout says", () => {
-    for (const existingPrimary of ["anthropic/claude-sonnet-4-6", "ollama/llama3.1:8b", "ollama/gemma3:1b"]) {
+  test("a cloud primary is never touched, whatever the handout says", () => {
+    const d = resolveAgentPrimary({
+      ...base,
+      existingPrimary: "anthropic/claude-sonnet-4-6",
+      record: { defaultModel: "gemma3:1b", primary: "ci-hub/auto" },
+    });
+    assert.strictEqual(d.primary, "anthropic/claude-sonnet-4-6");
+    assert.strictEqual(d.reason, "not-hub-managed");
+  });
+
+  test("a downloaded ollama pick returns to the Hub default", () => {
+    for (const existingPrimary of ["ollama/llama3.1:8b", "ollama/gemma3:1b"]) {
       const d = resolveAgentPrimary({
         ...base,
         existingPrimary,
-        record: { defaultModel: "gemma3:1b", primary: "ci-hub/auto" },
+        record: { defaultModel: "qwen3-coder:30b", primary: "ci-hub/auto" },
       });
-      assert.strictEqual(d.primary, existingPrimary);
-      assert.strictEqual(d.reason, "not-hub-managed");
+      assert.strictEqual(d.primary, "ci-hub/auto");
+      assert.strictEqual(d.reason, "local-catalog");
+      assert.strictEqual(d.hubPrimary, "ci-hub/auto");
     }
   });
 
