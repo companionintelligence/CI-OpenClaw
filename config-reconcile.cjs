@@ -236,6 +236,23 @@ function isEmbeddingModel(modelId) {
 }
 
 /**
+ * Whether two engine ids name the same model.
+ *
+ * The pool lists every untagged Lemonade file as `name:latest`. The Hub saves the
+ * bare id. Only that implicit `:latest` is folded; a real tag (`qwen3:4b`) stays
+ * verbatim, matching the Hub's `sameModelId`.
+ */
+function withLatestTag(id) {
+  const slash = id.lastIndexOf("/");
+  const colon = id.lastIndexOf(":");
+  return colon > slash ? id : `${id}:latest`;
+}
+
+function sameModelId(a, b) {
+  return a === b || withLatestTag(a) === withLatestTag(b);
+}
+
+/**
  * Build one entry for the `ci-hub` provider's model catalog.
  *
  * `numCtx` is the Hub's hardware-aware context window (CI_LLM_NUM_CTX), passed in
@@ -282,7 +299,10 @@ function buildOllamaModelEntry(modelId, displayName, capabilities, numCtx) {
  * `ci-hub/gemma3:1b` because that id was still installed, and every turn failed with
  * "gemma3:1b does not support tools". Three rules, in order:
  *
- *   1. A primary that is not `ci-hub/...` was chosen by an operator. Leave it alone.
+ *   1. A primary outside `ci-hub/` and `ollama/` is a cloud provider the operator chose.
+ *      Leave it alone. An `ollama/` primary is a downloaded local model the picker stored;
+ *      the Hub owns that default, so the next start returns the agent to the Hub choice.
+ *      Otherwise a click on the old row survives every later Hub save.
  *   2. A `ci-hub/...` primary that is no longer in the ci-hub catalog, or that the pool
  *      REPORTS cannot call tools, is replaced. Unknown capabilities (a failed /api/show)
  *      are not a report and never move it.
@@ -348,6 +368,9 @@ function resolveAgentPrimary({
     return decide(hubPrimary, "unset");
   }
   if (!existingPrimary.startsWith("ci-hub/")) {
+    if (existingPrimary.startsWith("ollama/")) {
+      return decide(hubPrimary, "local-catalog");
+    }
     return decide(existingPrimary, "not-hub-managed");
   }
   const currentId = existingPrimary.slice("ci-hub/".length);
@@ -1416,8 +1439,14 @@ function createConfigReconciler({
       await addModel(model?.id, model?.id);
     }
 
-    const defaultModelAvailable =
-      defaultModel && discoveredIds.has(defaultModel) ? defaultModel : null;
+    // Match the tag the pool actually listed. `name` and `name:latest` are one model;
+    // an exact `discoveredIds.has` misses the bare id and leaves Hub Auto on whichever
+    // tag came back first, at that tag's context window.
+    const defaultModelAvailable = defaultModel
+      ? (discovered.find(
+          (model) => typeof model?.id === "string" && sameModelId(model.id, defaultModel),
+        )?.id ?? null)
+      : null;
     const firstModelId = models.find((model) => model.id !== "auto")?.id ?? null;
     const autoTargetId = defaultModelAvailable || firstModelId;
 
@@ -1903,17 +1932,6 @@ function createConfigReconciler({
           );
         }
         if (
-          decision.reason === "not-hub-managed" &&
-          existingPrimary.startsWith("ollama/") &&
-          toolSupportById[existingPrimary.slice("ollama/".length)] === false
-        ) {
-          log.warn(
-            `The agent's model ${existingPrimary} cannot call tools (the pool says so); ` +
-              "it was chosen explicitly, so it is left as is",
-          );
-        }
-
-        if (
           JSON.stringify(nextHubProvider.models || []) !==
           JSON.stringify(hubModels)
         ) {
@@ -1980,6 +1998,27 @@ function createConfigReconciler({
           log.log("Patched config: merged ci-hub + ollama model options");
         }
 
+        // The chat menu asks for models.list view=configured, and that view is
+        // agents.defaults.modelPolicy.allow. OpenClaw copies a legacy allowlist into
+        // it once and then does not extend it when the catalog grows, so a node that
+        // started with one small model keeps showing only that model. Rewrite the
+        // local refs on every sync. Refs for other providers stay; an empty allow
+        // would open the whole built-in catalog.
+        const policy = ensureRecordPathTracked(config, ["agents", "defaults", "modelPolicy"]);
+        changed = policy.replaced || changed;
+        const currentAllow = Array.isArray(policy.node.allow)
+          ? policy.node.allow.filter((ref) => typeof ref === "string")
+          : [];
+        const keptAllow = currentAllow.filter(
+          (ref) => !ref.startsWith("ci-hub/") && !ref.startsWith("ollama/"),
+        );
+        const nextAllow = [...desiredModelKeys, ...keptAllow];
+        if (JSON.stringify(currentAllow) !== JSON.stringify(nextAllow)) {
+          policy.node.allow = nextAllow;
+          changed = true;
+          log.log(`Patched config: set model allow list to ${nextAllow.length} chat model(s)`);
+        }
+
         if (decision.primary) {
           // Record-guard the node we assign .primary into: on a scalar the assignment
           // silently no-ops, so `changed` would be set on every boot forever.
@@ -1993,6 +2032,7 @@ function createConfigReconciler({
               "not-in-catalog": `${was} is no longer in the ci-hub catalog`,
               "no-tool-support": `the pool reports ${was} cannot call tools`,
               "follows-handout": `following the Hub handout (DEFAULT_MODEL=${defaultModel || "unset"}); was ${was}`,
+              "local-catalog": `${was} is a downloaded local model; the Hub default takes over`,
               stale: `${was} is a stale Hub default`,
             }[decision.reason];
             model.node.primary = decision.primary;
