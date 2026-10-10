@@ -23,6 +23,7 @@ const {
   hasCiServerCredentials,
 } = require("./config-reconcile.cjs");
 const { buildGatewayHeaders } = require("./proxy-headers.cjs");
+const { handleGatewayHealthRequest } = require("./gateway-health.cjs");
 
 const CONFIG_DIR = process.env.OPENCLAW_DATA_DIR || "/data/.openclaw";
 const PORT = parseInt(process.env.SETUP_PORT || "18789");
@@ -72,6 +73,8 @@ function tokensMatch(provided, expected) {
 let openclawProcess = null;
 let openclawStarting = false;
 let ptyProcess = null;
+// How the last gateway run ended, for the HEALTHCHECK (gateway-health.cjs).
+let lastGatewayExit = null;
 
 
 function ensureShellCompletionBypass() {
@@ -188,8 +191,9 @@ function startOpenclaw({ repair = true } = {}) {
       },
     );
 
-    openclawProcess.on("exit", (code) => {
+    openclawProcess.on("exit", (code, signal) => {
       console.log(`OpenClaw exited with code ${code}`);
+      lastGatewayExit = { code, signal };
       openclawProcess = null;
     });
   };
@@ -681,6 +685,20 @@ const server = http.createServer(async (req, res) => {
       "Cache-Control": "no-store",
     });
     res.end(JSON.stringify(telemetry.getTelemetryStatus()));
+    return;
+  }
+
+  // The HEALTHCHECK's question. Answered before the setup redirect and the memory gate, and
+  // unlike the requests below it never calls startOpenclaw() (see gateway-health.cjs).
+  if (
+    handleGatewayHealthRequest(req, res, () => ({
+      configured: cfg.isConfigured(),
+      onboarding: Boolean(ptyProcess),
+      running: Boolean(openclawProcess),
+      starting: openclawStarting,
+      lastExit: lastGatewayExit,
+    }))
+  ) {
     return;
   }
 

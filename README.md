@@ -61,6 +61,23 @@ so the multi-arch build gets the right static binary per platform. `pytest`/`htt
 Debian trixie packages (`python3-pytest`, `python3-httpx`), which keeps them apt-managed and
 importable from the system interpreter.
 
+## Gateway health
+
+The setup server stays up when the OpenClaw gateway behind it exits, and starts the gateway
+again only when the next request arrives. So the container's state says nothing about the
+agent. Ask the setup server instead:
+
+```bash
+docker compose exec openclaw curl -s http://127.0.0.1:18789/__ci_health
+docker inspect --format '{{.State.Health.Status}}' openclaw
+```
+
+`/__ci_health` answers 200 while the gateway runs or starts (or while the app waits for
+setup), and 503 with the exit code once the gateway has stopped and nothing has restarted it.
+Asking does not restart it. The image's `HEALTHCHECK` runs `healthcheck.sh`, which fails only
+on that 503, so a stopped gateway turns the container `unhealthy` within about a minute and a
+half, and the Hub's app page shows **Needs attention**.
+
 ## Companion Intelligence memory setup
 
 CI-OpenClaw ships with a bundled OpenClaw memory plugin named `companionintelligence`. When CI-Server credentials are available, startup selects it as OpenClaw's active memory backend and routes memory reads/writes through CI-Server.
