@@ -74,9 +74,11 @@ docker inspect --format '{{.State.Health.Status}}' openclaw
 
 `/__ci_health` answers 200 while the gateway runs or starts (or while the app waits for
 setup), and 503 with the exit code once the gateway has stopped and nothing has restarted it.
-Asking does not restart it. The image's `HEALTHCHECK` runs `healthcheck.sh`, which fails only
-on that 503, so a stopped gateway turns the container `unhealthy` within about a minute and a
-half, and the Hub's app page shows **Needs attention**.
+It also answers 503 after three failed starts in a row (runs that died within a minute), even
+while the next attempt runs, because OpenClaw's loading page reloads every 2.5 seconds and
+restarts a dead gateway each time. Asking does not restart it. The image's `HEALTHCHECK` runs
+`healthcheck.sh`, which fails only on that 503, so a stopped gateway turns the container
+`unhealthy` within about a minute and a half, and the Hub's app page shows **Needs attention**.
 
 ## Companion Intelligence memory setup
 
