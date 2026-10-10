@@ -32,7 +32,7 @@ coding tasks without root:
 |---|---|---|
 | Python | `python3` / `python` 3.13, `pip`, `python3 -m venv`, `uv` / `uvx`; `pytest` and `httpx` preinstalled | a project venv (`.venv` in the workspace), or `/data/.local` for `pip install` / `uv tool install` |
 | Node | `node` 22, `npm` | `/data/.npm-global` for `npm install -g` |
-| System tools | Homebrew (`brew install jq ffmpeg ripgrep …`) | `/home/linuxbrew` (bind-mounted from the app data dir) |
+| System tools | Homebrew (`brew install jq ffmpeg ripgrep …`) | `/home/linuxbrew`, its own persistent mount, filled from the image on first start (`seed-linuxbrew.sh`) |
 | Browser | headless Chromium | — |
 
 Everything under `/data` survives app updates; anything installed with `sudo` outside it

@@ -116,7 +116,7 @@ COPY --chown=node:node telemetry.cjs /app/telemetry.cjs
 COPY --chown=node:node setup.html /app/setup.html
 COPY --chown=node:node logo.webp /app/logo.webp
 COPY --chown=node:node assets /app/assets
-COPY --chown=node:node bootstrap-from-hub.sh bootstrap-ci-memory.sh bootstrap-ci-hub-mcp.sh entrypoint.sh healthcheck.sh /app/
+COPY --chown=node:node bootstrap-from-hub.sh bootstrap-ci-memory.sh bootstrap-ci-hub-mcp.sh entrypoint.sh healthcheck.sh seed-linuxbrew.sh /app/
 COPY openclaw-context /app/openclaw-context
 # Vendor the keyless DuckDuckGo search plugin into the image (not into /data) so
 # upgrades and existing volumes still get free web_search via reconcile. Version
@@ -127,7 +127,7 @@ RUN sudo mkdir -p /app/openclaw-context/plugins/duckduckgo \
        -C /app/openclaw-context/plugins/duckduckgo --strip-components=1 \
   && sudo chown -R node:node /app/openclaw-context/plugins/duckduckgo \
   && rm -f /tmp/openclaw-duckduckgo-plugin-2026.9.1.tgz
-RUN sudo chmod +x /app/bootstrap-from-hub.sh /app/bootstrap-ci-memory.sh /app/bootstrap-ci-hub-mcp.sh /app/entrypoint.sh /app/healthcheck.sh
+RUN sudo chmod +x /app/bootstrap-from-hub.sh /app/bootstrap-ci-memory.sh /app/bootstrap-ci-hub-mcp.sh /app/entrypoint.sh /app/healthcheck.sh /app/seed-linuxbrew.sh
 
 # Move home to skeleton
 RUN sudo mv /data /home-skeleton

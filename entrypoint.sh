@@ -24,6 +24,10 @@ else
     || echo "[entrypoint] WARN: could not chown /data; continuing (mount may manage permissions externally)"
 fi
 
+# Homebrew lives on its own mount; an empty one gets the image's copy. Without brew the agent
+# still runs, so a failure here must not stop the container.
+/app/seed-linuxbrew.sh || echo "[entrypoint] WARN: could not seed /home/linuxbrew; brew may be missing"
+
 /app/bootstrap-from-hub.sh || true
 /app/bootstrap-ci-memory.sh || true
 /app/bootstrap-ci-hub-mcp.sh || true

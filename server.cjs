@@ -123,6 +123,10 @@ async function initializeHome() {
     const entries = await fsp.readdir(SKELETON_DIR, { withFileTypes: true });
 
     for (const entry of entries) {
+      // Homebrew belongs in its own mount, /home/linuxbrew, which the entrypoint has already
+      // filled (seed-linuxbrew.sh). A copy here only reached that mount while it shared a host
+      // folder with /data/linuxbrew, and left an unused second Homebrew in /data when it did not.
+      if (entry.name === "linuxbrew") continue;
       const srcPath = path.join(SKELETON_DIR, entry.name);
       const destPath = path.join(homeDir, entry.name);
 
