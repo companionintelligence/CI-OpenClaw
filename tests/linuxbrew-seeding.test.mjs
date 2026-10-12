@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { flatDockerfile } from "./helpers/dockerfile.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (file) => readFileSync(join(ROOT, file), "utf8");
@@ -16,11 +17,7 @@ const read = (file) => readFileSync(join(ROOT, file), "utf8");
  * image runs it, and that the setup server no longer makes the second copy.
  */
 describe("Homebrew is seeded into its own mount", () => {
-  const flat = read("Dockerfile")
-    .split("\n")
-    .filter((line) => !/^\s*#/.test(line))
-    .join("\n")
-    .replace(/\\\n\s*/g, " ");
+  const flat = flatDockerfile();
 
   test("the Dockerfile copies seed-linuxbrew.sh into /app and makes it executable", () => {
     assert.match(flat, /^COPY\b[^\n]*\bseed-linuxbrew\.sh\b[^\n]* \/app\/$/m);

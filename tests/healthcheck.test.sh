@@ -57,6 +57,12 @@ start_stub() {
   done
   STUB_PORT="$(cat "${port_file}")"
   rm -f "${port_file}"
+  # An empty port would send healthcheck.sh to its default, 18789, which is the real app when
+  # `docker compose up` runs on this machine.
+  if [[ -z "${STUB_PORT}" ]]; then
+    echo "stub server for status ${status} did not start" >&2
+    exit 1
+  fi
 }
 
 # A port nothing listens on: bind an ephemeral one, then let it go.
