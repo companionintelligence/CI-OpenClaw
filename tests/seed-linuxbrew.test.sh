@@ -62,8 +62,19 @@ run_seed() {
   echo "${rc}"
 }
 
+CASES=()
+cleanup() {
+  local dir
+  for dir in "${CASES[@]+"${CASES[@]}"}"; do
+    chmod -R u+w "${dir}" 2>/dev/null || true
+    rm -rf "${dir}"
+  done
+}
+trap cleanup EXIT
+
 new_case() {
   CASE="$(mktemp -d)"
+  CASES+=("${CASE}")
   make_skeleton "${CASE}/skel"
   mkdir -p "${CASE}/bin"
   make_sudo_stub "${CASE}/bin"
@@ -127,6 +138,15 @@ else
   check "took ownership through the privileged helper" grep -q "^chown .* ${CASE}/target$" "${CASE}/bin/calls.log"
   check "brew is in place" [ -f "${CASE}/target/.linuxbrew/Homebrew/brew" ]
 fi
+
+# ─── Test 6: a copy cut short on an earlier start is done again, not taken as finished ──
+echo "test: a leftover staging folder from an interrupted copy does not count as Homebrew"
+new_case
+mkdir -p "${CASE}/target/.seeding/.linuxbrew/bin"
+rc="$(run_seed "${CASE}/skel" "${CASE}/target" "${CASE}/bin")"
+check "exits 0" [ "${rc}" = "0" ]
+check "brew is in place" [ -f "${CASE}/target/.linuxbrew/Homebrew/brew" ]
+check "the staging folder is gone" [ ! -e "${CASE}/target/.seeding" ]
 
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped"

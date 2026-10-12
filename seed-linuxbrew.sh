@@ -30,8 +30,14 @@ if [ ! -d "${TARGET}" ]; then
   "${SUDO}" mkdir -p "${TARGET}"
 fi
 
-# Anything already there is Homebrew from an earlier start, with whatever the agent installed.
-if [ -n "$(ls -A "${TARGET}" 2>/dev/null)" ]; then
+# The copy goes into a staging folder inside the mount and is then renamed into place. A copy cut
+# short (the container stopped mid-way, a full disk, a file the mount refused) leaves only the
+# staging folder, which the check below ignores, so the next start copies again. Copied straight
+# into the mount, half a Homebrew would look like a finished one and never be retried.
+STAGING="${TARGET}/.seeding"
+
+# Anything else already there is Homebrew from an earlier start, with whatever the agent installed.
+if [ -n "$(ls -A "${TARGET}" 2>/dev/null | grep -v -e '^\.seeding$' -e '^\.seed-write-test\.' || true)" ]; then
   exit 0
 fi
 
@@ -44,5 +50,14 @@ else
   "${SUDO}" chown "$(id -u):$(id -g)" "${TARGET}"
 fi
 
+rm -rf "${STAGING}"
 log "copying Homebrew from ${SOURCE} into ${TARGET}"
-cp -a "${SOURCE}/." "${TARGET}/"
+cp -a "${SOURCE}" "${STAGING}"
+# Same filesystem, so each mv is a rename. The image's Homebrew has one top-level entry
+# (.linuxbrew), which makes the switch a single step.
+for entry in "${STAGING}"/* "${STAGING}"/.[!.]* "${STAGING}"/..?*; do
+  if [ -e "${entry}" ] || [ -L "${entry}" ]; then
+    mv "${entry}" "${TARGET}/"
+  fi
+done
+rmdir "${STAGING}"
