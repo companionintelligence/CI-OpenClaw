@@ -75,6 +75,10 @@ let openclawStarting = false;
 let ptyProcess = null;
 // Follows openclawProcess for the image's HEALTHCHECK (gateway-health.cjs).
 const gatewayHealth = createGatewayHealthTracker();
+// Set once startOpenclaw() has run: from then on the gateway is meant to be up. The healthcheck
+// reads this instead of cfg.isConfigured(), which parses openclaw.json on every call and copies
+// the .bak over it when the read fails, so polling it could overwrite a config doctor is writing.
+let gatewayWanted = false;
 
 
 function ensureShellCompletionBypass() {
@@ -176,6 +180,7 @@ async function runDoctor() {
 }
 
 function startOpenclaw({ repair = true } = {}) {
+  gatewayWanted = true;
   // Guard against re-entry: runDoctor() is async, so without this flag every
   // incoming request would see openclawProcess === null and spawn another doctor run.
   if (openclawProcess || openclawStarting) {
@@ -186,7 +191,7 @@ function startOpenclaw({ repair = true } = {}) {
   const spawnGateway = () => {
     openclawStarting = false;
     console.log("Starting OpenClaw gateway...");
-    openclawProcess = spawn(
+    const child = spawn(
       "openclaw",
       ["gateway", "--port", OPENCLAW_PORT.toString()],
       {
@@ -194,12 +199,25 @@ function startOpenclaw({ repair = true } = {}) {
         env: cfg.buildChildEnv(),
       },
     );
+    openclawProcess = child;
     gatewayHealth.spawned();
 
-    openclawProcess.on("exit", (code, signal) => {
-      console.log(`OpenClaw exited with code ${code}`);
+    child.on("exit", (code, signal) => {
+      console.log(`OpenClaw exited with code ${code}${signal ? ` (${signal})` : ""}`);
       gatewayHealth.exited(code, signal);
       openclawProcess = null;
+    });
+
+    // A spawn that fails (ENOENT, EACCES, EAGAIN under a pids limit) emits 'error' and never
+    // 'exit'. Without this the handle stayed set, nothing restarted the gateway, and the
+    // healthcheck saw a run that never ended. Only a child with no pid failed to spawn: 'error'
+    // also reports a failed kill() on a gateway that is still running.
+    child.on("error", (err) => {
+      console.error("OpenClaw gateway error:", err.message);
+      if (child.pid === undefined && openclawProcess === child) {
+        gatewayHealth.exited(null, null);
+        openclawProcess = null;
+      }
     });
   };
 
@@ -698,7 +716,7 @@ const server = http.createServer(async (req, res) => {
   if (
     handleGatewayHealthRequest(req, res, () =>
       gatewayHealth.describe({
-        configured: cfg.isConfigured(),
+        configured: gatewayWanted,
         onboarding: Boolean(ptyProcess),
         starting: openclawStarting,
       }),

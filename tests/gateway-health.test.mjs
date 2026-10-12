@@ -3,8 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { flatDockerfile } from "./helpers/dockerfile.mjs";
 
 const require = createRequire(import.meta.url);
 const {
@@ -14,8 +13,6 @@ const {
   createGatewayHealthTracker,
   handleGatewayHealthRequest,
 } = require("../gateway-health.cjs");
-
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 // A configured app, with no setup terminal open and no restart under way.
 const idle = { configured: true, onboarding: false, starting: false };
@@ -60,23 +57,49 @@ describe("the gateway health tracker", () => {
     assert.deepEqual(tracker.describe(idle), { healthy: true, body: { status: "ok", gateway: "running" } });
   });
 
-  test("a gateway that exited and was not restarted is down, and says how it ended", () => {
+  // A stopped gateway is started again by the next request, and an unhealthy container loses its
+  // Traefik routes, so on a Public Web install that request would never arrive. Stopped is only
+  // down once the starts keep failing.
+  test("a gateway that exited and was not restarted counts as healthy, and says how it ended", () => {
     const clock = trackerAt();
     failedRun(clock);
     assert.deepEqual(clock.tracker.describe(idle), {
-      healthy: false,
-      body: { status: "down", gateway: "stopped", failedStarts: 1, exitCode: 1, signal: null },
+      healthy: true,
+      body: { status: "ok", gateway: "stopped", failedStarts: 1, exitCode: 1, signal: null },
     });
   });
 
-  test("a gateway killed by a signal reports the signal", () => {
+  test("a gateway the agent stopped through the systemctl shim counts as healthy", () => {
     const { tracker, advance } = trackerAt();
     tracker.spawned();
-    advance(5_000);
+    advance(10 * 60_000);
+    tracker.exited(null, "SIGTERM");
+    assert.deepEqual(tracker.describe(idle), {
+      healthy: true,
+      body: { status: "ok", gateway: "stopped", failedStarts: 0, exitCode: null, signal: "SIGTERM" },
+    });
+  });
+
+  test("a gateway that crashed after a long run counts as healthy until the next request", () => {
+    const { tracker, advance } = trackerAt();
+    tracker.spawned();
+    advance(QUICK_EXIT_MS + 1);
     tracker.exited(null, "SIGKILL");
     const { healthy, body } = tracker.describe(idle);
-    assert.equal(healthy, false);
+    assert.equal(healthy, true);
+    assert.equal(body.gateway, "stopped");
     assert.equal(body.signal, "SIGKILL");
+  });
+
+  test(`a gateway stopped after ${FAILED_STARTS_LIMIT} failed starts in a row is down`, () => {
+    const clock = trackerAt();
+    for (let i = 0; i < FAILED_STARTS_LIMIT - 1; i++) failedRun(clock);
+    assert.equal(clock.tracker.describe(idle).healthy, true, "one start short of the limit");
+    failedRun(clock);
+    assert.deepEqual(clock.tracker.describe(idle), {
+      healthy: false,
+      body: { status: "down", gateway: "failing", failedStarts: FAILED_STARTS_LIMIT, exitCode: 1, signal: null },
+    });
   });
 
   test("a restart after one failure counts as healthy while it is under way", () => {
@@ -164,7 +187,7 @@ describe(`GET ${GATEWAY_HEALTH_PATH}`, () => {
   after(() => new Promise((resolve) => server.close(resolve)));
 
   const healthy = { healthy: true, body: { status: "ok", gateway: "running" } };
-  const stopped = { healthy: false, body: { status: "down", gateway: "stopped", failedStarts: 1, exitCode: 1, signal: null } };
+  const failing = { healthy: false, body: { status: "down", gateway: "failing", failedStarts: 3, exitCode: 1, signal: null } };
 
   test("answers 200 with the body while the gateway is healthy", async () => {
     answer = healthy;
@@ -176,26 +199,26 @@ describe(`GET ${GATEWAY_HEALTH_PATH}`, () => {
   });
 
   test("answers 503 with the body once the gateway is down", async () => {
-    answer = stopped;
+    answer = failing;
     const res = await fetch(`${base}${GATEWAY_HEALTH_PATH}`);
     assert.equal(res.status, 503);
-    assert.deepEqual(await res.json(), stopped.body);
+    assert.deepEqual(await res.json(), failing.body);
   });
 
   test("asks again on every request", async () => {
-    answer = stopped;
+    answer = failing;
     assert.equal((await fetch(`${base}${GATEWAY_HEALTH_PATH}`)).status, 503);
     answer = healthy;
     assert.equal((await fetch(`${base}${GATEWAY_HEALTH_PATH}`)).status, 200);
   });
 
   test("ignores a query string", async () => {
-    answer = stopped;
+    answer = failing;
     assert.equal((await fetch(`${base}${GATEWAY_HEALTH_PATH}?probe=1`)).status, 503);
   });
 
   test("HEAD gets the status without a body", async () => {
-    answer = stopped;
+    answer = failing;
     const res = await fetch(`${base}${GATEWAY_HEALTH_PATH}`, { method: "HEAD" });
     assert.equal(res.status, 503);
     assert.equal(await res.text(), "");
@@ -216,13 +239,7 @@ describe(`GET ${GATEWAY_HEALTH_PATH}`, () => {
 });
 
 describe("the image reports gateway health to Docker", () => {
-  const dockerfile = readFileSync(join(ROOT, "Dockerfile"), "utf8");
-  // Fold backslash continuations and drop comment lines, as tests/sandbox-toolchain.test.mjs does.
-  const flat = dockerfile
-    .split("\n")
-    .filter((line) => !/^\s*#/.test(line))
-    .join("\n")
-    .replace(/\\\n\s*/g, " ");
+  const flat = flatDockerfile();
   const healthcheck = flat.split("\n").find((line) => /^HEALTHCHECK\b/.test(line));
 
   test("the Dockerfile declares a HEALTHCHECK that runs /app/healthcheck.sh", () => {
@@ -244,5 +261,28 @@ describe("the image reports gateway health to Docker", () => {
     assert.ok(startInterval, "HEALTHCHECK has no --start-interval=<n>s");
     assert.ok(Number(startInterval[1]) <= 2, `--start-interval=${startInterval[1]}s is longer than 2s`);
     assert.match(healthcheck, /--start-period=\d+s\b/, "--start-interval only applies inside a --start-period");
+  });
+});
+
+// server.cjs binds a port and requires node-pty by its container path, so it cannot be loaded
+// here. These read its source, as tests/linuxbrew-seeding.test.mjs does for initializeHome().
+describe("server.cjs feeds the tracker", () => {
+  const server = readFileSync(new URL("../server.cjs", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+
+  // cfg.isConfigured() parses openclaw.json and copies openclaw.json.bak over it when the parse
+  // fails, so a check every few seconds could restore the backup over a config doctor is writing.
+  test("the health answer does not read openclaw.json", () => {
+    const call = server.match(/handleGatewayHealthRequest\(req, res, \(\) =>[\s\S]*?\n {2}\) \{/);
+    assert.ok(call, "the handleGatewayHealthRequest call was not found in server.cjs");
+    assert.doesNotMatch(call[0], /isConfigured/);
+  });
+
+  // A spawn that fails emits 'error' and never 'exit'. Unhandled, the handle stayed set, no
+  // request started the gateway again, and the check reported a run that never happened.
+  test("a gateway that fails to spawn is recorded as a failed start and forgotten", () => {
+    const onError = server.match(/\.on\("error", \(err\) => \{[\s\S]*?\n {4}\}\);/);
+    assert.ok(onError, "the spawned gateway has no 'error' listener");
+    assert.match(onError[0], /gatewayHealth\.exited\(/);
+    assert.match(onError[0], /openclawProcess = null;/);
   });
 });

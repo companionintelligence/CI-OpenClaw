@@ -20,10 +20,11 @@ const GATEWAY_HEALTH_PATH = "/__ci_health";
 const QUICK_EXIT_MS = 60_000;
 
 /**
- * Failed starts in a row after which the gateway counts as down even while the next attempt
- * runs. Every request restarts a stopped gateway, and OpenClaw's loading page reloads itself
- * every 2.5 seconds, so while anyone has the page open a gateway that dies at boot is almost
- * always "starting". Without this the check would pass exactly when the agent is failing.
+ * Failed starts in a row after which the gateway counts as down, whether it is stopped or the
+ * next attempt is running. This is the only way the check fails. A stopped gateway on its own
+ * counts as up, because the next request starts it again. Every request restarts a stopped
+ * gateway, and OpenClaw's loading page reloads itself every 2.5 seconds, so while anyone has the
+ * page open a gateway that dies at boot reaches the limit within seconds.
  */
 const FAILED_STARTS_LIMIT = 3;
 
@@ -31,9 +32,14 @@ const FAILED_STARTS_LIMIT = 3;
  * Tracks the gateway process for the healthcheck. server.cjs calls spawned() and exited()
  * where it sets and clears its own process handle, and describe() on every check.
  *
+ * The default clock is monotonic. Date.now() follows the wall clock, which jumps when a WSL2 or
+ * Docker Desktop VM resyncs after the host sleeps, or when NTP first sets a device with no RTC.
+ * A jump back would hold a healthy run inside the quick-exit window for as long as the jump, and
+ * one forward would count a run that died at boot as a long one.
+ *
  * @param {{now?: () => number}} [options]
  */
-function createGatewayHealthTracker({ now = Date.now } = {}) {
+function createGatewayHealthTracker({ now = () => performance.now() } = {}) {
   let spawnedAt = null;
   let lastExit = null;
   let failedStarts = 0;
@@ -59,24 +65,20 @@ function createGatewayHealthTracker({ now = Date.now } = {}) {
 
     /**
      * @param {{configured: boolean, onboarding: boolean, starting: boolean}} state
-     *   configured: openclaw.json exists, so the gateway is meant to run. onboarding: the setup
-     *   terminal is running `openclaw onboard`. starting: reconcile and doctor are running before
-     *   the next spawn.
+     *   configured: the setup server has started the gateway, so it is meant to run. onboarding:
+     *   the setup terminal is running `openclaw onboard`. starting: reconcile and doctor are
+     *   running before the next spawn.
      * @returns {{healthy: boolean, body: object}}
      */
     describe({ configured, onboarding, starting }) {
       const running = spawnedAt !== null;
-      const up = (gateway) => ({ healthy: true, body: { status: "ok", gateway } });
-      const down = (gateway) => ({
-        healthy: false,
-        body: {
-          status: "down",
-          gateway,
-          failedStarts,
-          exitCode: lastExit?.code ?? null,
-          signal: lastExit?.signal ?? null,
-        },
+      const lastRun = () => ({
+        failedStarts,
+        exitCode: lastExit?.code ?? null,
+        signal: lastExit?.signal ?? null,
       });
+      const up = (gateway, details) => ({ healthy: true, body: { status: "ok", gateway, ...details } });
+      const down = (gateway) => ({ healthy: false, body: { status: "down", gateway, ...lastRun() } });
 
       if (!configured || onboarding) return up("setup");
       // A run that has outlived the quick-exit window is up, whatever came before it.
@@ -84,15 +86,19 @@ function createGatewayHealthTracker({ now = Date.now } = {}) {
       if (failedStarts >= FAILED_STARTS_LIMIT) return down("failing");
       if (running) return up("running");
       if (starting) return up("starting");
-      return down("stopped");
+      // Stopped: the agent's systemctl shim, a crash, or fewer failed starts than the limit. The
+      // next request starts the gateway again, and that request has to be able to arrive. Traefik
+      // drops every route of a container that is not healthy, so answering 503 here cut a Public
+      // Web install off from the one thing that would have brought its gateway back.
+      return up("stopped", lastRun());
     },
   };
 }
 
 /**
- * Answers GATEWAY_HEALTH_PATH: 200 while the gateway runs, starts or waits for setup, 503 once
- * it has stopped or keeps failing to start. Only reads: asking must not restart the gateway, or
- * every check would rerun doctor and the gateway on an app that cannot start, and pass.
+ * Answers GATEWAY_HEALTH_PATH: 503 once the gateway has failed to start FAILED_STARTS_LIMIT times
+ * in a row, 200 otherwise. Only reads: asking must not restart the gateway, or every check would
+ * rerun doctor and the gateway on an app that cannot start.
  *
  * @param {import("http").IncomingMessage} req
  * @param {import("http").ServerResponse} res

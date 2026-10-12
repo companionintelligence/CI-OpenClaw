@@ -72,13 +72,20 @@ docker compose exec openclaw curl -s http://127.0.0.1:18789/__ci_health
 docker inspect --format '{{.State.Health.Status}}' openclaw
 ```
 
-`/__ci_health` answers 200 while the gateway runs or starts (or while the app waits for
-setup), and 503 with the exit code once the gateway has stopped and nothing has restarted it.
-It also answers 503 after three failed starts in a row (runs that died within a minute), even
-while the next attempt runs, because OpenClaw's loading page reloads every 2.5 seconds and
-restarts a dead gateway each time. Asking does not restart it. The image's `HEALTHCHECK` runs
-`healthcheck.sh`, which fails only on that 503, so a stopped gateway turns the container
-`unhealthy` within about a minute and a half, and the Hub's app page shows **Needs attention**.
+`/__ci_health` answers 503 after three failed starts in a row (runs that died within a minute
+of their spawn), even while the next attempt runs, and 200 otherwise: while the gateway runs or
+starts, while the app waits for setup, and while the gateway is stopped. A stopped gateway
+counts as up because the next request starts it again, and an unhealthy container loses its
+Traefik routes, which would keep that request from arriving on a Public Web install. The body
+says which state it is and, after an exit, the exit code or signal. Asking does not restart the
+gateway.
+
+The image's `HEALTHCHECK` runs `healthcheck.sh`, which fails only on that 503. A gateway that
+cannot start reaches three failed starts within seconds once someone opens OpenClaw, because
+its loading page reloads every 2.5 seconds and each reload restarts the gateway. The container
+turns `unhealthy` about a minute and a half later, and the Hub's app page shows
+**Needs attention**. A gateway that failed at boot and that nobody has asked for since stays
+`healthy`.
 
 ## Companion Intelligence memory setup
 
