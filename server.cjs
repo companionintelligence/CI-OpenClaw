@@ -23,6 +23,7 @@ const {
   hasCiServerCredentials,
 } = require("./config-reconcile.cjs");
 const { buildGatewayHeaders } = require("./proxy-headers.cjs");
+const { createGatewayHealthTracker, handleGatewayHealthRequest } = require("./gateway-health.cjs");
 
 const CONFIG_DIR = process.env.OPENCLAW_DATA_DIR || "/data/.openclaw";
 const PORT = parseInt(process.env.SETUP_PORT || "18789");
@@ -72,6 +73,12 @@ function tokensMatch(provided, expected) {
 let openclawProcess = null;
 let openclawStarting = false;
 let ptyProcess = null;
+// Follows openclawProcess for the image's HEALTHCHECK (gateway-health.cjs).
+const gatewayHealth = createGatewayHealthTracker();
+// Set once startOpenclaw() has run: from then on the gateway is meant to be up. The healthcheck
+// reads this instead of cfg.isConfigured(), which parses openclaw.json on every call and copies
+// the .bak over it when the read fails, so polling it could overwrite a config doctor is writing.
+let gatewayWanted = false;
 
 
 function ensureShellCompletionBypass() {
@@ -120,6 +127,10 @@ async function initializeHome() {
     const entries = await fsp.readdir(SKELETON_DIR, { withFileTypes: true });
 
     for (const entry of entries) {
+      // Homebrew belongs in its own mount, /home/linuxbrew, which the entrypoint has already
+      // filled (seed-linuxbrew.sh). A copy here only reached that mount while it shared a host
+      // folder with /data/linuxbrew, and left an unused second Homebrew in /data when it did not.
+      if (entry.name === "linuxbrew") continue;
       const srcPath = path.join(SKELETON_DIR, entry.name);
       const destPath = path.join(homeDir, entry.name);
 
@@ -169,6 +180,7 @@ async function runDoctor() {
 }
 
 function startOpenclaw({ repair = true } = {}) {
+  gatewayWanted = true;
   // Guard against re-entry: runDoctor() is async, so without this flag every
   // incoming request would see openclawProcess === null and spawn another doctor run.
   if (openclawProcess || openclawStarting) {
@@ -179,7 +191,7 @@ function startOpenclaw({ repair = true } = {}) {
   const spawnGateway = () => {
     openclawStarting = false;
     console.log("Starting OpenClaw gateway...");
-    openclawProcess = spawn(
+    const child = spawn(
       "openclaw",
       ["gateway", "--port", OPENCLAW_PORT.toString()],
       {
@@ -187,10 +199,25 @@ function startOpenclaw({ repair = true } = {}) {
         env: cfg.buildChildEnv(),
       },
     );
+    openclawProcess = child;
+    gatewayHealth.spawned();
 
-    openclawProcess.on("exit", (code) => {
-      console.log(`OpenClaw exited with code ${code}`);
+    child.on("exit", (code, signal) => {
+      console.log(`OpenClaw exited with code ${code}${signal ? ` (${signal})` : ""}`);
+      gatewayHealth.exited(code, signal);
       openclawProcess = null;
+    });
+
+    // A spawn that fails (ENOENT, EACCES, EAGAIN under a pids limit) emits 'error' and never
+    // 'exit'. Without this the handle stayed set, nothing restarted the gateway, and the
+    // healthcheck saw a run that never ended. Only a child with no pid failed to spawn: 'error'
+    // also reports a failed kill() on a gateway that is still running.
+    child.on("error", (err) => {
+      console.error("OpenClaw gateway error:", err.message);
+      if (child.pid === undefined && openclawProcess === child) {
+        gatewayHealth.exited(null, null);
+        openclawProcess = null;
+      }
     });
   };
 
@@ -681,6 +708,20 @@ const server = http.createServer(async (req, res) => {
       "Cache-Control": "no-store",
     });
     res.end(JSON.stringify(telemetry.getTelemetryStatus()));
+    return;
+  }
+
+  // The HEALTHCHECK's question. Answered before the setup redirect and the memory gate, and
+  // unlike the requests below it never calls startOpenclaw() (see gateway-health.cjs).
+  if (
+    handleGatewayHealthRequest(req, res, () =>
+      gatewayHealth.describe({
+        configured: gatewayWanted,
+        onboarding: Boolean(ptyProcess),
+        starting: openclawStarting,
+      }),
+    )
+  ) {
     return;
   }
 

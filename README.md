@@ -32,7 +32,7 @@ coding tasks without root:
 |---|---|---|
 | Python | `python3` / `python` 3.13, `pip`, `python3 -m venv`, `uv` / `uvx`; `pytest` and `httpx` preinstalled | a project venv (`.venv` in the workspace), or `/data/.local` for `pip install` / `uv tool install` |
 | Node | `node` 22, `npm` | `/data/.npm-global` for `npm install -g` |
-| System tools | Homebrew (`brew install jq ffmpeg ripgrep …`) | `/home/linuxbrew` (bind-mounted from the app data dir) |
+| System tools | Homebrew (`brew install jq ffmpeg ripgrep …`) | `/home/linuxbrew`, its own persistent mount, filled from the image on first start (`seed-linuxbrew.sh`) |
 | Browser | headless Chromium | — |
 
 Everything under `/data` survives app updates; anything installed with `sudo` outside it
@@ -60,6 +60,32 @@ task's dependencies out of the shared user site.
 so the multi-arch build gets the right static binary per platform. `pytest`/`httpx` are the
 Debian trixie packages (`python3-pytest`, `python3-httpx`), which keeps them apt-managed and
 importable from the system interpreter.
+
+## Gateway health
+
+The setup server stays up when the OpenClaw gateway behind it exits, and starts the gateway
+again only when the next request arrives. So the container's state says nothing about the
+agent. Ask the setup server instead:
+
+```bash
+docker compose exec openclaw curl -s http://127.0.0.1:18789/__ci_health
+docker inspect --format '{{.State.Health.Status}}' openclaw
+```
+
+`/__ci_health` answers 503 after three failed starts in a row (runs that died within a minute
+of their spawn), even while the next attempt runs, and 200 otherwise: while the gateway runs or
+starts, while the app waits for setup, and while the gateway is stopped. A stopped gateway
+counts as up because the next request starts it again, and an unhealthy container loses its
+Traefik routes, which would keep that request from arriving on a Public Web install. The body
+says which state it is and, after an exit, the exit code or signal. Asking does not restart the
+gateway.
+
+The image's `HEALTHCHECK` runs `healthcheck.sh`, which fails only on that 503. A gateway that
+cannot start reaches three failed starts within seconds once someone opens OpenClaw, because
+its loading page reloads every 2.5 seconds and each reload restarts the gateway. The container
+turns `unhealthy` about a minute and a half later, and the Hub's app page shows
+**Needs attention**. A gateway that failed at boot and that nobody has asked for since stays
+`healthy`.
 
 ## Companion Intelligence memory setup
 

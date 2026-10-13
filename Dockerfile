@@ -92,6 +92,7 @@ COPY --chown=node:node server.cjs /app/setup-server.cjs
 COPY --chown=node:node config-reconcile.cjs /app/config-reconcile.cjs
 COPY --chown=node:node proxy-headers.cjs /app/proxy-headers.cjs
 COPY --chown=node:node memory-gate.cjs /app/memory-gate.cjs
+COPY --chown=node:node gateway-health.cjs /app/gateway-health.cjs
 # Error reporting is opt-out. The DSN is read from the container env at runtime —
 # there is no web bundle here, so nothing is compiled in the way the fleet's Vite
 # apps are. But nothing supplies it at runtime either: the marketplace runs this
@@ -115,7 +116,7 @@ COPY --chown=node:node telemetry.cjs /app/telemetry.cjs
 COPY --chown=node:node setup.html /app/setup.html
 COPY --chown=node:node logo.webp /app/logo.webp
 COPY --chown=node:node assets /app/assets
-COPY --chown=node:node bootstrap-from-hub.sh bootstrap-ci-memory.sh bootstrap-ci-hub-mcp.sh entrypoint.sh /app/
+COPY --chown=node:node bootstrap-from-hub.sh bootstrap-ci-memory.sh bootstrap-ci-hub-mcp.sh entrypoint.sh healthcheck.sh seed-linuxbrew.sh /app/
 COPY openclaw-context /app/openclaw-context
 # Vendor the keyless DuckDuckGo search plugin into the image (not into /data) so
 # upgrades and existing volumes still get free web_search via reconcile. Version
@@ -126,7 +127,7 @@ RUN sudo mkdir -p /app/openclaw-context/plugins/duckduckgo \
        -C /app/openclaw-context/plugins/duckduckgo --strip-components=1 \
   && sudo chown -R node:node /app/openclaw-context/plugins/duckduckgo \
   && rm -f /tmp/openclaw-duckduckgo-plugin-2026.9.1.tgz
-RUN sudo chmod +x /app/bootstrap-from-hub.sh /app/bootstrap-ci-memory.sh /app/bootstrap-ci-hub-mcp.sh /app/entrypoint.sh
+RUN sudo chmod +x /app/bootstrap-from-hub.sh /app/bootstrap-ci-memory.sh /app/bootstrap-ci-hub-mcp.sh /app/entrypoint.sh /app/healthcheck.sh /app/seed-linuxbrew.sh
 
 # Move home to skeleton
 RUN sudo mv /data /home-skeleton
@@ -139,3 +140,13 @@ ENV PATH="/data/.local/bin:/data/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:
 # Run the setup/proxy server through the bootstrap entrypoint
 ENTRYPOINT ["/app/entrypoint.sh"]
 EXPOSE 18789
+
+# Health follows the OpenClaw gateway, not the setup server in front of it. The setup server
+# outlives the gateway, so a gateway that exited at boot used to leave a running container
+# with nothing to say the agent was gone, and the Hub showed the app as running.
+# healthcheck.sh says what counts as down. --start-interval runs the first check two seconds
+# after start (Docker Engine 25 or later): the Hub rolls an app update back unless the new
+# container is healthy within about ten seconds, and without it the first check would wait
+# the whole 30-second interval.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --start-interval=2s --retries=3 \
+  CMD ["/app/healthcheck.sh"]

@@ -1,10 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+import { flatDockerfile } from "./helpers/dockerfile.mjs";
 
 /**
  * The agent runs its shell commands inside this image. The README's "Sandbox toolchain"
@@ -15,14 +11,8 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
  * dropping off the apt line; this one reads the Dockerfile the way that task read the sandbox.
  */
 describe("the Dockerfile keeps the Python toolchain the README promises", () => {
-  const dockerfile = readFileSync(join(ROOT, "Dockerfile"), "utf8");
-  // Fold backslash continuations and drop comment lines so package lists can be matched as one
-  // string regardless of how they are wrapped.
-  const flat = dockerfile
-    .split("\n")
-    .filter((line) => !/^\s*#/.test(line))
-    .join("\n")
-    .replace(/\\\n\s*/g, " ");
+  // Folded, so package lists can be matched as one string regardless of how they are wrapped.
+  const flat = flatDockerfile();
   const aptLine = flat.split("\n").find((line) => /^RUN apt-get update/.test(line));
 
   test("there is a single apt-get install line to inspect", () => {
