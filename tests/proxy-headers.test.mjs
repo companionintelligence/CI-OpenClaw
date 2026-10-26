@@ -1,6 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 
 const require = createRequire(import.meta.url);
 const { buildGatewayHeaders, isHookPath, gatewayRootRedirect, gatewayTokenTag } = require("../proxy-headers.cjs");
@@ -188,6 +189,14 @@ describe("gatewayRootRedirect: the token stays out of the query", () => {
   test("the tag is a fingerprint, not the token", () => {
     assert.match(TAG, /^[0-9a-f]{16}$/);
     assert.ok(!GATEWAY_TOKEN.includes(TAG) && !TAG.includes(GATEWAY_TOKEN));
+    assert.equal(gatewayTokenTag(GATEWAY_TOKEN), TAG, "stable while the wrapper runs");
+  });
+
+  // The tag lands in proxy logs. An unkeyed hash there would let whoever reads them test guesses
+  // of a hand-picked token offline.
+  test("the tag is not a plain hash of the token", () => {
+    const plain = createHash("sha256").update(GATEWAY_TOKEN).digest("hex");
+    assert.ok(!plain.includes(TAG), "the tag is an unkeyed SHA-256 prefix");
   });
 
   test("a URL that already has the current tag goes through (no redirect loop)", () => {

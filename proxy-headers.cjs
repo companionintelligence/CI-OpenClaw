@@ -120,17 +120,25 @@ function buildGatewayHeaders({ reqHeaders, url, gatewayHost, token }) {
  * `/` again, and the proxy needs something it CAN see to stop redirecting. That used to be
  * `?token=<gateway token>` itself, which put the secret in the request line of every visit:
  * through Cloudflare and Traefik, into their logs and into browser history. The marker carries
- * a fingerprint of the token instead (see gatewayTokenTag), which is useless to anyone who reads
- * it but still changes when the token does.
+ * a keyed fingerprint of the token instead (see gatewayTokenTag), which is useless to anyone who
+ * reads it but still changes when the token does.
  */
 const TOKEN_TAG_PARAM = "ci_auth";
 
 /**
- * A short one-way fingerprint of the gateway token. A new token gives a new tag, so a browser
+ * Key for gatewayTokenTag, made fresh each time the wrapper starts. The tag ends up in proxy logs
+ * and browser history, and a plain hash of the token there would let anyone holding those logs
+ * check guesses of a weak, hand-picked token offline. A new key per start only costs one extra
+ * redirect for a browser that opens `/` with a tag from before the restart.
+ */
+const TOKEN_TAG_KEY = crypto.randomBytes(32);
+
+/**
+ * A short keyed fingerprint of the gateway token. A new token gives a new tag, so a browser
  * still holding an old dashboard URL is sent through the redirect again and its hash resynced.
  */
 function gatewayTokenTag(token) {
-  return crypto.createHash("sha256").update(String(token)).digest("hex").slice(0, 16);
+  return crypto.createHmac("sha256", TOKEN_TAG_KEY).update(String(token)).digest("hex").slice(0, 16);
 }
 
 /**
