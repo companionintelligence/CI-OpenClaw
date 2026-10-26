@@ -138,6 +138,11 @@ function gatewayTokenTag(token) {
  *
  * Only `/` redirects, and only when the URL lacks the current token's tag. The token rides in
  * the hash, never in the query.
+ *
+ * The rest of the query comes along. Companion Memory's "Chat in OpenClaw" opens
+ * `/?title=…&prompt=…&context=…&memoryId=…&memoryKind=…`, and this redirect used to drop all of
+ * it, so the prepared message never arrived. The Control UI pre-fills its message box from
+ * `?draft=`, so `prompt` is handed over under that name (an explicit `draft` wins).
  */
 function gatewayRootRedirect(rawUrl, token) {
   if (!token) return null;
@@ -145,7 +150,16 @@ function gatewayRootRedirect(rawUrl, token) {
   if (url.pathname !== "/") return null;
   const tag = gatewayTokenTag(token);
   if (url.searchParams.get(TOKEN_TAG_PARAM) === tag) return null;
-  return `/?${TOKEN_TAG_PARAM}=${tag}#token=${encodeURIComponent(token)}`;
+
+  const query = new URLSearchParams(url.searchParams);
+  query.delete("token");
+  query.delete(TOKEN_TAG_PARAM);
+  if (query.has("prompt")) {
+    if (!query.get("draft")) query.set("draft", query.get("prompt"));
+    query.delete("prompt");
+  }
+  query.set(TOKEN_TAG_PARAM, tag);
+  return `/?${query.toString()}#token=${encodeURIComponent(token)}`;
 }
 
 module.exports = {

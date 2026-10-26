@@ -220,3 +220,55 @@ describe("gatewayRootRedirect: the token stays out of the query", () => {
     assert.ok(location.endsWith("#token=a%20b%26c%23d"), location);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Companion Memory's "Chat in OpenClaw" opens the dashboard root with the prepared message in the
+// query. The redirect used to replace the whole query, so OpenClaw opened with an empty box.
+// ---------------------------------------------------------------------------
+describe("gatewayRootRedirect: the rest of the query survives", () => {
+  const TAG = gatewayTokenTag(GATEWAY_TOKEN);
+  const query = (location) => new URLSearchParams(location.split("#")[0].split("?")[1]);
+
+  test("Memory's prompt becomes the Control UI's draft, and the other fields stay", () => {
+    const prompt = "I'd like to talk about \"Coffee with Jordan Lee\":\n\nWhen: Oct 23, 2026";
+    const from = "/?" + new URLSearchParams({
+      title: "Coffee with Jordan Lee",
+      prompt,
+      context: "When: Oct 23, 2026",
+      memoryId: "f3c0a6d2-1111-4c1e-9a55-0a1b2c3d4e5f",
+      memoryKind: "EventType",
+    }).toString();
+    const location = gatewayRootRedirect(from, GATEWAY_TOKEN);
+    const q = query(location);
+    assert.equal(q.get("draft"), prompt);
+    assert.equal(q.has("prompt"), false, "the prompt is not sent twice");
+    assert.equal(q.get("title"), "Coffee with Jordan Lee");
+    assert.equal(q.get("context"), "When: Oct 23, 2026");
+    assert.equal(q.get("memoryId"), "f3c0a6d2-1111-4c1e-9a55-0a1b2c3d4e5f");
+    assert.equal(q.get("memoryKind"), "EventType");
+    assert.equal(q.get("ci_auth"), TAG);
+    assert.ok(location.endsWith(`#token=${GATEWAY_TOKEN}`), location);
+  });
+
+  test("the redirected URL is not redirected again, so the draft reaches the Control UI", () => {
+    const location = gatewayRootRedirect("/?prompt=hello", GATEWAY_TOKEN);
+    assert.equal(gatewayRootRedirect(location.split("#")[0], GATEWAY_TOKEN), null);
+  });
+
+  test("an explicit draft wins over prompt", () => {
+    const q = query(gatewayRootRedirect("/?draft=mine&prompt=theirs", GATEWAY_TOKEN));
+    assert.equal(q.get("draft"), "mine");
+    assert.equal(q.has("prompt"), false);
+  });
+
+  test("a token in the incoming query is dropped, never carried into the new query", () => {
+    const location = gatewayRootRedirect(`/?token=${GATEWAY_TOKEN}&prompt=hi`, GATEWAY_TOKEN);
+    assert.ok(!location.split("#")[0].includes(GATEWAY_TOKEN), location);
+    assert.equal(query(location).get("draft"), "hi");
+  });
+
+  test("a stale tag is replaced, not duplicated", () => {
+    const q = query(gatewayRootRedirect("/?ci_auth=0000000000000000&prompt=hi", GATEWAY_TOKEN));
+    assert.deepEqual(q.getAll("ci_auth"), [TAG]);
+  });
+});

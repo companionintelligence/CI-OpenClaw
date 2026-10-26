@@ -311,7 +311,8 @@ p{margin:0;color:#A89F99;font-size:15px;line-height:1.6}
 function proxyToOpenclaw(req, res) {
   const token = cfg.getGatewayToken();
 
-  // Redirect root to /?ci_auth=<tag>#token=… so the Control UI can authenticate.
+  // Redirect root to /?ci_auth=<tag>#token=… so the Control UI can authenticate,
+  // keeping the rest of the query (Memory's "Chat in OpenClaw" prompt arrives there).
   // The token goes only in the hash, which the Control UI reads and the browser
   // never sends on; the tag in the query stops the redirect loop (see
   // gatewayRootRedirect in proxy-headers.cjs). If setup generated or repaired a
