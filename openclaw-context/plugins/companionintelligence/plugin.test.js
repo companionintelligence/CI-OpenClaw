@@ -560,14 +560,74 @@ async function runIntent(intent, params) {
 }
 
 test("ci_run_intent tells the model the owner decides on destructive intents", () => {
-  const api = register({ CI_INTENT_TOOLS_ENABLED: "true" });
-  const tool = api._toolFactories["ci_run_intent"]();
-  assert.equal(tool.name, "ci_run_intent");
-  assert.deepEqual(tool.parameters.required, ["intent"]);
-  assert.match(tool.description, /memory_forget/);
-  assert.match(tool.description, /approval/);
-  assert.match(tool.description, /do not call it again/);
-  clearFlags();
+  try {
+    const api = register({ CI_INTENT_TOOLS_ENABLED: "true" });
+    const tool = api._toolFactories["ci_run_intent"]();
+    assert.equal(tool.name, "ci_run_intent");
+    assert.deepEqual(tool.parameters.required, ["intent"]);
+    assert.match(tool.description, /memory_forget/);
+    assert.match(tool.description, /approval/);
+    // "That intent", not "it": one generic tool runs every intent, so "do not call
+    // it again" reads as "stop using ci_run_intent".
+    assert.match(tool.description, /do not run that intent again/);
+  } finally {
+    clearFlags();
+  }
+});
+
+// Capture the POST bodies ci_run_intent sends, answering each with a plain success.
+async function postedBodies(args) {
+  const bodies = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts = {}) => {
+    bodies.push(JSON.parse(opts.body));
+    return { ok: true, status: 200, text: async () => JSON.stringify({ success: true, data: {} }) };
+  };
+  try {
+    const api = register({ CI_INTENT_TOOLS_ENABLED: "true" });
+    const res = await api._toolFactories["ci_run_intent"]().execute("id", args);
+    return { payload: JSON.parse(res.content[0].text), bodies };
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+}
+
+test("ci_run_intent takes params sent as a JSON string or next to intent", async () => {
+  // Both used to fall back to `{}`, so the forget ran with no ids at all.
+  const ids = ["11111111-1111-1111-1111-111111111111"];
+  const asString = await postedBodies({ intent: "memory_forget", params: JSON.stringify({ entityIds: ids }) });
+  assert.deepEqual(asString.bodies, [{ entityIds: ids }]);
+  const flat = await postedBodies({ intent: "memory_forget", entityIds: ids });
+  assert.deepEqual(flat.bodies, [{ entityIds: ids }]);
+  const none = await postedBodies({ intent: "memory_forget" });
+  assert.deepEqual(none.bodies, [{}]);
+});
+
+test("ci_run_intent refuses params that are not an object and calls nothing", async () => {
+  for (const params of ["not json", "[1]", ["a"], 7]) {
+    const { payload, bodies } = await postedBodies({ intent: "memory_forget", params });
+    assert.equal(payload.success, false, JSON.stringify(params));
+    assert.match(payload.error, /params must be a JSON object/);
+    assert.deepEqual(bodies, []);
+  }
+});
+
+test("ci_run_intent says the name is unknown when both execute paths 404", async () => {
+  const origFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: false,
+    status: 404,
+    text: async () => JSON.stringify({ statusCode: 404, error: "Not Found", message: "Unknown intent: memory_delete" }),
+  });
+  try {
+    const payload = await runIntent("memory_delete", {});
+    assert.equal(payload.success, false);
+    assert.match(payload.hint, /ci_list_intents/);
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
 });
 
 test("a queued intent reads as 'asked the owner', not as a failure to retry", async () => {
@@ -775,6 +835,7 @@ test("ci_list_intents points at ci_run_intent when it is registered", async () =
   global.fetch = async (url) => manifestFetch(url);
   try {
     const api = register({ CI_INTENT_TOOLS_ENABLED: "true" });
+    assert.match(api._toolFactories["ci_list_intents"]().description, /Run one with ci_run_intent/);
     const res = await api._toolFactories["ci_list_intents"]().execute();
     const payload = JSON.parse(res.content[0].text);
     assert.equal(payload.runWith, "ci_run_intent");
@@ -798,6 +859,7 @@ test("ci_run_intent stays off when CI_INTENT_TOOLS_ENABLED or CI_INTENTS_ENABLED
     const apiOff = register({ CI_INTENT_TOOLS_ENABLED: "false" });
     assert.ok(apiOff._tools.includes("ci_list_intents"));
     assert.ok(!apiOff._tools.includes("ci_run_intent"));
+    assert.doesNotMatch(apiOff._toolFactories["ci_list_intents"]().description, /ci_run_intent/);
 
     // The master intents switch also disables the runner.
     const apiNoIntents = register({ CI_INTENTS_ENABLED: "false", CI_INTENT_TOOLS_ENABLED: "true" });
@@ -810,17 +872,38 @@ test("ci_run_intent stays off when CI_INTENT_TOOLS_ENABLED or CI_INTENTS_ENABLED
   }
 });
 
+async function bootstrapAgentsContent(env) {
+  const api = register({ CI_MEMORY_CONTEXT_ENABLED: "false", ...env });
+  const agents = { name: "AGENTS.md", path: "AGENTS.md", missing: false, content: "" };
+  await api._handlers["agent:bootstrap"]({
+    context: { cfg: { plugins: { slots: { memory: "companionintelligence" } } }, bootstrapFiles: [agents] },
+  });
+  return agents.content;
+}
+
 test("the bootstrap guidance says how to forget something in Memory", async () => {
   const origFetch = global.fetch;
   global.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ block: "" }) });
   try {
-    const api = register({ CI_MEMORY_CONTEXT_ENABLED: "false" });
-    const agents = { name: "AGENTS.md", path: "AGENTS.md", missing: false, content: "" };
-    await api._handlers["agent:bootstrap"]({
-      context: { cfg: { plugins: { slots: { memory: "companionintelligence" } } }, bootstrapFiles: [agents] },
-    });
-    assert.match(agents.content, /To forget or delete something in Companion Memory/);
-    assert.match(agents.content, /`ci_run_intent` with `memory_forget`/);
+    const content = await bootstrapAgentsContent({ CI_INTENT_TOOLS_ENABLED: "true" });
+    assert.match(content, /To forget or delete something in Companion Memory/);
+    assert.match(content, /`ci_run_intent` with `memory_forget`/);
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+// The line names ci_run_intent, so it must not point at a tool that was never registered.
+test("the bootstrap guidance leaves out the forget line when ci_run_intent is off", async () => {
+  const origFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ block: "" }) });
+  try {
+    for (const env of [{ CI_INTENT_TOOLS_ENABLED: "false" }, { CI_INTENTS_ENABLED: "false", CI_INTENT_TOOLS_ENABLED: "true" }]) {
+      const content = await bootstrapAgentsContent(env);
+      assert.match(content, /Companion Intelligence is the active OpenClaw memory backend/);
+      assert.doesNotMatch(content, /ci_run_intent/, JSON.stringify(env));
+    }
   } finally {
     global.fetch = origFetch;
     clearFlags();

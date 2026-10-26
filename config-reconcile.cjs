@@ -852,8 +852,14 @@ function createConfigReconciler({
     );
   }
 
+  // The CI plugin's tools that OpenClaw's onboarding profile (`tools.profile: "coding"`)
+  // leaves out. That profile allows core tools plus group:memory (memory_search and
+  // memory_get) and filters every other plugin tool before the model sees it, so these
+  // are registered and still never reach the agent unless allowed here.
+  const CI_MEMORY_EXTRA_TOOLS = ["memory_store", "ci_list_intents", "ci_run_intent"];
+
   /**
-   * Allow the CI plugin's `memory_store` tool.
+   * Allow the CI plugin's tools that the default tool profile filters out.
    *
    * `tools.alsoAllow` is the additive list and is always ensured. `tools.allow` is an
    * EXCLUSIVE allowlist: it is only appended to when the operator already maintains
@@ -867,15 +873,17 @@ function createConfigReconciler({
       tools.alsoAllow = [];
       changed = true;
     }
-    if (!tools.alsoAllow.includes("memory_store")) {
-      tools.alsoAllow.push("memory_store");
-      changed = true;
-      log.log("Patched config: allowed Companion Intelligence memory_store tool");
-    }
-    if (Array.isArray(tools.allow) && !tools.allow.includes("memory_store")) {
-      tools.allow.push("memory_store");
-      changed = true;
-      log.log("Patched config: added memory_store to explicit tool allowlist");
+    for (const name of CI_MEMORY_EXTRA_TOOLS) {
+      if (!tools.alsoAllow.includes(name)) {
+        tools.alsoAllow.push(name);
+        changed = true;
+        log.log(`Patched config: allowed Companion Intelligence ${name} tool`);
+      }
+      if (Array.isArray(tools.allow) && !tools.allow.includes(name)) {
+        tools.allow.push(name);
+        changed = true;
+        log.log(`Patched config: added ${name} to explicit tool allowlist`);
+      }
     }
     return changed;
   }

@@ -214,13 +214,18 @@ The plugin also consumes CI-Server's curated intent catalog:
   found), POSTing the parameters to CI-Server's generic REST executor
   `POST /api/intents/:name/execute` and returning the structured `ToolResult`.
   Destructive and external intents are queued by the server as an approval card
-  for the owner, and the tool tells the agent so. Failures come back as
-  structured error results, never throws.
+  for the owner. The tool tells the agent so. Failures come back as structured
+  error results, never throws.
 
   It is one generic tool, not one tool per intent, because OpenClaw takes plugin
   tools only while `register()` runs and only under names listed in
   `openclaw.plugin.json` (`contracts.tools`). The catalog comes over the network
   later, so per-intent tools were silently dropped.
+
+  OpenClaw's onboarding sets `tools.profile: "coding"`, which hides plugin tools
+  other than `memory_search` and `memory_get`. The config reconciler and
+  `bootstrap-ci-memory.sh` add `memory_store`, `ci_list_intents` and
+  `ci_run_intent` to `tools.alsoAllow` so the agent can see them.
 
 Flags (default **on**, same convention as the memory flags):
 
