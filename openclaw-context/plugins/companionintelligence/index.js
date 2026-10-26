@@ -1064,6 +1064,12 @@ function createIntentTool(api, spec) {
 // names nobody declared: none of them ever reached the agent, memory_forget
 // included. This tool is declared, registered synchronously, and takes the intent
 // name as an argument; ci_list_intents shows which names exist.
+// An intent's tool name (memory_forget) or dotted id (memory.forget). The model picks
+// this string and it becomes a path segment of the execute URL. encodeURIComponent
+// leaves `.` and `..` alone and fetch resolves them, so `..` would POST, with this
+// key, to a route outside the intent executor.
+const INTENT_NAME_RE = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*$/;
+
 function createRunIntentTool(api) {
   return {
     name: "ci_run_intent",
@@ -1089,6 +1095,13 @@ function createRunIntentTool(api) {
     execute: async (toolCallId, args) => {
       const intent = normalizeString(args?.intent);
       if (!intent) return jsonResult({ success: false, error: "intent required" });
+      if (!INTENT_NAME_RE.test(intent)) {
+        return jsonResult({
+          success: false,
+          intent,
+          error: "not an intent name: use a tool name from ci_list_intents, such as memory_forget",
+        });
+      }
       const params = args?.params && typeof args.params === "object" && !Array.isArray(args.params) ? args.params : {};
       return createIntentTool(api, { name: intent, intent }).execute(toolCallId, params);
     },

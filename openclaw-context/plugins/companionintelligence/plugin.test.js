@@ -742,6 +742,34 @@ test("ci_run_intent without an intent name asks for one and calls nothing", asyn
   }
 });
 
+// The name becomes a path segment of the execute URL, and fetch resolves `.` and `..`,
+// so `..` would have POSTed with the key to /api/agent/execute instead of an intent.
+test("ci_run_intent refuses a name that isn't an intent name and calls nothing", async () => {
+  const urls = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url) => {
+    urls.push(String(url));
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  try {
+    for (const name of ["..", ".", "../memory/write", "memory_forget/../../x", "memory..forget", "memory.forget?x=1", "1memory"]) {
+      const payload = await runIntent(name, {});
+      assert.equal(payload.success, false, name);
+      assert.match(payload.error, /not an intent name/, name);
+    }
+    assert.deepEqual(urls, []);
+    // Tool names and dotted ids still go through.
+    await runIntent("memory_forget", {});
+    await runIntent("import.import_inbox", {});
+    assert.equal(urls.length, 2);
+    assert.match(urls[0], /\/api\/agent\/intents\/memory_forget\/execute$/);
+    assert.match(urls[1], /\/api\/agent\/intents\/import\.import_inbox\/execute$/);
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
 test("ci_list_intents points at ci_run_intent when it is registered", async () => {
   const origFetch = global.fetch;
   global.fetch = async (url) => manifestFetch(url);
