@@ -63,6 +63,9 @@ function shouldPromptForState(state) {
   return state === "unconfigured";
 }
 
+/** Query parameters that carry dashboard auth: the gateway token itself, or the root redirect's tag. */
+const DASHBOARD_AUTH_PARAMS = ["token", "ci_auth"];
+
 /**
  * The absolute URL the browser used to reach this app, or null when it cannot be
  * determined.
@@ -95,7 +98,14 @@ function requestAbsoluteUrl(req) {
   const rawTarget = req && req.url;
   const path = typeof rawTarget === "string" && rawTarget.startsWith("/") && !rawTarget.startsWith("//") ? rawTarget : "/";
   try {
-    return new URL(path, `${scheme}://${host}`).toString();
+    const url = new URL(path, `${scheme}://${host}`);
+    // The Hub must never see the gateway token (an old `?token=` bookmark), and a
+    // return to `/?ci_auth=<tag>` would skip the root redirect, so the Control UI
+    // would come back with no `#token=` to sign in with. Without them, a return to
+    // `/` goes through the redirect again and gets a fresh hash.
+    // Only touch the query when one is there: delete() re-encodes the whole query.
+    for (const param of DASHBOARD_AUTH_PARAMS) if (url.searchParams.has(param)) url.searchParams.delete(param);
+    return url.toString();
   } catch {
     return null;
   }
