@@ -1,11 +1,14 @@
 /**
- * Header rewriting for the setup server's proxy to the OpenClaw gateway.
+ * Header rewriting for the setup server's proxy to the OpenClaw gateway, and the redirect that
+ * hands the Control UI its token.
  *
  * Extracted from server.cjs for the reason config-reconcile.cjs was: server.cjs binds a port
  * and requires node-pty by absolute container path at import time, so a test cannot require
  * it. This module is pure — no I/O, no side effects on require — so the rules below are
  * actually covered by tests/proxy-headers.test.mjs.
  */
+
+const crypto = require("crypto");
 
 /**
  * Where OpenClaw mounts its own webhook routes (POST /hooks/wake, POST /hooks/agent).
@@ -109,7 +112,46 @@ function buildGatewayHeaders({ reqHeaders, url, gatewayHost, token }) {
   return headers;
 }
 
+/**
+ * Query parameter that marks a dashboard URL as already carrying the current token in its hash.
+ *
+ * The Control UI reads its gateway token only from the URL hash (`#token=…`), which the browser
+ * never sends to a server. So after redirecting `/` to `/#token=…` the next request is a bare
+ * `/` again, and the proxy needs something it CAN see to stop redirecting. That used to be
+ * `?token=<gateway token>` itself, which put the secret in the request line of every visit:
+ * through Cloudflare and Traefik, into their logs and into browser history. The marker carries
+ * a fingerprint of the token instead (see gatewayTokenTag), which is useless to anyone who reads
+ * it but still changes when the token does.
+ */
+const TOKEN_TAG_PARAM = "ci_auth";
+
+/**
+ * A short one-way fingerprint of the gateway token. A new token gives a new tag, so a browser
+ * still holding an old dashboard URL is sent through the redirect again and its hash resynced.
+ */
+function gatewayTokenTag(token) {
+  return crypto.createHash("sha256").update(String(token)).digest("hex").slice(0, 16);
+}
+
+/**
+ * Where to send a browser that opened the dashboard root, or null to proxy the request as is.
+ *
+ * Only `/` redirects, and only when the URL lacks the current token's tag. The token rides in
+ * the hash, never in the query.
+ */
+function gatewayRootRedirect(rawUrl, token) {
+  if (!token) return null;
+  const url = new URL(String(rawUrl || "/"), "http://localhost");
+  if (url.pathname !== "/") return null;
+  const tag = gatewayTokenTag(token);
+  if (url.searchParams.get(TOKEN_TAG_PARAM) === tag) return null;
+  return `/?${TOKEN_TAG_PARAM}=${tag}#token=${encodeURIComponent(token)}`;
+}
+
 module.exports = {
+  TOKEN_TAG_PARAM,
+  gatewayTokenTag,
+  gatewayRootRedirect,
   HOOKS_PATH_PREFIX,
   isHookPath,
   isProxyAttributionHeader,
