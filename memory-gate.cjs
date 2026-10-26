@@ -148,6 +148,34 @@ function forwardAuthHeaders(req) {
   return out;
 }
 
+/**
+ * Where the gate's "Maybe later" and "Don't ask again" send the browser: the dashboard root,
+ * keeping the prepared message the gated page carried.
+ *
+ * Companion Memory's "Chat in OpenClaw" opens `/?…&prompt=…`. When the gate answers that request,
+ * its buttons POST to this wrapper and used to come back to a bare `/`, so the message was lost.
+ * The gate page's address arrives as the POST's Referer. Only a same-origin Referer counts, only
+ * its `draft` (or Memory's `prompt`) is kept and the answer is always a path on this origin, so a
+ * forged Referer can't turn this into an open redirect.
+ *
+ * @param {string|undefined} referer the action POST's Referer header
+ * @param {string|undefined} host the request's Host header
+ * @returns {string} "/" or "/?draft=…"
+ */
+function gateActionReturnPath(referer, host) {
+  const trimmedHost = typeof host === "string" ? host.trim().toLowerCase() : "";
+  if (!trimmedHost || typeof referer !== "string" || !referer) return "/";
+  let from;
+  try {
+    from = new URL(referer);
+  } catch {
+    return "/";
+  }
+  if (from.host.toLowerCase() !== trimmedHost) return "/";
+  const draft = from.searchParams.get("draft") || from.searchParams.get("prompt");
+  return draft ? `/?${new URLSearchParams({ draft })}` : "/";
+}
+
 function buildStateUrl(hubBase, appUrn, clientHost) {
   const url = new URL(`${hubBase}/api/memory-connect/apps/${encodeURIComponent(appUrn)}/state`);
   // Trim before forwarding: a whitespace-padded Host would otherwise reach the
@@ -160,6 +188,7 @@ function buildStateUrl(hubBase, appUrn, clientHost) {
 module.exports = {
   buildStateUrl,
   forwardAuthHeaders,
+  gateActionReturnPath,
   launcherWithNext,
   requestAbsoluteUrl,
   safeHttpUrl,

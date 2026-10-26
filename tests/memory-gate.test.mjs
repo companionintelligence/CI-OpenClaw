@@ -6,6 +6,7 @@ const require = createRequire(import.meta.url);
 const {
   buildStateUrl,
   forwardAuthHeaders,
+  gateActionReturnPath,
   launcherWithNext,
   requestAbsoluteUrl,
   safeHttpUrl,
@@ -260,5 +261,34 @@ describe("safeHttpUrl", () => {
     // resolves to evil.com.
     assert.equal(safeHttpUrl("http://trusted.com@evil.com/"), null);
     assert.equal(safeHttpUrl("https://user:pass@evil.com/"), null);
+  });
+});
+
+// "Maybe later" and "Don't ask again" used to send the browser to a bare /, so a
+// "Chat in OpenClaw" message that met the gate first never reached the chat.
+describe("gateActionReturnPath: where the gate's buttons send the browser", () => {
+  const HOST = "app.example.com";
+
+  test("keeps Memory's prompt from the gated page as the draft", () => {
+    const referer = "https://app.example.com/?" + new URLSearchParams({ title: "Coffee", prompt: "I'd like to talk about Coffee", memoryId: "m1" });
+    assert.equal(gateActionReturnPath(referer, HOST), "/?" + new URLSearchParams({ draft: "I'd like to talk about Coffee" }));
+  });
+
+  test("an explicit draft wins over prompt", () => {
+    assert.equal(gateActionReturnPath("https://app.example.com/chat?draft=mine&prompt=theirs", HOST), "/?draft=mine");
+  });
+
+  test("anything else goes to the root, as before", () => {
+    assert.equal(gateActionReturnPath("https://app.example.com/?title=x", HOST), "/");
+    assert.equal(gateActionReturnPath(undefined, HOST), "/");
+    assert.equal(gateActionReturnPath("not a url", HOST), "/");
+    assert.equal(gateActionReturnPath("https://app.example.com/?prompt=hi", undefined), "/");
+  });
+
+  test("a Referer from another origin is ignored, and the answer is always a local path", () => {
+    assert.equal(gateActionReturnPath("https://evil.example/?prompt=hi", HOST), "/");
+    assert.equal(gateActionReturnPath("https://app.example.com.evil.example/?prompt=hi", HOST), "/");
+    const out = gateActionReturnPath("https://app.example.com/?prompt=" + encodeURIComponent("//evil.example/x"), HOST);
+    assert.ok(out.startsWith("/?draft="), out);
   });
 });
