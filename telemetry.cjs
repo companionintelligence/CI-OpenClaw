@@ -158,9 +158,10 @@ const URL_VALUED_HEADERS = ["referer", "referrer", "location"];
  *
  * The Node SDK's Http/NodeFetch integrations record an outgoing-request crumb
  * carrying `data.url` **with the query string**. This wrapper is a proxy: every
- * browser request is replayed to 127.0.0.1 including `/?token=<gateway token>`,
- * and the memory gate calls the Hub with the app URN in the query. Scrubbing
- * only `request.url` would leave all of that in the crumbs.
+ * browser request is replayed to 127.0.0.1 with its query, so an old dashboard
+ * bookmark's `/?token=<gateway token>` lands in a crumb. The memory gate also
+ * calls the Hub with the app URN in the query. Scrubbing only `request.url`
+ * would leave all of that in the crumbs.
  */
 const URL_VALUED_KEYS = new Set(["url", "from", "to"]);
 
@@ -333,8 +334,8 @@ function scrubEvent(event) {
 
     // `request.url` is built from `req.url`, which on a Node server is
     // path+query — byte-identical content to the query_string just filtered.
-    // Filtering one without the other redacts nothing. On this app the query is
-    // literally `?token=<gateway token>`.
+    // Filtering one without the other redacts nothing. On this app an old
+    // dashboard bookmark still sends `?token=<gateway token>`.
     if (typeof event.request.url === "string") {
       event.request.url = scrubUrl(event.request.url);
     }

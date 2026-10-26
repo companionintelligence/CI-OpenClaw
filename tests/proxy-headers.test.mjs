@@ -219,6 +219,18 @@ describe("gatewayRootRedirect: the token stays out of the query", () => {
     }
   });
 
+  // `new URL("//", base)` throws and `new URL("//chat", base)` has path `/`. A throw here would
+  // leave the request unanswered. A `//chat` misread as `/` would be bounced to the root.
+  test("a target that starts with // is proxied, not parsed as a host", () => {
+    for (const url of ["//", "///", "//?ci_auth=x", "//chat", "//[", "//a:b@"]) {
+      assert.equal(gatewayRootRedirect(url, GATEWAY_TOKEN), null, url);
+    }
+  });
+
+  test("the tag still matches when other parameters come first", () => {
+    assert.equal(gatewayRootRedirect(`/?session=main&ci_auth=${TAG}`, GATEWAY_TOKEN), null);
+  });
+
   test("no token, no redirect", () => {
     assert.equal(gatewayRootRedirect("/", ""), null);
     assert.equal(gatewayRootRedirect("/", undefined), null);
