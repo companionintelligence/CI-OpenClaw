@@ -278,6 +278,14 @@ describe("gateActionReturnPath: where the gate's buttons send the browser", () =
     assert.equal(gateActionReturnPath("https://app.example.com/chat?draft=mine&prompt=theirs", HOST), "/?draft=mine");
   });
 
+  // Behind the Hub the wrapper sees Host: <app>.localhost, and the browser's address as X-Forwarded-Host.
+  test("the browser's address can come as X-Forwarded-Host", () => {
+    const referer = "https://app.example.com/?prompt=hi";
+    assert.equal(gateActionReturnPath(referer, "app.localhost", "app.example.com"), "/?draft=hi");
+    assert.equal(gateActionReturnPath(referer, "app.localhost", "app.example.com, proxy.internal"), "/?draft=hi");
+    assert.equal(gateActionReturnPath(referer, "app.localhost", undefined), "/");
+  });
+
   test("anything else goes to the root, as before", () => {
     assert.equal(gateActionReturnPath("https://app.example.com/?title=x", HOST), "/");
     assert.equal(gateActionReturnPath(undefined, HOST), "/");

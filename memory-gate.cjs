@@ -158,20 +158,25 @@ function forwardAuthHeaders(req) {
  * its `draft` (or Memory's `prompt`) is kept and the answer is always a path on this origin, so a
  * forged Referer can't turn this into an open redirect.
  *
+ * Behind the Hub the request's Host is the internal `*.localhost` name the tunnel routes on, and
+ * the address the browser used arrives as X-Forwarded-Host, so either one counts.
+ *
  * @param {string|undefined} referer the action POST's Referer header
- * @param {string|undefined} host the request's Host header
+ * @param {...(string|undefined)} hosts the request's Host and X-Forwarded-Host headers
  * @returns {string} "/" or "/?draft=…"
  */
-function gateActionReturnPath(referer, host) {
-  const trimmedHost = typeof host === "string" ? host.trim().toLowerCase() : "";
-  if (!trimmedHost || typeof referer !== "string" || !referer) return "/";
+function gateActionReturnPath(referer, ...hosts) {
+  const ours = hosts
+    .map((value) => (typeof value === "string" ? value.split(",")[0].trim().toLowerCase() : ""))
+    .filter(Boolean);
+  if (ours.length === 0 || typeof referer !== "string" || !referer) return "/";
   let from;
   try {
     from = new URL(referer);
   } catch {
     return "/";
   }
-  if (from.host.toLowerCase() !== trimmedHost) return "/";
+  if (!ours.includes(from.host.toLowerCase())) return "/";
   const draft = from.searchParams.get("draft") || from.searchParams.get("prompt");
   return draft ? `/?${new URLSearchParams({ draft })}` : "/";
 }

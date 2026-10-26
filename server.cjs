@@ -646,7 +646,11 @@ async function handleMemoryAction(req, res) {
   }
 
   // Back to the dashboard root, keeping a "Chat in OpenClaw" message the gated page carried.
-  const returnPath = memoryGate.gateActionReturnPath(req.headers.referer, req.headers.host);
+  const returnPath = memoryGate.gateActionReturnPath(
+    req.headers.referer,
+    req.headers.host,
+    req.headers["x-forwarded-host"],
+  );
 
   if (pathname === MEMORY_DEFER_PATH) {
     // Session cookie — reappears next browser session, per the "deferred" design.
