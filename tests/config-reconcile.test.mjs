@@ -851,10 +851,12 @@ describe("memory wiring", () => {
     assert.ok(config.plugins.allow.includes("duckduckgo"));
   });
 
-  test("ensureMemoryStoreToolAllowed adds memory_store to alsoAllow", () => {
+  // The onboarding "coding" profile drops plugin tools outside group:memory, so the
+  // intent tools need the same allow as memory_store or the agent never sees them.
+  test("ensureMemoryStoreToolAllowed adds memory_store and the intent tools to alsoAllow", () => {
     const config = {};
     assert.strictEqual(ctx.cfg.ensureMemoryStoreToolAllowed(config), true);
-    assert.deepStrictEqual(config.tools.alsoAllow, ["memory_store"]);
+    assert.deepStrictEqual(config.tools.alsoAllow, ["memory_store", "ci_list_intents", "ci_run_intent"]);
     assert.strictEqual(ctx.cfg.ensureMemoryStoreToolAllowed(config), false);
   });
 
@@ -868,7 +870,7 @@ describe("memory wiring", () => {
   test("ensureMemoryStoreToolAllowed extends an allow list the operator already keeps", () => {
     const config = { tools: { allow: ["read"] } };
     ctx.cfg.ensureMemoryStoreToolAllowed(config);
-    assert.deepStrictEqual(config.tools.allow, ["read", "memory_store"]);
+    assert.deepStrictEqual(config.tools.allow, ["read", "memory_store", "ci_list_intents", "ci_run_intent"]);
   });
 });
 
@@ -1699,6 +1701,7 @@ describe("reconcileConfig (end to end)", () => {
       );
       assert.strictEqual(config.hooks.internal.entries["session-memory"].enabled, false);
       assert.ok(config.tools.alsoAllow.includes("memory_store"));
+      assert.ok(config.tools.alsoAllow.includes("ci_run_intent"));
       assert.strictEqual(config.memory.search.provider, "openai-compatible");
       assert.strictEqual(config.memory.search.remote.baseUrl, `${baseUrl}/v1`);
       assert.strictEqual(config.plugins.load.paths.length, 4, "runtime, memory, hub, duckduckgo registered");

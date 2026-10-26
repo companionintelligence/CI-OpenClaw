@@ -81,7 +81,7 @@ export function describeCatalogForPrompt(manifest) {
   const lines = [
     "## Companion Intelligence — Intent catalog",
     "",
-    "Prefer these curated, typed actions over raw CRUD. Call an intent by its tool name (in backticks).",
+    "Prefer these curated, typed actions over raw CRUD. Each intent is listed by its tool name (in backticks).",
     "",
   ];
 
@@ -92,12 +92,42 @@ export function describeCatalogForPrompt(manifest) {
       if (intent.privacy && intent.privacy.destructive) flags.push("destructive");
       if (intent.privacy && intent.privacy.external) flags.push("external");
       const suffix = flags.length ? ` _(${flags.join(", ")})_` : "";
-      lines.push(`- \`${intent.tool}\` — ${intent.title}: ${intent.description}${suffix}`);
+      const params = describeParams(intent.parameters);
+      lines.push(`- \`${intent.tool}\` — ${intent.title}: ${intent.description}${suffix}${params}`);
     }
     lines.push("");
   }
 
   return lines.join("\n").trim();
+}
+
+/**
+ * The parameters of one intent, for its catalog line, so an agent calling it by
+ * name through a generic runner knows what to pass: each one's JSON type (an
+ * array's item type too, since `entityIds: "<uuid>"` fails where `["<uuid>"]`
+ * works), required ones marked and the allowed values of an enum listed. "" when
+ * it takes none.
+ *
+ * @param {object|undefined} schema the intent's JSON-Schema `parameters`
+ * @returns {string}
+ */
+function describeParams(schema) {
+  const properties = (schema && schema.properties) || {};
+  const names = Object.keys(properties);
+  if (names.length === 0) return "";
+  const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+  const describe = (name) => {
+    const prop = properties[name] || {};
+    const notes = [];
+    if (typeof prop.type === "string") {
+      const itemType = prop.type === "array" && prop.items && typeof prop.items.type === "string" ? prop.items.type : "";
+      notes.push(itemType ? `array of ${itemType}` : prop.type);
+    }
+    if (required.has(name)) notes.push("required");
+    if (Array.isArray(prop.enum) && prop.enum.length > 0) notes.push(`one of ${prop.enum.join(", ")}`);
+    return notes.length ? `${name} (${notes.join("; ")})` : name;
+  };
+  return ` Params: ${names.map(describe).join(", ")}.`;
 }
 
 /**
@@ -114,30 +144,4 @@ export function describeCatalogForPrompt(manifest) {
 export function executePathCandidates(intentName) {
   const name = encodeURIComponent(String(intentName ?? "").trim());
   return CATALOG_PATHS.map((base) => `${base}/${name}/execute`);
-}
-
-/**
- * Adapt the manifest intents into OpenClaw tool specs. The caller wires an
- * `execute` handler — e.g. POSTing to CI-Server's REST intent executor
- * (see {@link executePathCandidates}), which runs the same tools MCP exposes.
- * Each spec carries the executable tool name (`name`), the original dotted
- * intent id (`intent`), the JSON-Schema `parameters`, and the `privacy` labels
- * so the caller can filter destructive/external intents before registration.
- *
- * @param {object|null} manifest
- * @returns {Array<{name: string, intent: string, title: string, description: string, parameters: object, privacy: object|null}>}
- */
-export function manifestToToolSpecs(manifest) {
-  if (!manifest || !Array.isArray(manifest.intents)) {
-    return [];
-  }
-
-  return manifest.intents.map((intent) => ({
-    name: intent.tool,
-    intent: intent.name,
-    title: intent.title,
-    description: intent.description,
-    parameters: intent.parameters || { type: "object", properties: {} },
-    privacy: intent.privacy && typeof intent.privacy === "object" ? intent.privacy : null,
-  }));
 }

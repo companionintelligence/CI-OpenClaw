@@ -159,13 +159,17 @@ if (shouldSelect) {
   config.tools.alsoAllow = Array.isArray(config.tools.alsoAllow)
     ? config.tools.alsoAllow
     : [];
-  if (!config.tools.alsoAllow.includes("memory_store")) {
-    config.tools.alsoAllow.push("memory_store");
-    changed = true;
-  }
-  if (Array.isArray(config.tools.allow) && !config.tools.allow.includes("memory_store")) {
-    config.tools.allow.push("memory_store");
-    changed = true;
+  // The plugin tools OpenClaw's default "coding" tool profile filters out (it keeps
+  // only memory_search and memory_get). Same list as config-reconcile.cjs.
+  for (const name of ["memory_store", "ci_list_intents", "ci_run_intent"]) {
+    if (!config.tools.alsoAllow.includes(name)) {
+      config.tools.alsoAllow.push(name);
+      changed = true;
+    }
+    if (Array.isArray(config.tools.allow) && !config.tools.allow.includes(name)) {
+      config.tools.allow.push(name);
+      changed = true;
+    }
   }
 }
 

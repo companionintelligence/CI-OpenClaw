@@ -33,8 +33,7 @@ const plugin = (await import(PLUGIN)).default;
 
 function makeApi(env = {}, pluginConfig = {}) {
   for (const k of Object.keys(process.env)) if (k.startsWith("CI_SERVER")) delete process.env[k];
-  // Executable intent tools fetch the catalog inside register(); keep them off
-  // by default so each test's captured-request assertions stay deterministic.
+  // ci_run_intent is off by default; the intent test opts in.
   process.env.CI_INTENT_TOOLS_ENABLED = "false";
   Object.assign(process.env, env);
   const hooks = {};
@@ -191,7 +190,7 @@ const intentServer = (req, res) => {
   json(404, {});
 };
 
-await test("intent tools register from the catalog and execute via POST /api/intents/:name/execute", () =>
+await test("ci_run_intent executes a catalog intent via POST /api/intents/:name/execute", () =>
   withCiServer(intentServer, async (port, cap) => {
     const { api } = makeApi({
       CI_SERVER_URL: `http://127.0.0.1:${port}`,
@@ -201,17 +200,10 @@ await test("intent tools register from the catalog and execute via POST /api/int
     const factories = {};
     api.registerTool = (factory, opts) => { factories[opts.name] = factory; };
     plugin.register(api);
-    // Registration is fire-and-forget over real HTTP; poll briefly.
-    for (let i = 0; i < 200 && !factories["predictions_forecast"]; i++) {
-      await new Promise((r) => setTimeout(r, 10));
-    }
-    assert.ok(factories["predictions_forecast"], "intent tool registered from the catalog");
-    // Registers now: CI-Server queues destructive intents as an approval card
-    // instead of refusing them, and a tool the agent cannot call is a card it can
-    // never ask for. Its description carries the owner-approval warning.
-    assert.ok(factories["memory_forget"], "destructive intent must register");
-    assert.match(factories["memory_forget"]().description, /Requires the owner's approval/);
-    const result = await factories["predictions_forecast"]().execute("t1", { horizon: "24h" });
+    // Registered inside register(): OpenClaw drops anything registered later.
+    assert.ok(factories["ci_run_intent"], "ci_run_intent registered during register()");
+    assert.equal(factories["predictions_forecast"], undefined, "no per-intent tools");
+    const result = await factories["ci_run_intent"]().execute("t1", { intent: "predictions.forecast", params: { horizon: "24h" } });
     const payload = JSON.parse(result.content[0].text);
     assert.equal(payload.success, true);
     assert.deepEqual(payload.data, { available: true });
