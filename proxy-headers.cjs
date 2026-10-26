@@ -1,11 +1,15 @@
 /**
- * Header rewriting for the setup server's proxy to the OpenClaw gateway.
+ * Header rewriting for the setup server's proxy to the OpenClaw gateway, plus the redirect that
+ * hands the Control UI its token.
  *
  * Extracted from server.cjs for the reason config-reconcile.cjs was: server.cjs binds a port
  * and requires node-pty by absolute container path at import time, so a test cannot require
- * it. This module is pure — no I/O, no side effects on require — so the rules below are
- * actually covered by tests/proxy-headers.test.mjs.
+ * it. This module does no I/O, so the rules below are actually covered by
+ * tests/proxy-headers.test.mjs. Its one piece of state is TOKEN_TAG_KEY, drawn at require time,
+ * so gatewayTokenTag gives a different tag in every process.
  */
+
+const crypto = require("crypto");
 
 /**
  * Where OpenClaw mounts its own webhook routes (POST /hooks/wake, POST /hooks/agent).
@@ -109,7 +113,91 @@ function buildGatewayHeaders({ reqHeaders, url, gatewayHost, token }) {
   return headers;
 }
 
+/**
+ * Query parameter that marks a dashboard URL as already carrying the current token in its hash.
+ *
+ * The Control UI reads its gateway token only from the URL hash (`#token=…`), which the browser
+ * never sends to a server. So after redirecting `/` to `/#token=…` the next request is a bare
+ * `/` again. The proxy needs something it CAN see to stop redirecting. That used to be
+ * `?token=<gateway token>` itself, which put the secret in the request line of every visit:
+ * through Cloudflare and Traefik, into their logs and into browser history. The marker carries
+ * a keyed fingerprint of the token instead (see gatewayTokenTag), which is useless to anyone who
+ * reads it but still changes when the token does.
+ */
+const TOKEN_TAG_PARAM = "ci_auth";
+
+/**
+ * Key for gatewayTokenTag, made fresh each time the wrapper starts. The tag ends up in proxy logs
+ * and browser history. A plain hash of the token there would let anyone holding those logs
+ * check guesses of a weak, hand-picked token offline. A new key per start only costs one extra
+ * redirect for a browser that opens `/` with a tag from before the restart.
+ */
+const TOKEN_TAG_KEY = crypto.randomBytes(32);
+
+/**
+ * How long a tagged `/` skips the redirect. The tag only says "this URL came out of the redirect",
+ * not "this tab holds the token": the Control UI keeps the token in sessionStorage, so a new tab
+ * that opens a tagged `/` from history or a bookmark has none. Past this age the same URL goes
+ * through the redirect again and gets a fresh `#token=`. 30 seconds covers the browser's
+ * follow-up request. A later reload of the same `/` (the loading page reloads while the gateway
+ * starts) is simply redirected again, keeping its hash in sync.
+ */
+const TOKEN_TAG_TTL_MS = 30 * 1000;
+
+/** How far into the future a tag's time may be, for a wall clock that steps back a little. */
+const TOKEN_TAG_CLOCK_SLACK_MS = 5 * 1000;
+
+function tagMac(issued, token) {
+  return crypto.createHmac("sha256", TOKEN_TAG_KEY).update(`${issued}.${String(token)}`).digest("hex").slice(0, 16);
+}
+
+/**
+ * A short keyed fingerprint of the gateway token, stamped with the time it was made:
+ * `<seconds, base 36>.<16 hex digits>`. A new token gives a new tag, so a browser still holding an
+ * old dashboard URL is sent through the redirect again and its hash resynced.
+ */
+function gatewayTokenTag(token, now = Date.now()) {
+  const issued = Math.floor(now / 1000).toString(36);
+  return `${issued}.${tagMac(issued, token)}`;
+}
+
+/** Was `tag` made by gatewayTokenTag for this token, in this process, less than TOKEN_TAG_TTL_MS ago? */
+function isCurrentTokenTag(tag, token, now = Date.now()) {
+  const match = /^([0-9a-z]{1,11})\.([0-9a-f]{16})$/.exec(String(tag || ""));
+  if (!match) return false;
+  const age = now - parseInt(match[1], 36) * 1000;
+  if (age < -TOKEN_TAG_CLOCK_SLACK_MS || age > TOKEN_TAG_TTL_MS) return false;
+  const expected = Buffer.from(tagMac(match[1], token));
+  const given = Buffer.from(match[2]);
+  return expected.length === given.length && crypto.timingSafeEqual(expected, given);
+}
+
+/**
+ * Where to send a browser that opened the dashboard root, or null to proxy the request as is.
+ *
+ * Only a `/` that lacks a current tag for this token redirects. The token rides in
+ * the hash, never in the query.
+ *
+ * The request target is split on `?` the way isHookPath does it, not parsed with `new URL()`.
+ * `new URL()` reads a target that starts with `//` as an authority. `GET //` throws, which an
+ * async request handler never answers. `GET //chat` comes back with path `/`.
+ */
+function gatewayRootRedirect(rawUrl, token, now = Date.now()) {
+  if (!token) return null;
+  const target = String(rawUrl || "/").split("#")[0];
+  const queryStart = target.indexOf("?");
+  const pathname = queryStart === -1 ? target : target.slice(0, queryStart);
+  if (pathname !== "/") return null;
+  const query = new URLSearchParams(queryStart === -1 ? "" : target.slice(queryStart + 1));
+  if (isCurrentTokenTag(query.get(TOKEN_TAG_PARAM), token, now)) return null;
+  return `/?${TOKEN_TAG_PARAM}=${gatewayTokenTag(token, now)}#token=${encodeURIComponent(token)}`;
+}
+
 module.exports = {
+  TOKEN_TAG_TTL_MS,
+  gatewayTokenTag,
+  isCurrentTokenTag,
+  gatewayRootRedirect,
   HOOKS_PATH_PREFIX,
   isHookPath,
   isProxyAttributionHeader,

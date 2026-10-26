@@ -1,9 +1,17 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 
 const require = createRequire(import.meta.url);
-const { buildGatewayHeaders, isHookPath } = require("../proxy-headers.cjs");
+const {
+  buildGatewayHeaders,
+  isHookPath,
+  gatewayRootRedirect,
+  gatewayTokenTag,
+  isCurrentTokenTag,
+  TOKEN_TAG_TTL_MS,
+} = require("../proxy-headers.cjs");
 
 const GATEWAY = "127.0.0.1:18790";
 const GATEWAY_TOKEN = "gateway-shared-secret";
@@ -165,5 +173,102 @@ describe("buildGatewayHeaders: ordinary gateway routes", () => {
     const reqHeaders = { host: "original.example" };
     build("/api/status", reqHeaders);
     assert.equal(reqHeaders.host, "original.example");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The dashboard root redirect hands the Control UI its token in the URL hash. It used to put the
+// token in the query too (/?token=<token>#token=<token>), only so the next request could be told
+// apart from the first. The query travels in the request line, so the gateway token went through
+// Cloudflare and Traefik, into their logs and into browser history, on every visit to /.
+// ---------------------------------------------------------------------------
+describe("gatewayRootRedirect: the token stays out of the query", () => {
+  // A fixed clock, so a test never straddles a second boundary between making a tag and checking it.
+  const NOW = Date.UTC(2026, 9, 26, 12, 0, 0);
+  const TAG = gatewayTokenTag(GATEWAY_TOKEN, NOW);
+  const redirect = (url, token = GATEWAY_TOKEN, now = NOW) => gatewayRootRedirect(url, token, now);
+
+  test("redirects / to a tagged URL with the token only in the hash", () => {
+    const location = redirect("/", GATEWAY_TOKEN);
+    assert.equal(location, `/?ci_auth=${TAG}#token=${GATEWAY_TOKEN}`);
+    const [beforeHash, hash] = location.split("#");
+    assert.ok(!beforeHash.includes(GATEWAY_TOKEN), "token leaked into the path or query");
+    assert.equal(hash, `token=${GATEWAY_TOKEN}`);
+  });
+
+  test("the tag is a fingerprint, not the token", () => {
+    assert.match(TAG, /^[0-9a-z]+\.[0-9a-f]{16}$/);
+    assert.ok(!GATEWAY_TOKEN.includes(TAG) && !TAG.includes(GATEWAY_TOKEN));
+    assert.equal(gatewayTokenTag(GATEWAY_TOKEN, NOW), TAG, "the same token and time give the same tag");
+  });
+
+  // The tag lands in proxy logs. An unkeyed hash there would let whoever reads them test guesses
+  // of a hand-picked token offline.
+  test("the tag is not a plain hash of the token", () => {
+    const plain = createHash("sha256").update(GATEWAY_TOKEN).digest("hex");
+    assert.ok(!plain.includes(TAG.split(".")[1]), "the tag is an unkeyed SHA-256 prefix");
+  });
+
+  test("a URL that already has the current tag goes through (no redirect loop)", () => {
+    assert.equal(redirect(`/?ci_auth=${TAG}`, GATEWAY_TOKEN), null);
+  });
+
+  test("a URL tagged for an older token is redirected again, so the hash resyncs", () => {
+    const stale = gatewayTokenTag("old-gateway-token", NOW);
+    assert.notEqual(stale, TAG);
+    assert.equal(redirect(`/?ci_auth=${stale}`, GATEWAY_TOKEN), `/?ci_auth=${TAG}#token=${GATEWAY_TOKEN}`);
+  });
+
+  test("an old ?token= bookmark is moved to the tagged form", () => {
+    assert.equal(redirect(`/?token=${GATEWAY_TOKEN}`, GATEWAY_TOKEN), `/?ci_auth=${TAG}#token=${GATEWAY_TOKEN}`);
+  });
+
+  // The Control UI keeps the token in sessionStorage, so a new tab has none. A tagged / opened later
+  // from history or a bookmark must be redirected again, or that tab opens with no token at all.
+  test("a tag stops skipping the redirect once it is 30 seconds old", () => {
+    assert.equal(TOKEN_TAG_TTL_MS, 30 * 1000);
+    assert.equal(redirect(`/?ci_auth=${TAG}`, GATEWAY_TOKEN, NOW + TOKEN_TAG_TTL_MS), null);
+    const later = NOW + TOKEN_TAG_TTL_MS + 1000;
+    assert.equal(redirect(`/?ci_auth=${TAG}`, GATEWAY_TOKEN, later), `/?ci_auth=${gatewayTokenTag(GATEWAY_TOKEN, later)}#token=${GATEWAY_TOKEN}`);
+  });
+
+  test("a tag dated in the future, forged or malformed is redirected again", () => {
+    const future = gatewayTokenTag(GATEWAY_TOKEN, NOW + 60 * 1000);
+    const [issued, mac] = TAG.split(".");
+    const flipped = `${issued}.${mac.slice(0, -1)}${mac.endsWith("0") ? "1" : "0"}`;
+    const restamped = `${(parseInt(issued, 36) + 30).toString(36)}.${mac}`;
+    for (const tag of [future, flipped, restamped, mac, `${issued}.`, ".", "", `${TAG}x`]) {
+      assert.equal(isCurrentTokenTag(tag, GATEWAY_TOKEN, NOW), false, tag);
+      assert.notEqual(redirect(`/?ci_auth=${encodeURIComponent(tag)}`), null, tag);
+    }
+    assert.equal(isCurrentTokenTag(TAG, GATEWAY_TOKEN, NOW), true);
+  });
+
+  test("only the root redirects", () => {
+    for (const url of ["/chat/main", "/api/status", "/assets/index.js", "/__ci_memory/skip"]) {
+      assert.equal(redirect(url, GATEWAY_TOKEN), null, url);
+    }
+  });
+
+  // `new URL("//", base)` throws and `new URL("//chat", base)` has path `/`. A throw here would
+  // leave the request unanswered. A `//chat` misread as `/` would be bounced to the root.
+  test("a target that starts with // is proxied, not parsed as a host", () => {
+    for (const url of ["//", "///", "//?ci_auth=x", "//chat", "//[", "//a:b@"]) {
+      assert.equal(redirect(url, GATEWAY_TOKEN), null, url);
+    }
+  });
+
+  test("the tag still matches when other parameters come first", () => {
+    assert.equal(redirect(`/?session=main&ci_auth=${TAG}`, GATEWAY_TOKEN), null);
+  });
+
+  test("no token, no redirect", () => {
+    assert.equal(gatewayRootRedirect("/", "", NOW), null);
+    assert.equal(gatewayRootRedirect("/", undefined, NOW), null);
+  });
+
+  test("a token with reserved characters is encoded in the hash", () => {
+    const location = redirect("/", "a b&c#d");
+    assert.ok(location.endsWith("#token=a%20b%26c%23d"), location);
   });
 });

@@ -22,7 +22,7 @@ const {
   createConfigReconciler,
   hasCiServerCredentials,
 } = require("./config-reconcile.cjs");
-const { buildGatewayHeaders } = require("./proxy-headers.cjs");
+const { buildGatewayHeaders, gatewayRootRedirect } = require("./proxy-headers.cjs");
 const { createGatewayHealthTracker, handleGatewayHealthRequest } = require("./gateway-health.cjs");
 
 const CONFIG_DIR = process.env.OPENCLAW_DATA_DIR || "/data/.openclaw";
@@ -266,7 +266,7 @@ try {
 }
 // Loading page shown while the gateway is starting up. Keep the refresh in JS:
 // Chrome skips meta-refresh when the URL contains a hash fragment, and our
-// token redirect lands at /?token=...#token=....
+// token redirect lands at /?ci_auth=...#token=....
 const LOADING_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -311,25 +311,17 @@ p{margin:0;color:#A89F99;font-size:15px;line-height:1.6}
 function proxyToOpenclaw(req, res) {
   const token = cfg.getGatewayToken();
 
-  // Redirect root to a tokenized URL so the Control UI can authenticate.
-  // The token goes in two places:
-  //   ?token=… — prevents a redirect loop (server checks searchParams)
-  //   #token=… — delivers the token to the Control UI JS, which reads auth
-  //              exclusively from the hash fragment, not query params
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  if (
-    token &&
-    url.pathname === "/" &&
-    url.searchParams.get("token") !== token
-  ) {
-    // If setup generated or repaired a token while the browser still has an
-    // older dashboard URL, force the URL hash back in sync. The Control UI reads
-    // auth from the hash, so a stale token there causes WebSocket auth failures
-    // even though the proxy injects the current Bearer token.
-    const encodedToken = encodeURIComponent(token);
-    res.writeHead(302, {
-      Location: `/?token=${encodedToken}#token=${encodedToken}`,
-    });
+  // Redirect root to /?ci_auth=<tag>#token=… so the Control UI can authenticate.
+  // The token goes only in the hash, which the Control UI reads and the browser
+  // never sends on; the tag in the query stops the redirect loop (see
+  // gatewayRootRedirect in proxy-headers.cjs). If setup generated or repaired a
+  // token while the browser still has an older dashboard URL, the tag no longer
+  // matches and the hash is resynced. A stale token there causes WebSocket auth
+  // failures even though the proxy injects the current Bearer token. The Location
+  // carries the token, so nothing between here and the browser may cache it.
+  const rootRedirect = gatewayRootRedirect(req.url, token);
+  if (rootRedirect) {
+    res.writeHead(302, { Location: rootRedirect, "Cache-Control": "no-store" });
     res.end();
     return;
   }

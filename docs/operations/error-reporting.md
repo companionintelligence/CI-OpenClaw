@@ -91,9 +91,10 @@ could fail to reach.
   `request.query_string`, from `request.url`, from the `referer`/`location`
   headers, and from breadcrumb `url`/`from`/`to`**. The SDK builds `request.url`
   from `req.url`, which on a Node server is path+query, so filtering only
-  `query_string` redacts nothing — and on this app the query string is literally
-  `?token=<gateway token>`, because the wrapper redirects `/` to
-  `/?token=…#token=…` so the Control UI can authenticate.
+  `query_string` redacts nothing. On this app an old bookmark can still carry
+  `?token=<gateway token>`, because older wrappers redirected `/` to
+  `/?token=…#token=…` so the Control UI could authenticate. The wrapper now
+  sends `/?ci_auth=<fingerprint>#token=…`, which keeps the token out of the query.
 - Stack frame `filename` / `abs_path` (home dir collapsed only — Sentry *groups*
   issues on `filename`, so redacting the body of the path would destroy
   grouping), captured `vars`, and the source lines the `ContextLines` integration
