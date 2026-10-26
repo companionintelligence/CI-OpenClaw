@@ -116,8 +116,9 @@ function buildGatewayHeaders({ reqHeaders, url, gatewayHost, token }) {
 /**
  * Query parameter that marks a dashboard URL as already carrying the current token in its hash.
  *
- * The Control UI reads its gateway token only from the URL hash (`#token=…`), which the browser
- * never sends to a server. So after redirecting `/` to `/#token=…` the next request is a bare
+ * The Control UI takes its gateway token from the URL hash (`#token=…`), which the browser never
+ * sends to a server. (It still accepts `?token=` too, with a console warning that query parameters
+ * reach server logs.) So after redirecting `/` to `/#token=…` the next request is a bare
  * `/` again. The proxy needs something it CAN see to stop redirecting. That used to be
  * `?token=<gateway token>` itself, which put the secret in the request line of every visit:
  * through Cloudflare and Traefik, into their logs and into browser history. The marker carries
@@ -176,7 +177,19 @@ function isCurrentTokenTag(tag, token, now = Date.now()) {
  * Where to send a browser that opened the dashboard root, or null to proxy the request as is.
  *
  * Only a `/` that lacks a current tag for this token redirects. The token rides in
- * the hash, never in the query.
+ * the hash, never in the query. A tagged `/` that still carries a `prompt` redirects once more,
+ * because the Control UI ignores `prompt` and only this redirect turns it into `draft`.
+ *
+ * The prepared message comes along. Companion Memory's "Chat in OpenClaw" opens
+ * `/?title=…&prompt=…&context=…&memoryId=…&memoryKind=…`. This redirect used to drop all of
+ * it, so the message never arrived. The Control UI pre-fills its message box from `?draft=`, so
+ * `prompt` is handed over under that name (an explicit `draft` wins).
+ *
+ * Nothing else in the query is kept. This redirect is the one response that pairs the query with
+ * the real token. The Control UI acts on more of the query than the draft: `gatewayUrl` asks it
+ * to connect to another gateway and hand that gateway the `#token=` it finds next to it.
+ * Carrying the query through would let a link to `/?gatewayUrl=wss://elsewhere` send the token
+ * there after one click on a confirmation dialog.
  *
  * The request target is split on `?` the way isHookPath does it, not parsed with `new URL()`.
  * `new URL()` reads a target that starts with `//` as an authority. `GET //` throws, which an
@@ -189,11 +202,17 @@ function gatewayRootRedirect(rawUrl, token, now = Date.now()) {
   const pathname = queryStart === -1 ? target : target.slice(0, queryStart);
   if (pathname !== "/") return null;
   const query = new URLSearchParams(queryStart === -1 ? "" : target.slice(queryStart + 1));
-  if (isCurrentTokenTag(query.get(TOKEN_TAG_PARAM), token, now)) return null;
-  return `/?${TOKEN_TAG_PARAM}=${gatewayTokenTag(token, now)}#token=${encodeURIComponent(token)}`;
+  if (isCurrentTokenTag(query.get(TOKEN_TAG_PARAM), token, now) && !query.has("prompt")) return null;
+
+  const next = new URLSearchParams();
+  const draft = query.get("draft") || query.get("prompt");
+  if (draft) next.set("draft", draft);
+  next.set(TOKEN_TAG_PARAM, gatewayTokenTag(token, now));
+  return `/?${next.toString()}#token=${encodeURIComponent(token)}`;
 }
 
 module.exports = {
+  TOKEN_TAG_PARAM,
   TOKEN_TAG_TTL_MS,
   gatewayTokenTag,
   isCurrentTokenTag,

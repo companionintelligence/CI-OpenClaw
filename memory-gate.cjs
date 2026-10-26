@@ -63,8 +63,10 @@ function shouldPromptForState(state) {
   return state === "unconfigured";
 }
 
+const { TOKEN_TAG_PARAM } = require("./proxy-headers.cjs");
+
 /** Query parameters that carry dashboard auth: the gateway token itself, or the root redirect's tag. */
-const DASHBOARD_AUTH_PARAMS = ["token", "ci_auth"];
+const DASHBOARD_AUTH_PARAMS = ["token", TOKEN_TAG_PARAM];
 
 /**
  * The absolute URL the browser used to reach this app, or null when it cannot be
@@ -99,7 +101,7 @@ function requestAbsoluteUrl(req) {
   const path = typeof rawTarget === "string" && rawTarget.startsWith("/") && !rawTarget.startsWith("//") ? rawTarget : "/";
   try {
     const url = new URL(path, `${scheme}://${host}`);
-    // The Hub must never see the gateway token (an old `?token=` bookmark), and a
+    // The Hub must never see the gateway token (an old `?token=` bookmark). A
     // return to `/?ci_auth=<tag>` would skip the root redirect, so the Control UI
     // would come back with no `#token=` to sign in with. Without them, a return to
     // `/` goes through the redirect again and gets a fresh hash.
@@ -146,6 +148,39 @@ function forwardAuthHeaders(req) {
   return out;
 }
 
+/**
+ * Where the gate's "Maybe later" and "Don't ask again" send the browser: the dashboard root,
+ * keeping the prepared message the gated page carried.
+ *
+ * Companion Memory's "Chat in OpenClaw" opens `/?…&prompt=…`. When the gate answers that request,
+ * its buttons POST to this wrapper and used to come back to a bare `/`, so the message was lost.
+ * The gate page's address arrives as the POST's Referer. Only a same-origin Referer counts, only
+ * its `draft` (or Memory's `prompt`) is kept and the answer is always a path on this origin, so a
+ * forged Referer can't turn this into an open redirect.
+ *
+ * Behind the Hub the request's Host is the internal `*.localhost` name the tunnel routes on, and
+ * the address the browser used arrives as X-Forwarded-Host, so either one counts.
+ *
+ * @param {string|undefined} referer the action POST's Referer header
+ * @param {...(string|undefined)} hosts the request's Host and X-Forwarded-Host headers
+ * @returns {string} "/" or "/?draft=…"
+ */
+function gateActionReturnPath(referer, ...hosts) {
+  const ours = hosts
+    .map((value) => (typeof value === "string" ? value.split(",")[0].trim().toLowerCase() : ""))
+    .filter(Boolean);
+  if (ours.length === 0 || typeof referer !== "string" || !referer) return "/";
+  let from;
+  try {
+    from = new URL(referer);
+  } catch {
+    return "/";
+  }
+  if (!ours.includes(from.host.toLowerCase())) return "/";
+  const draft = from.searchParams.get("draft") || from.searchParams.get("prompt");
+  return draft ? `/?${new URLSearchParams({ draft })}` : "/";
+}
+
 function buildStateUrl(hubBase, appUrn, clientHost) {
   const url = new URL(`${hubBase}/api/memory-connect/apps/${encodeURIComponent(appUrn)}/state`);
   // Trim before forwarding: a whitespace-padded Host would otherwise reach the
@@ -158,6 +193,7 @@ function buildStateUrl(hubBase, appUrn, clientHost) {
 module.exports = {
   buildStateUrl,
   forwardAuthHeaders,
+  gateActionReturnPath,
   launcherWithNext,
   requestAbsoluteUrl,
   safeHttpUrl,

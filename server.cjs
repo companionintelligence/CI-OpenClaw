@@ -311,7 +311,8 @@ p{margin:0;color:#A89F99;font-size:15px;line-height:1.6}
 function proxyToOpenclaw(req, res) {
   const token = cfg.getGatewayToken();
 
-  // Redirect root to /?ci_auth=<tag>#token=… so the Control UI can authenticate.
+  // Redirect root to /?ci_auth=<tag>#token=… so the Control UI can authenticate,
+  // carrying Memory's "Chat in OpenClaw" prompt along as `draft` and nothing else.
   // The token goes only in the hash, which the Control UI reads and the browser
   // never sends on; the tag in the query stops the redirect loop (see
   // gatewayRootRedirect in proxy-headers.cjs). If setup generated or repaired a
@@ -644,10 +645,17 @@ async function handleMemoryAction(req, res) {
     return true;
   }
 
+  // Back to the dashboard root, keeping a "Chat in OpenClaw" message the gated page carried.
+  const returnPath = memoryGate.gateActionReturnPath(
+    req.headers.referer,
+    req.headers.host,
+    req.headers["x-forwarded-host"],
+  );
+
   if (pathname === MEMORY_DEFER_PATH) {
     // Session cookie — reappears next browser session, per the "deferred" design.
     res.writeHead(302, {
-      Location: "/",
+      Location: returnPath,
       "Set-Cookie": `${MEMORY_DEFER_COOKIE}=1; Path=/; Max-Age=${MEMORY_DEFER_GRACE_SECONDS}; HttpOnly; SameSite=Lax`,
     });
     res.end();
@@ -669,7 +677,7 @@ async function handleMemoryAction(req, res) {
       // best-effort; the gate simply reappears if this didn't land
     }
   }
-  res.writeHead(302, { Location: "/" });
+  res.writeHead(302, { Location: returnPath });
   res.end();
   return true;
 }

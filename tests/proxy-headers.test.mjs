@@ -272,3 +272,79 @@ describe("gatewayRootRedirect: the token stays out of the query", () => {
     assert.ok(location.endsWith("#token=a%20b%26c%23d"), location);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Companion Memory's "Chat in OpenClaw" opens the dashboard root with the prepared message in the
+// query. The redirect used to replace the whole query, so OpenClaw opened with an empty box.
+// ---------------------------------------------------------------------------
+describe("gatewayRootRedirect: Memory's prepared message survives", () => {
+  const NOW = Date.UTC(2026, 9, 26, 12, 0, 0);
+  const TAG = gatewayTokenTag(GATEWAY_TOKEN, NOW);
+  const redirect = (url) => gatewayRootRedirect(url, GATEWAY_TOKEN, NOW);
+  const query = (location) => new URLSearchParams(location.split("#")[0].split("?")[1]);
+
+  test("Memory's prompt becomes the Control UI's draft and nothing else is carried", () => {
+    const prompt = "I'd like to talk about \"Coffee with Jordan Lee\":\n\nWhen: Oct 23, 2026";
+    const from = "/?" + new URLSearchParams({
+      title: "Coffee with Jordan Lee",
+      prompt,
+      context: "When: Oct 23, 2026",
+      memoryId: "f3c0a6d2-1111-4c1e-9a55-0a1b2c3d4e5f",
+      memoryKind: "EventType",
+    }).toString();
+    const location = redirect(from);
+    const q = query(location);
+    assert.equal(q.get("draft"), prompt);
+    assert.equal(q.has("prompt"), false, "the prompt is not sent twice");
+    assert.equal(q.get("ci_auth"), TAG);
+    assert.deepEqual([...q.keys()].sort(), ["ci_auth", "draft"]);
+    assert.ok(location.endsWith(`#token=${GATEWAY_TOKEN}`), location);
+  });
+
+  test("the redirected URL is not redirected again, so the draft reaches the Control UI", () => {
+    const location = redirect("/?prompt=hello");
+    assert.equal(redirect(location.split("#")[0]), null);
+  });
+
+  test("an explicit draft wins over prompt", () => {
+    const q = query(redirect("/?draft=mine&prompt=theirs"));
+    assert.equal(q.get("draft"), "mine");
+    assert.equal(q.has("prompt"), false);
+  });
+
+  test("a token in the incoming query is dropped, never carried into the new query", () => {
+    const location = redirect(`/?token=${GATEWAY_TOKEN}&prompt=hi`);
+    assert.ok(!location.split("#")[0].includes(GATEWAY_TOKEN), location);
+    assert.equal(query(location).get("draft"), "hi");
+  });
+
+  // The Control UI connects to a `gatewayUrl` from the query, after a confirmation dialog, and
+  // hands it the `#token=` this redirect adds. Kept, a link could ship the token anywhere.
+  test("parameters the Control UI acts on are not carried next to the token", () => {
+    const from = "/?" + new URLSearchParams({
+      gatewayUrl: "wss://attacker.example",
+      password: "x",
+      session: "agent:main:x",
+      draft: "hi",
+    }).toString();
+    const q = query(redirect(from));
+    assert.deepEqual([...q.keys()].sort(), ["ci_auth", "draft"]);
+    assert.equal(q.get("draft"), "hi");
+  });
+
+  test("with no prompt or draft only the tag is set", () => {
+    assert.equal(redirect("/?title=x"), `/?ci_auth=${TAG}#token=${GATEWAY_TOKEN}`);
+  });
+
+  test("a stale tag is replaced, not duplicated", () => {
+    const q = query(redirect("/?ci_auth=0000000000000000&prompt=hi"));
+    assert.deepEqual(q.getAll("ci_auth"), [TAG]);
+  });
+
+  // The Control UI only reads `draft`, so a current tag must not let a `prompt` through untranslated.
+  test("a prompt next to the current tag still becomes the draft", () => {
+    const location = redirect(`/?ci_auth=${TAG}&prompt=hi`);
+    assert.equal(location, `/?draft=hi&ci_auth=${TAG}#token=${GATEWAY_TOKEN}`);
+    assert.equal(redirect(location.split("#")[0]), null);
+  });
+});
