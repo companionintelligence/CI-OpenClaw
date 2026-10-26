@@ -135,37 +135,67 @@ const TOKEN_TAG_PARAM = "ci_auth";
 const TOKEN_TAG_KEY = crypto.randomBytes(32);
 
 /**
- * A short keyed fingerprint of the gateway token. A new token gives a new tag, so a browser
- * still holding an old dashboard URL is sent through the redirect again and its hash resynced.
+ * How long a tagged `/` skips the redirect. The tag only says "this URL came out of the redirect",
+ * not "this tab holds the token": the Control UI keeps the token in sessionStorage, so a new tab
+ * that opens a tagged `/` from history or a bookmark has none. Past this age the same URL goes
+ * through the redirect again and gets a fresh `#token=`. Two minutes covers the browser's
+ * follow-up request and the loading page's reloads while the gateway starts.
  */
-function gatewayTokenTag(token) {
-  return crypto.createHmac("sha256", TOKEN_TAG_KEY).update(String(token)).digest("hex").slice(0, 16);
+const TOKEN_TAG_TTL_MS = 2 * 60 * 1000;
+
+/** How far into the future a tag's time may be, for a wall clock that steps back a little. */
+const TOKEN_TAG_CLOCK_SLACK_MS = 5 * 1000;
+
+function tagMac(issued, token) {
+  return crypto.createHmac("sha256", TOKEN_TAG_KEY).update(`${issued}.${String(token)}`).digest("hex").slice(0, 16);
+}
+
+/**
+ * A short keyed fingerprint of the gateway token, stamped with the time it was made:
+ * `<seconds, base 36>.<16 hex digits>`. A new token gives a new tag, so a browser still holding an
+ * old dashboard URL is sent through the redirect again and its hash resynced.
+ */
+function gatewayTokenTag(token, now = Date.now()) {
+  const issued = Math.floor(now / 1000).toString(36);
+  return `${issued}.${tagMac(issued, token)}`;
+}
+
+/** Was `tag` made by gatewayTokenTag for this token, in this process, less than TOKEN_TAG_TTL_MS ago? */
+function isCurrentTokenTag(tag, token, now = Date.now()) {
+  const match = /^([0-9a-z]{1,11})\.([0-9a-f]{16})$/.exec(String(tag || ""));
+  if (!match) return false;
+  const age = now - parseInt(match[1], 36) * 1000;
+  if (age < -TOKEN_TAG_CLOCK_SLACK_MS || age > TOKEN_TAG_TTL_MS) return false;
+  const expected = Buffer.from(tagMac(match[1], token));
+  const given = Buffer.from(match[2]);
+  return expected.length === given.length && crypto.timingSafeEqual(expected, given);
 }
 
 /**
  * Where to send a browser that opened the dashboard root, or null to proxy the request as is.
  *
- * Only a `/` that lacks the current token's tag redirects. The token rides in
+ * Only a `/` that lacks a current tag for this token redirects. The token rides in
  * the hash, never in the query.
  *
  * The request target is split on `?` the way isHookPath does it, not parsed with `new URL()`.
  * `new URL()` reads a target that starts with `//` as an authority. `GET //` throws, which an
  * async request handler never answers. `GET //chat` comes back with path `/`.
  */
-function gatewayRootRedirect(rawUrl, token) {
+function gatewayRootRedirect(rawUrl, token, now = Date.now()) {
   if (!token) return null;
   const target = String(rawUrl || "/").split("#")[0];
   const queryStart = target.indexOf("?");
   const pathname = queryStart === -1 ? target : target.slice(0, queryStart);
   if (pathname !== "/") return null;
   const query = new URLSearchParams(queryStart === -1 ? "" : target.slice(queryStart + 1));
-  const tag = gatewayTokenTag(token);
-  if (query.get(TOKEN_TAG_PARAM) === tag) return null;
-  return `/?${TOKEN_TAG_PARAM}=${tag}#token=${encodeURIComponent(token)}`;
+  if (isCurrentTokenTag(query.get(TOKEN_TAG_PARAM), token, now)) return null;
+  return `/?${TOKEN_TAG_PARAM}=${gatewayTokenTag(token, now)}#token=${encodeURIComponent(token)}`;
 }
 
 module.exports = {
+  TOKEN_TAG_TTL_MS,
   gatewayTokenTag,
+  isCurrentTokenTag,
   gatewayRootRedirect,
   HOOKS_PATH_PREFIX,
   isHookPath,
