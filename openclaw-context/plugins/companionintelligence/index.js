@@ -41,13 +41,6 @@ function jsonResult(payload) {
   };
 }
 
-function textResult(text, details) {
-  return {
-    content: [{ type: "text", text }],
-    details,
-  };
-}
-
 function normalizeString(value) {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -1318,6 +1311,8 @@ export default {
       timeoutMs: 15000,
     });
 
+    // A command handler answers with a reply payload (`{ text }`), not a tool result:
+    // OpenClaw reads `text` and shows "No reply was generated" when it is missing.
     api.registerCommand({
       name: "ci-memory",
       description: "Check Companion Intelligence memory connectivity.",
@@ -1326,17 +1321,13 @@ export default {
         const client = createClient(api);
         try {
           await client.health();
-          return textResult("Companion Intelligence memory is connected.", {
-            ok: true,
-            url: client.config.url,
-          });
+          return { text: "Companion Intelligence memory is connected." };
         } catch (error) {
-          return textResult(
-            `Companion Intelligence memory is not available: ${String(
+          return {
+            text: `Companion Intelligence memory is not available: ${String(
               error?.message || error,
             )}`,
-            { ok: false, url: client.config.url },
-          );
+          };
         }
       },
     });

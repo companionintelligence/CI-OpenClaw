@@ -28,6 +28,7 @@ function makeApi() {
   const tools = [];
   const toolFactories = {};
   const commands = [];
+  const commandHandlers = {};
   const handlers = {};
   const warns = [];
   return {
@@ -41,6 +42,7 @@ function makeApi() {
     },
     registerCommand(opts) {
       commands.push(opts?.name ?? opts);
+      if (opts?.name) commandHandlers[opts.name] = opts.handler;
     },
     registerHook(name, fn) {
       handlers[name] = fn;
@@ -52,6 +54,7 @@ function makeApi() {
     _tools: tools,
     _toolFactories: toolFactories,
     _commands: commands,
+    _commandHandlers: commandHandlers,
     _handlers: handlers,
     _warns: warns,
   };
@@ -405,6 +408,33 @@ test("before_compaction no-ops (no fetch) when CI_MEMORY_TURN_ENABLED=off", asyn
   try {
     await runBeforeCompaction(register({ CI_MEMORY_TURN_ENABLED: "false" }));
     assert.equal(calls.length, 0, "turn sync must not fire when disabled");
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+// OpenClaw treats a command's return value as a reply payload and shows its `text`.
+// A tool-result shape ({ content: [...] }) has no `text`, so the web chat answered
+// /ci-memory with "No reply was generated for this message."
+test("/ci-memory replies with text whether or not CI-Server answers", async () => {
+  const origFetch = global.fetch;
+  try {
+    const api = register();
+    const handler = api._commandHandlers["ci-memory"];
+    assert.equal(typeof handler, "function");
+
+    global.fetch = async (url) => {
+      assert.ok(String(url).endsWith("/api/health"), String(url));
+      return { ok: true, status: 200, text: async () => "{}" };
+    };
+    const up = await handler({});
+    assert.equal(up.text, "Companion Intelligence memory is connected.");
+    assert.equal(up.content, undefined, "not a tool result");
+
+    global.fetch = async () => ({ ok: false, status: 503, text: async () => "down" });
+    const down = await handler({});
+    assert.match(down.text, /^Companion Intelligence memory is not available: /);
   } finally {
     global.fetch = origFetch;
     clearFlags();
