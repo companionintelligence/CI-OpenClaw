@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
+import { readFileSync } from "node:fs";
 
 import plugin, {
   extractDispatchJobId,
@@ -7,7 +8,6 @@ import plugin, {
   featureEnabled,
   inferDispatchStatus,
   normalizeBaseUrl,
-  registerIntentTools,
 } from "./index.js";
 
 const FLAGS = [
@@ -79,9 +79,8 @@ const MANIFEST = {
 
 // Register the plugin with the given env flags set. Flags are left in place so
 // hook handlers (which re-check the flag when invoked) see them; the next call
-// clears first. Executable intent tools are disabled by default here (their
-// registration fetches the catalog inside register(), which would pollute the
-// mocked-fetch call counts in unrelated tests); the intent-tool tests opt in.
+// clears first. ci_run_intent is disabled by default here so the tool lists in the
+// gating tests stay the memory set; the intent-tool tests opt in.
 function register(env = {}) {
   clearFlags();
   process.env.CI_INTENT_TOOLS_ENABLED = "false";
@@ -426,9 +425,9 @@ test("ci_list_intents tool fetches /api/intents and returns the rendered catalog
     assert.equal(payload.available, true);
     assert.deepEqual(payload.domains, ["memory"]);
     assert.ok(payload.catalog.includes("memory_recall"), payload.catalog);
-    // No executable intent tools were registered, so no callability note.
-    assert.equal(payload.executableTools, undefined);
-    assert.ok(!payload.catalog.includes("directly callable"), payload.catalog);
+    // ci_run_intent is off in this test, so the catalog does not point at it.
+    assert.equal(payload.runWith, undefined);
+    assert.ok(!payload.catalog.includes("ci_run_intent"), payload.catalog);
   } finally {
     global.fetch = origFetch;
     clearFlags();
@@ -508,45 +507,67 @@ function manifestFetch(url) {
   return { ok: true, status: 200, text: async () => JSON.stringify(INTENT_MANIFEST) };
 }
 
-test("registerIntentTools registers gated intents too, and warns the model they need approval", async () => {
-  // This asserted the opposite until 2026-09: destructive and external intents
-  // were filtered out client-side. That was correct while a connect key held
-  // `write` — CI-Server refused them before its gate, so registering them only
-  // bought confusing failures. CI-Server now mints these keys at `full` and
-  // queues anything irreversible as an approval card, so hiding the tools would
-  // make the card unreachable: the agent cannot ask for what it cannot call.
+// The catalog's intents reach the agent through one declared tool. They used to be
+// registered one tool each, from the catalog fetched inside register(). OpenClaw
+// closes the plugin API when register() returns and drops later registrations
+// without a word, and it refuses tool names missing from contracts.tools, so none
+// of those tools ever existed in a real gateway (memory_forget included). A plain
+// mock API accepted them, which kept the old tests green.
+function makeOpenClawLikeApi() {
+  const api = makeApi();
+  const declared = JSON.parse(readFileSync(new URL("./openclaw.plugin.json", import.meta.url), "utf8")).contracts.tools;
+  const accept = api.registerTool;
+  let closed = false;
+  api._dropped = [];
+  api.registerTool = (factory, opts) => {
+    if (closed) {
+      api._dropped.push(opts?.name);
+      return;
+    }
+    assert.ok(declared.includes(opts?.name), `${opts?.name} is not in openclaw.plugin.json contracts.tools`);
+    accept(factory, opts);
+  };
+  api._close = () => {
+    closed = true;
+  };
+  return api;
+}
+
+test("ci_run_intent is declared and registered before register() returns", async () => {
   const origFetch = global.fetch;
   global.fetch = async (url) => manifestFetch(url);
+  clearFlags();
   try {
-    const api = makeApi();
-    const registered = await registerIntentTools(api);
-    // memory_forget (destructive) and media_streamingAvailability (external) now
-    // register; the memory_search collision is still skipped + logged.
-    assert.ok(registered.includes("predictions_forecast"));
-    assert.ok(registered.includes("memory_forget"), "destructive intent must register");
-    assert.ok(
-      registered.includes("media_streamingAvailability"),
-      "external intent must register",
-    );
-    assert.equal(api._warns.length, 1);
-    assert.ok(api._warns[0].includes("memory_search"), api._warns[0]);
-
-    // The registered tool carries the manifest schema.
-    const tool = api._toolFactories["predictions_forecast"]();
-    assert.equal(tool.name, "predictions_forecast");
-    assert.equal(tool.label, "Forecast activities");
-    assert.deepEqual(tool.parameters, INTENT_MANIFEST.intents[0].parameters);
-
-    // A gated tool says so in its description, because a model that discovers the
-    // gate only by calling will read the result as a failure and retry it.
-    const gated = api._toolFactories["memory_forget"]();
-    assert.match(gated.description, /Requires the owner's approval/);
-    assert.match(gated.description, /do NOT call it again/);
-    // An ungated one is left alone — a warning on every search would be noise.
-    assert.doesNotMatch(tool.description, /Requires the owner's approval/);
+    const api = makeOpenClawLikeApi();
+    plugin.register(api);
+    api._close();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(api._tools.includes("ci_run_intent"), String(api._tools));
+    assert.ok(api._tools.includes("ci_list_intents"), String(api._tools));
+    assert.deepEqual(api._dropped, [], "nothing may be registered after register() returns");
   } finally {
     global.fetch = origFetch;
+    clearFlags();
   }
+});
+
+// Run an intent through the registered ci_run_intent tool.
+async function runIntent(intent, params) {
+  const api = register({ CI_INTENT_TOOLS_ENABLED: "true" });
+  const tool = api._toolFactories["ci_run_intent"]();
+  const res = await tool.execute("id", { intent, ...(params === undefined ? {} : { params }) });
+  return JSON.parse(res.content[0].text);
+}
+
+test("ci_run_intent tells the model the owner decides on destructive intents", () => {
+  const api = register({ CI_INTENT_TOOLS_ENABLED: "true" });
+  const tool = api._toolFactories["ci_run_intent"]();
+  assert.equal(tool.name, "ci_run_intent");
+  assert.deepEqual(tool.parameters.required, ["intent"]);
+  assert.match(tool.description, /memory_forget/);
+  assert.match(tool.description, /approval/);
+  assert.match(tool.description, /do not call it again/);
+  clearFlags();
 });
 
 test("a queued intent reads as 'asked the owner', not as a failure to retry", async () => {
@@ -554,10 +575,12 @@ test("a queued intent reads as 'asked the owner', not as a failure to retry", as
   // Handed to the model raw it looks like a failure, and the likely next move for
   // a model that just failed is to try again — which is a pile of duplicate cards
   // for one intent.
+  const posts = [];
   const origFetch = global.fetch;
   global.fetch = async (url, opts = {}) => {
     const u = String(url);
     if ((opts.method || "GET") === "GET") return manifestFetch(u);
+    posts.push({ path: new URL(u).pathname, body: JSON.parse(opts.body) });
 
     return {
       ok: true,
@@ -587,11 +610,7 @@ test("a queued intent reads as 'asked the owner', not as a failure to retry", as
     };
   };
   try {
-    const api = makeApi();
-    await registerIntentTools(api);
-    const tool = api._toolFactories["memory_forget"]();
-    const res = await tool.execute("id", {});
-    const payload = JSON.parse(res.content[0].text);
+    const payload = await runIntent("memory_forget", { entityIds: ["11111111-1111-1111-1111-111111111111"] });
 
     assert.equal(payload.status, "awaiting_owner_approval");
     assert.equal(payload.retry, false);
@@ -599,8 +618,12 @@ test("a queued intent reads as 'asked the owner', not as a failure to retry", as
     assert.equal(payload.expiresAt, "2026-09-11T08:00:00.000Z");
     // It must not look like the plain failure shape the catch block produces.
     assert.equal(payload.success, undefined);
+    // The forget reached Memory, with the model's parameters.
+    assert.equal(posts[0].path, "/api/agent/intents/memory_forget/execute");
+    assert.deepEqual(posts[0].body, { entityIds: ["11111111-1111-1111-1111-111111111111"] });
   } finally {
     global.fetch = origFetch;
+    clearFlags();
   }
 });
 
@@ -625,19 +648,17 @@ test("a queued intent from an older appliance, with the id at the top level, is 
     };
   };
   try {
-    const api = makeApi();
-    await registerIntentTools(api);
-    const tool = api._toolFactories["memory_forget"]();
-    const payload = JSON.parse((await tool.execute("id", {})).content[0].text);
+    const payload = await runIntent("memory_forget", {});
 
     assert.equal(payload.pendingActionId, "pa-legacy");
     assert.equal(payload.expiresAt, null);
   } finally {
     global.fetch = origFetch;
+    clearFlags();
   }
 });
 
-test("intent tool execute POSTs params to the agent path and falls back to /api/intents on 404", async () => {
+test("ci_run_intent POSTs params to the agent path and falls back to /api/intents on 404", async () => {
   const calls = [];
   const origFetch = global.fetch;
   global.fetch = async (url, opts = {}) => {
@@ -657,10 +678,7 @@ test("intent tool execute POSTs params to the agent path and falls back to /api/
     };
   };
   try {
-    const api = makeApi();
-    await registerIntentTools(api);
-    const res = await api._toolFactories["predictions_forecast"]().execute("id", { horizon: "24h" });
-    const payload = JSON.parse(res.content[0].text);
+    const payload = await runIntent("predictions.forecast", { horizon: "24h" });
     assert.equal(payload.success, true);
     assert.deepEqual(payload.data, { available: true });
     const posts = calls.filter((c) => c.method === "POST");
@@ -675,10 +693,11 @@ test("intent tool execute POSTs params to the agent path and falls back to /api/
     assert.equal(posts[1].headers["x-api-key"], "tok");
   } finally {
     global.fetch = origFetch;
+    clearFlags();
   }
 });
 
-test("intent tool execute returns a structured error result on non-404 failure (no fallback, no throw)", async () => {
+test("ci_run_intent returns a structured error result on non-404 failure (no fallback, no throw)", async () => {
   const calls = [];
   const origFetch = global.fetch;
   global.fetch = async (url, opts = {}) => {
@@ -688,96 +707,59 @@ test("intent tool execute returns a structured error result on non-404 failure (
     return {
       ok: false,
       status: 403,
-      text: async () => JSON.stringify({ message: "destructive intents denied" }),
+      text: async () => JSON.stringify({ message: "capability too low" }),
     };
   };
   try {
-    const api = makeApi();
-    await registerIntentTools(api);
-    const res = await api._toolFactories["predictions_forecast"]().execute("id", {});
-    const payload = JSON.parse(res.content[0].text);
+    const payload = await runIntent("predictions_forecast", {});
     assert.equal(payload.success, false);
-    assert.equal(payload.intent, "predictions.forecast");
-    assert.equal(payload.tool, "predictions_forecast");
+    assert.equal(payload.intent, "predictions_forecast");
     assert.ok(payload.error.includes("403"), payload.error);
-    assert.ok(payload.error.includes("destructive intents denied"), payload.error);
+    assert.ok(payload.error.includes("capability too low"), payload.error);
     // A non-404 failure must not retry the legacy path.
     assert.equal(calls.length, 1);
-  } finally {
-    global.fetch = origFetch;
-  }
-});
-
-test("registerIntentTools degrades silently to zero registrations when the catalog is unavailable", async () => {
-  const origFetch = global.fetch;
-  global.fetch = async () => {
-    throw new Error("ECONNREFUSED");
-  };
-  try {
-    const api = makeApi();
-    assert.deepEqual(await registerIntentTools(api), []);
-    assert.deepEqual(api._tools, []);
-  } finally {
-    global.fetch = origFetch;
-  }
-});
-
-test("registerIntentTools makes no request when CI-Server is unconfigured", async () => {
-  let called = false;
-  const origFetch = global.fetch;
-  const origUrl = process.env.CI_SERVER_URL;
-  const origToken = process.env.CI_SERVER_TOKEN;
-  delete process.env.CI_SERVER_URL;
-  delete process.env.CI_SERVER_TOKEN;
-  global.fetch = async () => {
-    called = true;
-    return { ok: true, status: 200, text: async () => "{}" };
-  };
-  try {
-    const api = makeApi();
-    api.pluginConfig = {};
-    assert.deepEqual(await registerIntentTools(api), []);
-    assert.equal(called, false);
-  } finally {
-    global.fetch = origFetch;
-    if (origUrl !== undefined) process.env.CI_SERVER_URL = origUrl;
-    if (origToken !== undefined) process.env.CI_SERVER_TOKEN = origToken;
-  }
-});
-
-test("register() with CI_INTENT_TOOLS_ENABLED wires intent tools and ci_list_intents notes callability", async () => {
-  const origFetch = global.fetch;
-  global.fetch = async (url) => manifestFetch(url);
-  try {
-    const api = register({ CI_INTENT_TOOLS_ENABLED: "true" });
-    // Registration is fire-and-forget from register(); flush the promise chain.
-    await new Promise((r) => setImmediate(r));
-    assert.ok(api._tools.includes("predictions_forecast"), String(api._tools));
-    // Gated intents DO register now — CI-Server queues them as an approval card
-    // rather than refusing them, and a hidden tool is a card the agent can never
-    // ask for. See the registerIntentTools test above.
-    assert.ok(api._tools.includes("memory_forget"), "destructive intent must register");
-    assert.ok(
-      api._tools.includes("media_streamingAvailability"),
-      "external intent must register",
-    );
-    const res = await api._toolFactories["ci_list_intents"]().execute();
-    const payload = JSON.parse(res.content[0].text);
-    // Gated intents are executable too — "executable" means the agent can CALL it,
-    // which for a gated intent means it can ask. Whether it runs is the owner's.
-    assert.deepEqual(payload.executableTools, [
-      "predictions_forecast",
-      "memory_forget",
-      "media_streamingAvailability",
-    ]);
-    assert.ok(payload.catalog.includes("directly callable"), payload.catalog);
   } finally {
     global.fetch = origFetch;
     clearFlags();
   }
 });
 
-test("intent tools stay off when CI_INTENT_TOOLS_ENABLED or CI_INTENTS_ENABLED is disabled", async () => {
+test("ci_run_intent without an intent name asks for one and calls nothing", async () => {
+  let called = false;
+  const origFetch = global.fetch;
+  global.fetch = async () => {
+    called = true;
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  try {
+    const payload = await runIntent("  ");
+    assert.equal(payload.success, false);
+    assert.equal(payload.error, "intent required");
+    assert.equal(called, false);
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("ci_list_intents points at ci_run_intent when it is registered", async () => {
+  const origFetch = global.fetch;
+  global.fetch = async (url) => manifestFetch(url);
+  try {
+    const api = register({ CI_INTENT_TOOLS_ENABLED: "true" });
+    const res = await api._toolFactories["ci_list_intents"]().execute();
+    const payload = JSON.parse(res.content[0].text);
+    assert.equal(payload.runWith, "ci_run_intent");
+    assert.ok(payload.catalog.includes("Run any intent above with `ci_run_intent`"), payload.catalog);
+    assert.ok(payload.catalog.includes("`memory_forget`"), payload.catalog);
+    assert.ok(!payload.catalog.includes("directly callable"), "no claim of per-intent tools");
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("ci_run_intent stays off when CI_INTENT_TOOLS_ENABLED or CI_INTENTS_ENABLED is disabled", async () => {
   let gets = 0;
   const origFetch = global.fetch;
   global.fetch = async (url) => {
@@ -786,16 +768,31 @@ test("intent tools stay off when CI_INTENT_TOOLS_ENABLED or CI_INTENTS_ENABLED i
   };
   try {
     const apiOff = register({ CI_INTENT_TOOLS_ENABLED: "false" });
-    await new Promise((r) => setImmediate(r));
-    assert.ok(!apiOff._tools.includes("predictions_forecast"));
-    assert.equal(gets, 0, "no catalog fetch when the sub-switch is off");
+    assert.ok(apiOff._tools.includes("ci_list_intents"));
+    assert.ok(!apiOff._tools.includes("ci_run_intent"));
 
-    // The master intents switch also disables the executable tools.
+    // The master intents switch also disables the runner.
     const apiNoIntents = register({ CI_INTENTS_ENABLED: "false", CI_INTENT_TOOLS_ENABLED: "true" });
-    await new Promise((r) => setImmediate(r));
     assert.ok(!apiNoIntents._tools.includes("ci_list_intents"));
-    assert.ok(!apiNoIntents._tools.includes("predictions_forecast"));
-    assert.equal(gets, 0, "no catalog fetch when intents are off entirely");
+    assert.ok(!apiNoIntents._tools.includes("ci_run_intent"));
+    assert.equal(gets, 0, "registering fetches nothing");
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("the bootstrap guidance says how to forget something in Memory", async () => {
+  const origFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ block: "" }) });
+  try {
+    const api = register({ CI_MEMORY_CONTEXT_ENABLED: "false" });
+    const agents = { name: "AGENTS.md", path: "AGENTS.md", missing: false, content: "" };
+    await api._handlers["agent:bootstrap"]({
+      context: { cfg: { plugins: { slots: { memory: "companionintelligence" } } }, bootstrapFiles: [agents] },
+    });
+    assert.match(agents.content, /To forget or delete something in Companion Memory/);
+    assert.match(agents.content, /`ci_run_intent` with `memory_forget`/);
   } finally {
     global.fetch = origFetch;
     clearFlags();

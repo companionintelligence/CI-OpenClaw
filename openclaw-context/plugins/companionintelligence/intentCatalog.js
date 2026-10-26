@@ -92,12 +92,36 @@ export function describeCatalogForPrompt(manifest) {
       if (intent.privacy && intent.privacy.destructive) flags.push("destructive");
       if (intent.privacy && intent.privacy.external) flags.push("external");
       const suffix = flags.length ? ` _(${flags.join(", ")})_` : "";
-      lines.push(`- \`${intent.tool}\` — ${intent.title}: ${intent.description}${suffix}`);
+      const params = describeParams(intent.parameters);
+      lines.push(`- \`${intent.tool}\` — ${intent.title}: ${intent.description}${suffix}${params}`);
     }
     lines.push("");
   }
 
   return lines.join("\n").trim();
+}
+
+/**
+ * The parameter names of one intent, for its catalog line, so an agent calling it
+ * by name through a generic runner knows what to pass: required ones marked, and
+ * the allowed values of an enum listed. "" when it takes none.
+ *
+ * @param {object|undefined} schema the intent's JSON-Schema `parameters`
+ * @returns {string}
+ */
+function describeParams(schema) {
+  const properties = (schema && schema.properties) || {};
+  const names = Object.keys(properties);
+  if (names.length === 0) return "";
+  const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+  const describe = (name) => {
+    const notes = [];
+    if (required.has(name)) notes.push("required");
+    const values = properties[name] && properties[name].enum;
+    if (Array.isArray(values) && values.length > 0) notes.push(`one of ${values.join(", ")}`);
+    return notes.length ? `${name} (${notes.join("; ")})` : name;
+  };
+  return ` Params: ${names.map(describe).join(", ")}.`;
 }
 
 /**

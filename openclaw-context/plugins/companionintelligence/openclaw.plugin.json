@@ -13,6 +13,7 @@
       "memory_search",
       "memory_store",
       "ci_list_intents",
+      "ci_run_intent",
       "ci_dispatch_packet",
       "ci_dispatch_checkpoint"
     ]

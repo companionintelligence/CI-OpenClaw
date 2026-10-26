@@ -209,20 +209,24 @@ The plugin also consumes CI-Server's curated intent catalog:
 - **Discovery** — the `ci_list_intents` tool fetches `GET /api/agent/intents`
   (falling back to the legacy `GET /api/intents`) and renders the typed,
   privacy-labelled catalog for the agent.
-- **Execution** — at startup the plugin registers one OpenClaw tool per
-  **non-destructive, non-external** intent in that catalog (e.g.
-  `predictions_forecast`), each POSTing its parameters to CI-Server's generic
-  REST executor `POST /api/intents/:name/execute` and returning the structured
-  `ToolResult`. Destructive/external intents are filtered client-side and are
-  also refused (403) by the server. Failures come back as structured error
-  results, never throws; if the catalog or executor is unavailable the plugin
-  degrades to discovery-only.
+- **Execution** - the `ci_run_intent` tool runs any intent in that catalog by
+  its tool name (for example `places_find`, then `memory_forget` with the id it
+  found), POSTing the parameters to CI-Server's generic REST executor
+  `POST /api/intents/:name/execute` and returning the structured `ToolResult`.
+  Destructive and external intents are queued by the server as an approval card
+  for the owner, and the tool tells the agent so. Failures come back as
+  structured error results, never throws.
+
+  It is one generic tool, not one tool per intent, because OpenClaw takes plugin
+  tools only while `register()` runs and only under names listed in
+  `openclaw.plugin.json` (`contracts.tools`). The catalog comes over the network
+  later, so per-intent tools were silently dropped.
 
 Flags (default **on**, same convention as the memory flags):
 
-- `CI_INTENTS_ENABLED` — the whole intent subsystem (`ci_list_intents` +
-  executable intent tools)
-- `CI_INTENT_TOOLS_ENABLED` — just the executable intent tools (sub-switch)
+- `CI_INTENTS_ENABLED` - the whole intent subsystem (`ci_list_intents` +
+  `ci_run_intent`)
+- `CI_INTENT_TOOLS_ENABLED` - just `ci_run_intent` (sub-switch)
 
 ### CI-Server endpoints used
 

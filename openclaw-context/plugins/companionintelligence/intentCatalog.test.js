@@ -145,6 +145,36 @@ test("describeCatalogForPrompt groups by domain and flags destructive/external",
   assert.ok(text.includes("external"), "marks the external intent");
 });
 
+test("describeCatalogForPrompt lists each intent's parameters, marking the required ones", () => {
+  // An agent runs intents through one generic tool, so the catalog line is the only
+  // place it learns what to pass.
+  const text = describeCatalogForPrompt({
+    intents: [
+      {
+        name: "places.find",
+        tool: "places_find",
+        domain: "places",
+        title: "Find places",
+        description: "Find places.",
+        parameters: { type: "object", properties: { query: {}, maxResults: {} }, required: ["query"] },
+      },
+      {
+        name: "memory.forget",
+        tool: "memory_forget",
+        domain: "memory",
+        title: "Forget",
+        description: "Forget.",
+        parameters: { type: "object", properties: { entityIds: {}, mode: { enum: ["archive", "archive_and_delete"] } } },
+      },
+      { name: "a.b", tool: "a_b", domain: "a", title: "None", description: "Takes nothing.", parameters: { type: "object" } },
+    ],
+  });
+  assert.ok(text.includes("`places_find` — Find places: Find places. Params: query (required), maxResults."), text);
+  assert.ok(text.includes("Params: entityIds, mode (one of archive, archive_and_delete)."), text);
+  assert.ok(text.includes("`a_b` — None: Takes nothing.\n") || text.endsWith("Takes nothing."), text);
+  assert.ok(!text.includes("Takes nothing. Params"), text);
+});
+
 test("describeCatalogForPrompt returns empty string for a null/empty manifest", () => {
   assert.equal(describeCatalogForPrompt(null), "");
   assert.equal(describeCatalogForPrompt({ intents: [] }), "");
