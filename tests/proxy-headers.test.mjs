@@ -225,8 +225,8 @@ describe("gatewayRootRedirect: the token stays out of the query", () => {
 
   // The Control UI keeps the token in sessionStorage, so a new tab has none. A tagged / opened later
   // from history or a bookmark must be redirected again, or that tab opens with no token at all.
-  test("a tag stops redirecting once it is two minutes old", () => {
-    assert.equal(TOKEN_TAG_TTL_MS, 2 * 60 * 1000);
+  test("a tag stops skipping the redirect once it is 30 seconds old", () => {
+    assert.equal(TOKEN_TAG_TTL_MS, 30 * 1000);
     assert.equal(redirect(`/?ci_auth=${TAG}`, GATEWAY_TOKEN, NOW + TOKEN_TAG_TTL_MS), null);
     const later = NOW + TOKEN_TAG_TTL_MS + 1000;
     assert.equal(redirect(`/?ci_auth=${TAG}`, GATEWAY_TOKEN, later), `/?ci_auth=${gatewayTokenTag(GATEWAY_TOKEN, later)}#token=${GATEWAY_TOKEN}`);
