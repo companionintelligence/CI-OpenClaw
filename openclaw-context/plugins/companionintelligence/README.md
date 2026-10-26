@@ -62,8 +62,10 @@ You are looking for `"status": "loaded"` and `"activationReason": "selected memo
 
 That confirms OpenClaw loaded the plugin and handed it the memory slot. It does **not**
 contact your server: a plugin pointed at an unreachable `url` still reports `loaded`. To
-check the connection itself, run `/ci-memory` in a session — it calls `GET /api/health`
-and reports back the URL it used.
+check the connection itself, run `/ci-memory` in a session. It calls `GET /api/health`,
+then makes one authenticated request (`GET /api/memory/context`) so a wrong key fails
+too, and reports back the URL it used. `/api/health` needs no key, so on its own it
+would call any key good.
 
 ### Why each key is needed
 

@@ -424,17 +424,89 @@ test("/ci-memory replies with text whether or not CI-Server answers", async () =
     const handler = api._commandHandlers["ci-memory"];
     assert.equal(typeof handler, "function");
 
+    // Record the paths and assert afterwards: an assertion thrown inside the mock
+    // would land in the handler's catch and come back as a "not available" reply.
+    const paths = [];
     global.fetch = async (url) => {
-      assert.ok(String(url).endsWith("/api/health"), String(url));
-      return { ok: true, status: 200, text: async () => "{}" };
+      paths.push(new URL(String(url)).pathname);
+      return { ok: true, status: 200, text: async () => JSON.stringify({ block: "" }) };
     };
     const up = await handler({});
-    assert.equal(up.text, "Companion Intelligence memory is connected.");
+    assert.equal(up.text, "Companion Intelligence memory is connected at http://ci-server:8642.");
     assert.equal(up.content, undefined, "not a tool result");
+    assert.deepEqual(paths, ["/api/health", "/api/memory/context"]);
 
     global.fetch = async () => ({ ok: false, status: 503, text: async () => "down" });
     const down = await handler({});
-    assert.match(down.text, /^Companion Intelligence memory is not available: /);
+    assert.equal(
+      down.text,
+      "Companion Intelligence memory is not available at http://ci-server:8642: CI-Server HTTP 503: down",
+    );
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+// /api/health is unauthenticated, so a wrong key used to read as "connected".
+test("/ci-memory reports a key the server refuses instead of calling it connected", async () => {
+  const origFetch = global.fetch;
+  try {
+    const api = register();
+    global.fetch = async (url) =>
+      new URL(String(url)).pathname === "/api/health"
+        ? { ok: true, status: 200, text: async () => "{}" }
+        : { ok: false, status: 401, text: async () => JSON.stringify({ message: "Invalid API key" }) };
+    const res = await api._commandHandlers["ci-memory"]({});
+    assert.equal(
+      res.text,
+      "Companion Intelligence memory answers at http://ci-server:8642, but an authenticated request failed: CI-Server HTTP 401: Invalid API key",
+    );
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("/ci-memory names the network cause and a timeout, and never prints the key", async () => {
+  const origFetch = global.fetch;
+  try {
+    const api = register();
+    const handler = api._commandHandlers["ci-memory"];
+
+    global.fetch = async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+    };
+    assert.equal(
+      (await handler({})).text,
+      "Companion Intelligence memory is not available at http://ci-server:8642: fetch failed (ECONNREFUSED)",
+    );
+
+    // Node quotes an invalid header value verbatim, and here that value is the key.
+    api.pluginConfig.token = "sk-secret\nkey";
+    global.fetch = async () => {
+      throw new TypeError('Headers.append: "sk-secret\nkey" is an invalid header value.');
+    };
+    const leaked = (await handler({})).text;
+    assert.ok(!leaked.includes("sk-secret"), leaked);
+    assert.match(leaked, /"<api key>" is an invalid header value/);
+
+    api.pluginConfig.token = "tok";
+    api.pluginConfig.timeoutMs = 5;
+    global.fetch = (_url, opts) =>
+      new Promise((_resolve, reject) => {
+        opts.signal.addEventListener("abort", () => reject(new DOMException("This operation was aborted", "AbortError")));
+      });
+    // requestJson unrefs its timer, so hold the loop open until it fires.
+    const keepAlive = setTimeout(() => {}, 1000);
+    try {
+      assert.equal(
+        (await handler({})).text,
+        "Companion Intelligence memory is not available at http://ci-server:8642: CI-Server did not answer within 5ms",
+      );
+    } finally {
+      clearTimeout(keepAlive);
+    }
   } finally {
     global.fetch = origFetch;
     clearFlags();

@@ -450,6 +450,25 @@ function resolveConfig(api, cfg) {
   };
 }
 
+// Request errors end up in /ci-memory replies and in tool results the model reads,
+// so the API key must never appear in one. Node's header validation quotes the
+// offending value verbatim (`Headers.append: "<key>" is an invalid header value.`)
+// when a pasted key carries a stray newline.
+function redactToken(message, config) {
+  return config.token ? message.split(config.token).join("<api key>") : message;
+}
+
+// Node's fetch reports every network failure as a bare "fetch failed" and keeps the
+// reason (ECONNREFUSED, ENOTFOUND, a TLS error) on `cause`, and our own timer shows up
+// as "This operation was aborted". Neither tells a wrong address from a slow one.
+function describeTransportError(error, config, timedOut) {
+  if (timedOut) return `CI-Server did not answer within ${config.timeoutMs}ms`;
+  let message = String(error?.message || error);
+  const cause = error?.cause?.code || error?.cause?.message;
+  if (cause && !message.includes(cause)) message += ` (${cause})`;
+  return redactToken(message, config);
+}
+
 async function requestJson(config, path, options = {}) {
   if (!config.url || !config.token) {
     throw new Error("CI-Server URL or token is not configured");
@@ -460,18 +479,24 @@ async function requestJson(config, path, options = {}) {
   timer.unref?.();
 
   try {
-    const res = await fetch(`${config.url}${path}`, {
-      method: options.method || "GET",
-      headers: {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "x-api-key": config.token,
-      },
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
-      signal: controller.signal,
-    });
+    let res;
+    let text;
+    try {
+      res = await fetch(`${config.url}${path}`, {
+        method: options.method || "GET",
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "x-api-key": config.token,
+        },
+        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        signal: controller.signal,
+      });
+      text = await res.text();
+    } catch (error) {
+      throw new Error(describeTransportError(error, config, controller.signal.aborted));
+    }
 
-    const text = await res.text();
     let body = {};
     if (text) {
       try {
@@ -488,7 +513,9 @@ async function requestJson(config, path, options = {}) {
           : typeof body.message === "string"
             ? body.message
             : text.slice(0, 200);
-      throw new Error(`CI-Server HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
+      throw new Error(
+        redactToken(`CI-Server HTTP ${res.status}${detail ? `: ${detail}` : ""}`, config),
+      );
     }
 
     return body;
@@ -1313,22 +1340,42 @@ export default {
 
     // A command handler answers with a reply payload (`{ text }`), not a tool result:
     // OpenClaw reads `text` and shows "No reply was generated" when it is missing.
+    //
+    // GET /api/health is unauthenticated on CI-Server, so passing it proves the
+    // address and nothing about the key. The L0 profile route sits behind the same
+    // API-key guard and memory scope the tools use, so a wrong or revoked key fails
+    // there with the 401/403 the README tells people to look for.
     api.registerCommand({
       name: "ci-memory",
       description: "Check Companion Intelligence memory connectivity.",
       acceptsArgs: false,
-      handler: async () => {
-        const client = createClient(api);
+      handler: async (ctx) => {
+        const client = createClient(api, ctx?.config);
+        const where = client.config.url || "(no URL set)";
         try {
           await client.health();
-          return { text: "Companion Intelligence memory is connected." };
         } catch (error) {
           return {
-            text: `Companion Intelligence memory is not available: ${String(
+            text: `Companion Intelligence memory is not available at ${where}: ${String(
               error?.message || error,
             )}`,
           };
         }
+        if (!featureEnabled("CI_MEMORY_CONTEXT_ENABLED")) {
+          return {
+            text: `Companion Intelligence memory answers at ${where}. The API key was not checked because CI_MEMORY_CONTEXT_ENABLED is off.`,
+          };
+        }
+        try {
+          await client.context();
+        } catch (error) {
+          return {
+            text: `Companion Intelligence memory answers at ${where}, but an authenticated request failed: ${String(
+              error?.message || error,
+            )}`,
+          };
+        }
+        return { text: `Companion Intelligence memory is connected at ${where}.` };
       },
     });
   },
