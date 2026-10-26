@@ -148,10 +148,16 @@ function gatewayTokenTag(token) {
  * Only a `/` that lacks the current token's tag redirects. The token rides in
  * the hash, never in the query.
  *
- * The rest of the query comes along. Companion Memory's "Chat in OpenClaw" opens
+ * The prepared message comes along. Companion Memory's "Chat in OpenClaw" opens
  * `/?title=…&prompt=…&context=…&memoryId=…&memoryKind=…`, and this redirect used to drop all of
- * it, so the prepared message never arrived. The Control UI pre-fills its message box from
- * `?draft=`, so `prompt` is handed over under that name (an explicit `draft` wins).
+ * it, so the message never arrived. The Control UI pre-fills its message box from `?draft=`, so
+ * `prompt` is handed over under that name (an explicit `draft` wins).
+ *
+ * Nothing else in the query is kept. This redirect is the one response that pairs the query with
+ * the real token, and the Control UI acts on more of the query than the draft: `gatewayUrl` asks
+ * it to connect to another gateway, and it hands that gateway the `#token=` it finds next to it.
+ * Carrying the query through would let a link to `/?gatewayUrl=wss://elsewhere` send the token
+ * there after one click on a confirmation dialog.
  *
  * The request target is split on `?` the way isHookPath does it, not parsed with `new URL()`.
  * `new URL()` reads a target that starts with `//` as an authority. `GET //` throws, which an
@@ -167,14 +173,11 @@ function gatewayRootRedirect(rawUrl, token) {
   const tag = gatewayTokenTag(token);
   if (query.get(TOKEN_TAG_PARAM) === tag) return null;
 
-  query.delete("token");
-  query.delete(TOKEN_TAG_PARAM);
-  if (query.has("prompt")) {
-    if (!query.get("draft")) query.set("draft", query.get("prompt"));
-    query.delete("prompt");
-  }
-  query.set(TOKEN_TAG_PARAM, tag);
-  return `/?${query.toString()}#token=${encodeURIComponent(token)}`;
+  const next = new URLSearchParams();
+  const draft = query.get("draft") || query.get("prompt");
+  if (draft) next.set("draft", draft);
+  next.set(TOKEN_TAG_PARAM, tag);
+  return `/?${next.toString()}#token=${encodeURIComponent(token)}`;
 }
 
 module.exports = {

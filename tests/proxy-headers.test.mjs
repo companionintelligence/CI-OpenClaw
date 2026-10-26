@@ -246,11 +246,11 @@ describe("gatewayRootRedirect: the token stays out of the query", () => {
 // Companion Memory's "Chat in OpenClaw" opens the dashboard root with the prepared message in the
 // query. The redirect used to replace the whole query, so OpenClaw opened with an empty box.
 // ---------------------------------------------------------------------------
-describe("gatewayRootRedirect: the rest of the query survives", () => {
+describe("gatewayRootRedirect: Memory's prepared message survives", () => {
   const TAG = gatewayTokenTag(GATEWAY_TOKEN);
   const query = (location) => new URLSearchParams(location.split("#")[0].split("?")[1]);
 
-  test("Memory's prompt becomes the Control UI's draft, and the other fields stay", () => {
+  test("Memory's prompt becomes the Control UI's draft, and nothing else is carried", () => {
     const prompt = "I'd like to talk about \"Coffee with Jordan Lee\":\n\nWhen: Oct 23, 2026";
     const from = "/?" + new URLSearchParams({
       title: "Coffee with Jordan Lee",
@@ -263,11 +263,8 @@ describe("gatewayRootRedirect: the rest of the query survives", () => {
     const q = query(location);
     assert.equal(q.get("draft"), prompt);
     assert.equal(q.has("prompt"), false, "the prompt is not sent twice");
-    assert.equal(q.get("title"), "Coffee with Jordan Lee");
-    assert.equal(q.get("context"), "When: Oct 23, 2026");
-    assert.equal(q.get("memoryId"), "f3c0a6d2-1111-4c1e-9a55-0a1b2c3d4e5f");
-    assert.equal(q.get("memoryKind"), "EventType");
     assert.equal(q.get("ci_auth"), TAG);
+    assert.deepEqual([...q.keys()].sort(), ["ci_auth", "draft"]);
     assert.ok(location.endsWith(`#token=${GATEWAY_TOKEN}`), location);
   });
 
@@ -286,6 +283,24 @@ describe("gatewayRootRedirect: the rest of the query survives", () => {
     const location = gatewayRootRedirect(`/?token=${GATEWAY_TOKEN}&prompt=hi`, GATEWAY_TOKEN);
     assert.ok(!location.split("#")[0].includes(GATEWAY_TOKEN), location);
     assert.equal(query(location).get("draft"), "hi");
+  });
+
+  // The Control UI connects to a `gatewayUrl` from the query, after a confirmation dialog, and
+  // hands it the `#token=` this redirect adds. Kept, a link could ship the token anywhere.
+  test("parameters the Control UI acts on are not carried next to the token", () => {
+    const from = "/?" + new URLSearchParams({
+      gatewayUrl: "wss://attacker.example",
+      password: "x",
+      session: "agent:main:x",
+      draft: "hi",
+    }).toString();
+    const q = query(gatewayRootRedirect(from, GATEWAY_TOKEN));
+    assert.deepEqual([...q.keys()].sort(), ["ci_auth", "draft"]);
+    assert.equal(q.get("draft"), "hi");
+  });
+
+  test("with no prompt or draft only the tag is set", () => {
+    assert.equal(gatewayRootRedirect("/?title=x", GATEWAY_TOKEN), `/?ci_auth=${TAG}#token=${GATEWAY_TOKEN}`);
   });
 
   test("a stale tag is replaced, not duplicated", () => {
