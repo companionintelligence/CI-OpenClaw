@@ -139,10 +139,11 @@ const TOKEN_TAG_KEY = crypto.randomBytes(32);
  * How long a tagged `/` skips the redirect. The tag only says "this URL came out of the redirect",
  * not "this tab holds the token": the Control UI keeps the token in sessionStorage, so a new tab
  * that opens a tagged `/` from history or a bookmark has none. Past this age the same URL goes
- * through the redirect again and gets a fresh `#token=`. Two minutes covers the browser's
- * follow-up request and the loading page's reloads while the gateway starts.
+ * through the redirect again and gets a fresh `#token=`. 30 seconds covers the browser's
+ * follow-up request. A later reload of the same `/` (the loading page reloads while the gateway
+ * starts) is simply redirected again, keeping its hash in sync.
  */
-const TOKEN_TAG_TTL_MS = 2 * 60 * 1000;
+const TOKEN_TAG_TTL_MS = 30 * 1000;
 
 /** How far into the future a tag's time may be, for a wall clock that steps back a little. */
 const TOKEN_TAG_CLOCK_SLACK_MS = 5 * 1000;
