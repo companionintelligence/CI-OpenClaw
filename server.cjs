@@ -318,10 +318,11 @@ function proxyToOpenclaw(req, res) {
   // gatewayRootRedirect in proxy-headers.cjs). If setup generated or repaired a
   // token while the browser still has an older dashboard URL, the tag no longer
   // matches and the hash is resynced. A stale token there causes WebSocket auth
-  // failures even though the proxy injects the current Bearer token.
+  // failures even though the proxy injects the current Bearer token. The Location
+  // carries the token, so nothing between here and the browser may cache it.
   const rootRedirect = gatewayRootRedirect(req.url, token);
   if (rootRedirect) {
-    res.writeHead(302, { Location: rootRedirect });
+    res.writeHead(302, { Location: rootRedirect, "Cache-Control": "no-store" });
     res.end();
     return;
   }

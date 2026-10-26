@@ -136,6 +136,22 @@ describe("requestAbsoluteUrl: where to send the user back to", () => {
     }
   });
 
+  test("drops the gateway token and the dashboard tag, and keeps the rest", () => {
+    const url = requestAbsoluteUrl({
+      url: "/?token=gateway-secret&ci_auth=0123456789abcdef&session=main",
+      headers: { host: "app.example.com", "x-forwarded-proto": "https" },
+    });
+
+    // The token must not reach the Hub, and a return to /?ci_auth=<tag> would skip
+    // the redirect that hands the Control UI its #token=.
+    assert.equal(url, "https://app.example.com/?session=main");
+    // Any other query comes back exactly as the browser sent it.
+    assert.equal(
+      requestAbsoluteUrl({ url: "/chat?q=a%20b", headers: { host: "app.example.com" } }),
+      "http://app.example.com/chat?q=a%20b",
+    );
+  });
+
   test("trims a whitespace-padded Host instead of dropping the deep-link", () => {
     const url = requestAbsoluteUrl({ url: "/chat", headers: { host: "  192.168.1.9:8080  " } });
 

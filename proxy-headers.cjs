@@ -1,11 +1,12 @@
 /**
- * Header rewriting for the setup server's proxy to the OpenClaw gateway, and the redirect that
+ * Header rewriting for the setup server's proxy to the OpenClaw gateway, plus the redirect that
  * hands the Control UI its token.
  *
  * Extracted from server.cjs for the reason config-reconcile.cjs was: server.cjs binds a port
  * and requires node-pty by absolute container path at import time, so a test cannot require
- * it. This module is pure — no I/O, no side effects on require — so the rules below are
- * actually covered by tests/proxy-headers.test.mjs.
+ * it. This module does no I/O, so the rules below are actually covered by
+ * tests/proxy-headers.test.mjs. Its one piece of state is TOKEN_TAG_KEY, drawn at require time,
+ * so gatewayTokenTag gives a different tag in every process.
  */
 
 const crypto = require("crypto");
@@ -117,41 +118,55 @@ function buildGatewayHeaders({ reqHeaders, url, gatewayHost, token }) {
  *
  * The Control UI reads its gateway token only from the URL hash (`#token=…`), which the browser
  * never sends to a server. So after redirecting `/` to `/#token=…` the next request is a bare
- * `/` again, and the proxy needs something it CAN see to stop redirecting. That used to be
+ * `/` again. The proxy needs something it CAN see to stop redirecting. That used to be
  * `?token=<gateway token>` itself, which put the secret in the request line of every visit:
  * through Cloudflare and Traefik, into their logs and into browser history. The marker carries
- * a fingerprint of the token instead (see gatewayTokenTag), which is useless to anyone who reads
- * it but still changes when the token does.
+ * a keyed fingerprint of the token instead (see gatewayTokenTag), which is useless to anyone who
+ * reads it but still changes when the token does.
  */
 const TOKEN_TAG_PARAM = "ci_auth";
 
 /**
- * A short one-way fingerprint of the gateway token. A new token gives a new tag, so a browser
+ * Key for gatewayTokenTag, made fresh each time the wrapper starts. The tag ends up in proxy logs
+ * and browser history. A plain hash of the token there would let anyone holding those logs
+ * check guesses of a weak, hand-picked token offline. A new key per start only costs one extra
+ * redirect for a browser that opens `/` with a tag from before the restart.
+ */
+const TOKEN_TAG_KEY = crypto.randomBytes(32);
+
+/**
+ * A short keyed fingerprint of the gateway token. A new token gives a new tag, so a browser
  * still holding an old dashboard URL is sent through the redirect again and its hash resynced.
  */
 function gatewayTokenTag(token) {
-  return crypto.createHash("sha256").update(String(token)).digest("hex").slice(0, 16);
+  return crypto.createHmac("sha256", TOKEN_TAG_KEY).update(String(token)).digest("hex").slice(0, 16);
 }
 
 /**
  * Where to send a browser that opened the dashboard root, or null to proxy the request as is.
  *
- * Only `/` redirects, and only when the URL lacks the current token's tag. The token rides in
+ * Only a `/` that lacks the current token's tag redirects. The token rides in
  * the hash, never in the query.
  *
  * The rest of the query comes along. Companion Memory's "Chat in OpenClaw" opens
  * `/?title=…&prompt=…&context=…&memoryId=…&memoryKind=…`, and this redirect used to drop all of
  * it, so the prepared message never arrived. The Control UI pre-fills its message box from
  * `?draft=`, so `prompt` is handed over under that name (an explicit `draft` wins).
+ *
+ * The request target is split on `?` the way isHookPath does it, not parsed with `new URL()`.
+ * `new URL()` reads a target that starts with `//` as an authority. `GET //` throws, which an
+ * async request handler never answers. `GET //chat` comes back with path `/`.
  */
 function gatewayRootRedirect(rawUrl, token) {
   if (!token) return null;
-  const url = new URL(String(rawUrl || "/"), "http://localhost");
-  if (url.pathname !== "/") return null;
+  const target = String(rawUrl || "/").split("#")[0];
+  const queryStart = target.indexOf("?");
+  const pathname = queryStart === -1 ? target : target.slice(0, queryStart);
+  if (pathname !== "/") return null;
+  const query = new URLSearchParams(queryStart === -1 ? "" : target.slice(queryStart + 1));
   const tag = gatewayTokenTag(token);
-  if (url.searchParams.get(TOKEN_TAG_PARAM) === tag) return null;
+  if (query.get(TOKEN_TAG_PARAM) === tag) return null;
 
-  const query = new URLSearchParams(url.searchParams);
   query.delete("token");
   query.delete(TOKEN_TAG_PARAM);
   if (query.has("prompt")) {
@@ -163,7 +178,6 @@ function gatewayRootRedirect(rawUrl, token) {
 }
 
 module.exports = {
-  TOKEN_TAG_PARAM,
   gatewayTokenTag,
   gatewayRootRedirect,
   HOOKS_PATH_PREFIX,
