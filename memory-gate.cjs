@@ -63,8 +63,10 @@ function shouldPromptForState(state) {
   return state === "unconfigured";
 }
 
+const { TOKEN_TAG_PARAM } = require("./proxy-headers.cjs");
+
 /** Query parameters that carry dashboard auth: the gateway token itself, or the root redirect's tag. */
-const DASHBOARD_AUTH_PARAMS = ["token", "ci_auth"];
+const DASHBOARD_AUTH_PARAMS = ["token", TOKEN_TAG_PARAM];
 
 /**
  * The absolute URL the browser used to reach this app, or null when it cannot be
@@ -99,7 +101,7 @@ function requestAbsoluteUrl(req) {
   const path = typeof rawTarget === "string" && rawTarget.startsWith("/") && !rawTarget.startsWith("//") ? rawTarget : "/";
   try {
     const url = new URL(path, `${scheme}://${host}`);
-    // The Hub must never see the gateway token (an old `?token=` bookmark), and a
+    // The Hub must never see the gateway token (an old `?token=` bookmark). A
     // return to `/?ci_auth=<tag>` would skip the root redirect, so the Control UI
     // would come back with no `#token=` to sign in with. Without them, a return to
     // `/` goes through the redirect again and gets a fresh hash.

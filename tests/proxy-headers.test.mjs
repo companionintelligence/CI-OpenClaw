@@ -250,7 +250,7 @@ describe("gatewayRootRedirect: Memory's prepared message survives", () => {
   const TAG = gatewayTokenTag(GATEWAY_TOKEN);
   const query = (location) => new URLSearchParams(location.split("#")[0].split("?")[1]);
 
-  test("Memory's prompt becomes the Control UI's draft, and nothing else is carried", () => {
+  test("Memory's prompt becomes the Control UI's draft and nothing else is carried", () => {
     const prompt = "I'd like to talk about \"Coffee with Jordan Lee\":\n\nWhen: Oct 23, 2026";
     const from = "/?" + new URLSearchParams({
       title: "Coffee with Jordan Lee",
@@ -306,5 +306,12 @@ describe("gatewayRootRedirect: Memory's prepared message survives", () => {
   test("a stale tag is replaced, not duplicated", () => {
     const q = query(gatewayRootRedirect("/?ci_auth=0000000000000000&prompt=hi", GATEWAY_TOKEN));
     assert.deepEqual(q.getAll("ci_auth"), [TAG]);
+  });
+
+  // The Control UI only reads `draft`, so a current tag must not let a `prompt` through untranslated.
+  test("a prompt next to the current tag still becomes the draft", () => {
+    const location = gatewayRootRedirect(`/?ci_auth=${TAG}&prompt=hi`, GATEWAY_TOKEN);
+    assert.equal(location, `/?draft=hi&ci_auth=${TAG}#token=${GATEWAY_TOKEN}`);
+    assert.equal(gatewayRootRedirect(location.split("#")[0], GATEWAY_TOKEN), null);
   });
 });

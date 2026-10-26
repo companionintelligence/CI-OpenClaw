@@ -116,8 +116,9 @@ function buildGatewayHeaders({ reqHeaders, url, gatewayHost, token }) {
 /**
  * Query parameter that marks a dashboard URL as already carrying the current token in its hash.
  *
- * The Control UI reads its gateway token only from the URL hash (`#token=…`), which the browser
- * never sends to a server. So after redirecting `/` to `/#token=…` the next request is a bare
+ * The Control UI takes its gateway token from the URL hash (`#token=…`), which the browser never
+ * sends to a server. (It still accepts `?token=` too, with a console warning that query parameters
+ * reach server logs.) So after redirecting `/` to `/#token=…` the next request is a bare
  * `/` again. The proxy needs something it CAN see to stop redirecting. That used to be
  * `?token=<gateway token>` itself, which put the secret in the request line of every visit:
  * through Cloudflare and Traefik, into their logs and into browser history. The marker carries
@@ -146,16 +147,17 @@ function gatewayTokenTag(token) {
  * Where to send a browser that opened the dashboard root, or null to proxy the request as is.
  *
  * Only a `/` that lacks the current token's tag redirects. The token rides in
- * the hash, never in the query.
+ * the hash, never in the query. A tagged `/` that still carries a `prompt` redirects once more,
+ * because the Control UI ignores `prompt` and only this redirect turns it into `draft`.
  *
  * The prepared message comes along. Companion Memory's "Chat in OpenClaw" opens
- * `/?title=…&prompt=…&context=…&memoryId=…&memoryKind=…`, and this redirect used to drop all of
+ * `/?title=…&prompt=…&context=…&memoryId=…&memoryKind=…`. This redirect used to drop all of
  * it, so the message never arrived. The Control UI pre-fills its message box from `?draft=`, so
  * `prompt` is handed over under that name (an explicit `draft` wins).
  *
  * Nothing else in the query is kept. This redirect is the one response that pairs the query with
- * the real token, and the Control UI acts on more of the query than the draft: `gatewayUrl` asks
- * it to connect to another gateway, and it hands that gateway the `#token=` it finds next to it.
+ * the real token. The Control UI acts on more of the query than the draft: `gatewayUrl` asks it
+ * to connect to another gateway and hand that gateway the `#token=` it finds next to it.
  * Carrying the query through would let a link to `/?gatewayUrl=wss://elsewhere` send the token
  * there after one click on a confirmation dialog.
  *
@@ -171,7 +173,7 @@ function gatewayRootRedirect(rawUrl, token) {
   if (pathname !== "/") return null;
   const query = new URLSearchParams(queryStart === -1 ? "" : target.slice(queryStart + 1));
   const tag = gatewayTokenTag(token);
-  if (query.get(TOKEN_TAG_PARAM) === tag) return null;
+  if (query.get(TOKEN_TAG_PARAM) === tag && !query.has("prompt")) return null;
 
   const next = new URLSearchParams();
   const draft = query.get("draft") || query.get("prompt");
@@ -181,6 +183,7 @@ function gatewayRootRedirect(rawUrl, token) {
 }
 
 module.exports = {
+  TOKEN_TAG_PARAM,
   gatewayTokenTag,
   gatewayRootRedirect,
   HOOKS_PATH_PREFIX,
