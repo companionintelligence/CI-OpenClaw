@@ -955,6 +955,37 @@ function createListIntentsTool(api, runnable) {
   };
 }
 
+// The intents ci_run_intent may run: the ones the catalog lists for this key,
+// under their dotted id and their tool name. CI-Server's execute route also runs
+// tools it keeps out of that catalog (a user's own MCP servers' tools, which it
+// does not re-expose to outside agents), and a name the model makes up or a prompt
+// injection supplies would reach them. Unlabelled intents stay out, as they did
+// when each intent was its own tool. Cached briefly per CI-Server and key, so a
+// run of calls costs one catalog fetch.
+const INTENT_CATALOG_TTL_MS = 5 * 60 * 1000;
+let intentCatalogCache = null;
+
+async function catalogIntentNames(api, config, { fresh = false } = {}) {
+  const key = `${config.url}\n${config.token}`;
+  const cached = intentCatalogCache;
+  if (!fresh && cached && cached.key === key && Date.now() - cached.at < INTENT_CATALOG_TTL_MS) {
+    return cached.names;
+  }
+  const manifest = await fetchIntentManifest(
+    (path) => requestJson(config, path),
+    (failures) => api.log?.warn?.(`CI-Server intent catalog unavailable to ci_run_intent. Tried ${failures.join("; ")}`),
+  );
+  if (!manifest) return null;
+  const names = new Set();
+  for (const intent of Array.isArray(manifest.intents) ? manifest.intents : []) {
+    if (!intent || !intent.privacy || typeof intent.privacy !== "object") continue;
+    if (typeof intent.name === "string" && intent.name) names.add(intent.name);
+    if (typeof intent.tool === "string" && intent.tool) names.add(intent.tool);
+  }
+  intentCatalogCache = { key, at: Date.now(), names };
+  return names;
+}
+
 // POST the tool input to the intent's REST execute path. Tries the canonical
 // agent path first and falls back to the legacy alias when the route is missing
 // (HTTP 404), mirroring fetchIntentManifest's CATALOG_PATHS fallback. Rethrows
@@ -1110,6 +1141,21 @@ function createRunIntentTool(api) {
       }
       const resolved = resolveIntentParams(args);
       if (resolved.error) return jsonResult({ success: false, intent, error: resolved.error });
+      const { config } = createClient(api);
+      let known = await catalogIntentNames(api, config);
+      // A miss may be an intent CI-Server added since the catalog was cached.
+      if (known && !known.has(intent)) known = await catalogIntentNames(api, config, { fresh: true });
+      if (!known) {
+        return jsonResult({ success: false, intent, error: "CI Intent catalog unavailable, so no intent can be run right now" });
+      }
+      if (!known.has(intent)) {
+        return jsonResult({
+          success: false,
+          intent,
+          error: "the intent catalog has no intent by that name",
+          hint: "Check the name with ci_list_intents.",
+        });
+      }
       return runIntentViaRest(api, intent, resolved.params);
     },
   };
@@ -1325,8 +1371,14 @@ export default {
   },
 };
 
+// Tests start from an empty catalog cache.
+function resetIntentCatalogCache() {
+  intentCatalogCache = null;
+}
+
 // Exported for unit tests (does not affect the default-export plugin entrypoint).
 export {
+  resetIntentCatalogCache,
   extractDispatchJobId,
   extractDispatchJobIdFromEvent,
   extractDispatchJobIdFromMessages,

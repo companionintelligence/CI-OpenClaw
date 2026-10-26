@@ -214,8 +214,11 @@ The plugin also consumes CI-Server's curated intent catalog:
   found), POSTing the parameters to CI-Server's generic REST executor
   `POST /api/intents/:name/execute` and returning the structured `ToolResult`.
   Destructive and external intents are queued by the server as an approval card
-  for the owner. The tool tells the agent so. Failures come back as structured
-  error results, never throws.
+  for the owner. The tool tells the agent so. It runs only intents the catalog
+  lists for this key (fetched once and cached for five minutes), so a made-up
+  name can't reach tools CI-Server keeps out of that catalog, such as a user's
+  own MCP servers' tools. Failures come back as structured error results, never
+  throws.
 
   It is one generic tool, not one tool per intent, because OpenClaw takes plugin
   tools only while `register()` runs and only under names listed in

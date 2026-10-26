@@ -8,6 +8,7 @@ import plugin, {
   featureEnabled,
   inferDispatchStatus,
   normalizeBaseUrl,
+  resetIntentCatalogCache,
 } from "./index.js";
 
 const FLAGS = [
@@ -83,6 +84,7 @@ const MANIFEST = {
 // gating tests stay the memory set; the intent-tool tests opt in.
 function register(env = {}) {
   clearFlags();
+  resetIntentCatalogCache();
   process.env.CI_INTENT_TOOLS_ENABLED = "false";
   for (const [k, v] of Object.entries(env)) process.env[k] = v;
   const api = makeApi();
@@ -580,6 +582,7 @@ async function postedBodies(args) {
   const bodies = [];
   const origFetch = global.fetch;
   global.fetch = async (url, opts = {}) => {
+    if ((opts.method || "GET") === "GET") return manifestFetch(url);
     bodies.push(JSON.parse(opts.body));
     return { ok: true, status: 200, text: async () => JSON.stringify({ success: true, data: {} }) };
   };
@@ -614,16 +617,98 @@ test("ci_run_intent refuses params that are not an object and calls nothing", as
 });
 
 test("ci_run_intent says the name is unknown when both execute paths 404", async () => {
+  // A name in the catalog that CI-Server no longer knows (it was removed since).
   const origFetch = global.fetch;
-  global.fetch = async () => ({
-    ok: false,
-    status: 404,
-    text: async () => JSON.stringify({ statusCode: 404, error: "Not Found", message: "Unknown intent: memory_delete" }),
-  });
+  global.fetch = async (url, opts = {}) => {
+    if ((opts.method || "GET") === "GET") return manifestFetch(url);
+    return {
+      ok: false,
+      status: 404,
+      text: async () => JSON.stringify({ statusCode: 404, error: "Not Found", message: "Unknown intent: memory_forget" }),
+    };
+  };
   try {
-    const payload = await runIntent("memory_delete", {});
+    const payload = await runIntent("memory_forget", {});
     assert.equal(payload.success, false);
     assert.match(payload.hint, /ci_list_intents/);
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+// CI-Server's execute route also runs tools it keeps out of the outbound catalog
+// (a user's own MCP servers' tools). The model, or a prompt injection, could name
+// one; only what the catalog lists for this key may run.
+test("ci_run_intent runs only intents the catalog lists, and says so for others", async () => {
+  const posts = [];
+  let gets = 0;
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts = {}) => {
+    if ((opts.method || "GET") === "GET") {
+      gets++;
+      return manifestFetch(url);
+    }
+    posts.push(new URL(String(url)).pathname);
+    return { ok: true, status: 200, text: async () => JSON.stringify({ success: true, data: {} }) };
+  };
+  try {
+    for (const name of ["mcp.outlook.send_mail", "mcp_outlook_send_mail", "memory_delete"]) {
+      const payload = await runIntent(name, {});
+      assert.equal(payload.success, false, name);
+      assert.match(payload.error, /no intent by that name/, name);
+      assert.match(payload.hint, /ci_list_intents/, name);
+    }
+    assert.deepEqual(posts, []);
+    // Both the tool name and the dotted id of a listed intent run.
+    assert.equal((await runIntent("memory_forget", {})).success, true);
+    assert.equal((await runIntent("predictions.forecast", {})).success, true);
+    assert.deepEqual(posts, ["/api/agent/intents/memory_forget/execute", "/api/agent/intents/predictions.forecast/execute"]);
+    assert.ok(gets > 0);
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("ci_run_intent fetches the catalog once for a run of calls, and again on a miss", async () => {
+  const api = register({ CI_INTENT_TOOLS_ENABLED: "true" });
+  const tool = api._toolFactories["ci_run_intent"]();
+  const gets = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts = {}) => {
+    if ((opts.method || "GET") === "GET") {
+      gets.push(new URL(String(url)).pathname);
+      return manifestFetch(url);
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ success: true, data: {} }) };
+  };
+  try {
+    await tool.execute("a", { intent: "memory_forget", params: {} });
+    const afterFirst = gets.length;
+    await tool.execute("b", { intent: "predictions_forecast", params: {} });
+    assert.equal(gets.length, afterFirst, "the second call used the cached catalog");
+    await tool.execute("c", { intent: "not_listed", params: {} });
+    assert.ok(gets.length > afterFirst, "a miss refetches the catalog");
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("ci_run_intent runs nothing when the catalog is unavailable", async () => {
+  const posts = [];
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts = {}) => {
+    if ((opts.method || "GET") === "GET") return { ok: false, status: 503, text: async () => "down" };
+    posts.push(String(url));
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  try {
+    const payload = await runIntent("memory_forget", {});
+    assert.equal(payload.success, false);
+    assert.match(payload.error, /catalog unavailable/);
+    assert.deepEqual(posts, []);
   } finally {
     global.fetch = origFetch;
     clearFlags();
@@ -807,8 +892,9 @@ test("ci_run_intent without an intent name asks for one and calls nothing", asyn
 test("ci_run_intent refuses a name that isn't an intent name and calls nothing", async () => {
   const urls = [];
   const origFetch = global.fetch;
-  global.fetch = async (url) => {
+  global.fetch = async (url, opts = {}) => {
     urls.push(String(url));
+    if ((opts.method || "GET") === "GET") return manifestFetch(url);
     return { ok: true, status: 200, text: async () => "{}" };
   };
   try {
@@ -820,10 +906,11 @@ test("ci_run_intent refuses a name that isn't an intent name and calls nothing",
     assert.deepEqual(urls, []);
     // Tool names and dotted ids still go through.
     await runIntent("memory_forget", {});
-    await runIntent("import.import_inbox", {});
-    assert.equal(urls.length, 2);
-    assert.match(urls[0], /\/api\/agent\/intents\/memory_forget\/execute$/);
-    assert.match(urls[1], /\/api\/agent\/intents\/import\.import_inbox\/execute$/);
+    await runIntent("predictions.forecast", {});
+    const posted = urls.filter((u) => u.endsWith("/execute"));
+    assert.equal(posted.length, 2);
+    assert.match(posted[0], /\/api\/agent\/intents\/memory_forget\/execute$/);
+    assert.match(posted[1], /\/api\/agent\/intents\/predictions\.forecast\/execute$/);
   } finally {
     global.fetch = origFetch;
     clearFlags();
