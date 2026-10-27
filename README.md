@@ -401,6 +401,27 @@ git add openclaw-context/plugins/ci-hub/hub-plugin.mjs openclaw-context/plugins/
 
 Verify against a checkout without changing anything: `npm run check:ci-hub-plugin-drift -- --ci-hub /path/to/CI-Hub`. Only `hub-plugin.mjs` is byte-checked; the `index.js` shim, `openclaw.plugin.json`, and `package.json` siblings are hand-authored (a `node --test` smoke test covers that the shim still loads the bundle synchronously).
 
+<!-- companion-hub-readme-deep-review -->
+
+## Deployment boundary
+
+| Component | Responsibility | Trust boundary |
+|---|---|---|
+| OpenClaw runtime | Runs the agent and its configured skills | Treat prompts, tools, and workspace files as untrusted inputs |
+| CI integration | Connects to the configured CI-Server and Companion Hub endpoints | Use a scoped server key; keep it in the runtime secret store |
+| Container | Provides an isolated execution environment | Do not expose the gateway directly to the public internet |
+
+```mermaid
+flowchart LR
+  User --> Gateway[Private OpenClaw gateway]
+  Gateway --> Agent[Agent runtime and sandbox]
+  Agent --> Memory[Configured CI-Server] 
+  Agent --> Hub[Companion Hub MCP tools]
+  Agent --> Workspace[Mounted workspace]
+```
+
+Keep the gateway on a private network or behind an authenticated reverse proxy. The existing warning about running outside the CI Marketplace deployment applies: a container alone does not make an exposed agent gateway safe.
+
 ## License
 
 [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) — see [LICENSE](LICENSE) and the [License FAQ](docs/License-FAQ.md) for what that means in practice.
