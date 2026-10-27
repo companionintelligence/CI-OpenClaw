@@ -127,16 +127,10 @@ function launcherWithNext(launcher, nextUrl) {
 }
 
 /**
- * Build the Hub `/state` URL for this app, carrying the browser's own Host.
- *
- * `clientHost` is load-bearing: the wrapper calls the Hub server-to-server over
- * the internal docker network, so without it the Hub sees its own container
- * hostname and can never tell a LAN visitor from a remote one — and would
- * therefore never offer the LAN launcher to the callers who need it.
- */
-/**
- * Copy Traefik's signed Hub identity onto the wrapper→Hub state call so the
- * Hub can tell which person opened the app (the S2S call is the app key).
+ * Copy Traefik's signed Hub identity onto the wrapper's memory-connect calls
+ * (`/state` and `/skip`) so the Hub can tell which person opened the app (the
+ * server-to-server call carries only the app key). The Hub checks the signature
+ * against this app's forward-auth key before it trusts the name.
  */
 function forwardAuthHeaders(req) {
   const headers = req && req.headers ? req.headers : {};
@@ -181,6 +175,14 @@ function gateActionReturnPath(referer, ...hosts) {
   return draft ? `/?${new URLSearchParams({ draft })}` : "/";
 }
 
+/**
+ * Build the Hub `/state` URL for this app, carrying the browser's own Host.
+ *
+ * `clientHost` is load-bearing: the wrapper calls the Hub server-to-server over
+ * the internal docker network, so without it the Hub sees its own container
+ * hostname and can never tell a LAN visitor from a remote one — and would
+ * therefore never offer the LAN launcher to the callers who need it.
+ */
 function buildStateUrl(hubBase, appUrn, clientHost) {
   const url = new URL(`${hubBase}/api/memory-connect/apps/${encodeURIComponent(appUrn)}/state`);
   // Trim before forwarding: a whitespace-padded Host would otherwise reach the
