@@ -17,6 +17,7 @@
 #                           Falls back to HUB_URL when Hub injects MCP env at install time.
 #   HUB_APP_SLUG            App slug           (default: openclaw)
 #   OPENCLAW_DATA_DIR       Data dir           (default: /data/.openclaw)
+#   HUB_BOOTSTRAP_TIMEOUT   Whole seconds to wait for each handout request (default: 20)
 #   BOOTSTRAP_FIXTURE_FILE          For tests: read body from this file
 #   BOOTSTRAP_FIXTURE_MANAGED_KEYS  For tests: comma-sep list overriding header parse
 #
@@ -49,12 +50,32 @@ fetch_bootstrap() {
   fi
   url="${CI_HUB_URL}/api/inference/apps/${HUB_APP_SLUG}/bootstrap.env"
   headers_tmp="$(mktemp)"
-  if ! body="$(curl --silent --show-error --fail --max-time 5 --retry 1 --retry-delay 2 -D "${headers_tmp}" "${url}")"; then
+  # The Hub's handout can take 10 s or more: it probes Ollama addresses that may not
+  # answer, 3 s each, before it replies. At 5 s per try both tries ran out and
+  # OpenClaw kept its old inference settings on every start. Connecting gets 5 s,
+  # so a Hub that never accepts costs about 12 s and one that accepts and then
+  # stalls about 42 s.
+  max_time="$(handout_timeout)"
+  if ! body="$(curl --silent --show-error --fail --connect-timeout 5 --max-time "${max_time}" --retry 1 --retry-delay 2 -D "${headers_tmp}" "${url}")"; then
     rm -f "${headers_tmp}"
     return 1
   fi
   MANAGED_KEYS="$(awk -F': ' 'tolower($1) == "x-hub-managed-keys" { sub(/\r$/, "", $2); print $2; exit }' "${headers_tmp}")"
   rm -f "${headers_tmp}"
+}
+
+# HUB_BOOTSTRAP_TIMEOUT as curl --max-time. curl reads 0 as "no limit", so a Hub
+# that stalls would hang the container start, and it exits at once on a
+# non-number, so every handout would be skipped. Either value falls back to 20 s.
+handout_timeout() {
+  t="${HUB_BOOTSTRAP_TIMEOUT:-}"
+  case "${t}" in
+    '') echo 20; return 0 ;;
+    *[!0-9]*) ;;
+    *) if [ "${t}" -gt 0 ] 2>/dev/null; then echo "${t}"; return 0; fi ;;
+  esac
+  log "WARN: HUB_BOOTSTRAP_TIMEOUT=${t} is not a positive whole number of seconds; using 20" >&2
+  echo 20
 }
 
 # Convert a comma-separated key list into an alternation regex pattern.

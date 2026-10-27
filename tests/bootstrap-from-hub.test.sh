@@ -205,6 +205,72 @@ assert_contains "user ANTHROPIC_API_KEY preserved (alias not in fallback)" "ANTH
 assert_not_contains "stale cloud OpenAI key dropped" "CI_CLOUD_OPENAI_API_KEY=stale-oai" "${data_dir}/.env"
 rm -rf "${data_dir}" "${fixture}"
 
+# ─── A slow handout still arrives ───────────────────────────────────────────────
+# The Hub's handout can take 10 s (it probes Ollama addresses that may not answer,
+# 3 s each). With --max-time 5 both tries timed out and OpenClaw kept its old
+# inference settings on every start. This stand-in Hub answers after 6 s.
+slow_hub() {  # $1 delay seconds, $2 file to write the port to
+  python3 -c '
+import http.server, sys, time
+delay = float(sys.argv[1])
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        time.sleep(delay)
+        body = b"DEFAULT_MODEL=qwen3.5:9b\nOPENAI_API_KEY=ollama\n"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Hub-Managed-Keys", "DEFAULT_MODEL,OPENAI_API_KEY")
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+open(sys.argv[2], "w").write(str(s.server_address[1]))
+s.serve_forever()
+' "$1" "$2" &
+}
+
+if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+  echo "test: a handout that takes 6 s to arrive is still merged"
+  data_dir="$(mktemp -d)"
+  port_file="$(mktemp)"
+  slow_hub 6 "${port_file}"
+  hub_pid=$!
+  for _ in $(seq 1 50); do [[ -s "${port_file}" ]] && break; sleep 0.1; done
+  assert_eq "test Hub started" "yes" "$([[ -s "${port_file}" ]] && echo yes || echo no)"
+  OPENCLAW_DATA_DIR="${data_dir}" CI_HUB_URL="http://127.0.0.1:$(cat "${port_file}")" sh "${SCRIPT}" >/dev/null 2>&1 || true
+  touch "${data_dir}/.env"
+  assert_contains "handout merged" "DEFAULT_MODEL=qwen3.5:9b" "${data_dir}/.env"
+
+  echo "test: HUB_BOOTSTRAP_TIMEOUT still bounds the wait"
+  rm -f "${data_dir}/.env"
+  start=$(date +%s)
+  OPENCLAW_DATA_DIR="${data_dir}" HUB_BOOTSTRAP_TIMEOUT=1 CI_HUB_URL="http://127.0.0.1:$(cat "${port_file}")" sh "${SCRIPT}" >/dev/null 2>&1 || true
+  took=$(( $(date +%s) - start ))
+  assert_eq "no handout when the Hub is slower than the limit" "no" "$([[ -s "${data_dir}/.env" ]] && echo yes || echo no)"
+  # 2 tries of 1 s plus the 2 s delay is 4 s. The lower bound proves both tries
+  # waited; a request that failed at once would also leave no handout.
+  assert_eq "waited for both tries (at least 3 s)" "yes" "$([[ ${took} -ge 3 ]] && echo yes || echo no)"
+  assert_eq "gave up within the limit" "yes" "$([[ ${took} -le 6 ]] && echo yes || echo no)"
+  kill "${hub_pid}" 2>/dev/null || true
+  wait "${hub_pid}" 2>/dev/null || true
+  rm -rf "${data_dir}" "${port_file}"
+else
+  echo "test: SKIPPED slow-handout tests (need python3 and curl)" >&2
+fi
+
+echo "test: HUB_BOOTSTRAP_TIMEOUT=0 or a non-number falls back to 20 s"
+# curl reads --max-time 0 as no limit and exits at once on a non-number.
+data_dir="$(mktemp -d)"
+for bad in 0 abc 1.5 -3; do
+  out="$(OPENCLAW_DATA_DIR="${data_dir}" HUB_BOOTSTRAP_TIMEOUT="${bad}" CI_HUB_URL="http://127.0.0.1:1" sh "${SCRIPT}" 2>&1 || true)"
+  assert_eq "HUB_BOOTSTRAP_TIMEOUT=${bad} is refused" "yes" \
+    "$(grep -qF "HUB_BOOTSTRAP_TIMEOUT=${bad} is not a positive whole number of seconds; using 20" <<<"${out}" && echo yes || echo no)"
+done
+out="$(OPENCLAW_DATA_DIR="${data_dir}" HUB_BOOTSTRAP_TIMEOUT=7 CI_HUB_URL="http://127.0.0.1:1" sh "${SCRIPT}" 2>&1 || true)"
+assert_eq "HUB_BOOTSTRAP_TIMEOUT=7 is accepted" "no" "$(grep -qF "not a positive whole number" <<<"${out}" && echo yes || echo no)"
+rm -rf "${data_dir}"
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 echo
 echo "Results: ${PASS} passed, ${FAIL} failed"
