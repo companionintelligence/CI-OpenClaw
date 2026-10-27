@@ -2,10 +2,29 @@
 
 <p align="center"><strong>A Docker image for running OpenClaw on the Companion Intelligence (CI) marketplace.</strong></p>
 
-<p align="center"><a href="https://hub.ci.computer/store/openclaw">Website</a> · <a href="LICENSE">License</a> · <a href="https://docs.ci.computer/docs/reference/open-source-systems">Systems map</a></p>
+[![release](https://img.shields.io/github/v/release/companionintelligence/CI-OpenClaw?style=flat-square&color=0a6358&label=release)](https://github.com/companionintelligence/CI-OpenClaw/releases/latest)
+[![platform](https://img.shields.io/badge/platform-Docker%20%C2%B7%20Companion%20Hub-0a6358?style=flat-square)](https://github.com/companionintelligence/CI-OpenClaw)
+[![License](https://img.shields.io/badge/license-PolyForm%20NC%201.0-0a6358?style=flat-square)](LICENSE)
+[![Discord](https://img.shields.io/badge/chat-Discord-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.com/invite/yQp9hwpzAa)
 
+<p align="center"><a href="https://hub.ci.computer/store/openclaw">Website</a> · <a href="LICENSE">License</a> · <a href="https://docs.ci.computer/docs/reference/open-source-systems">Systems map</a> · <a href="README.md#deployment-boundary">Documentation</a></p>
+
+<p align="center">
+  <a href="https://hub.ci.computer/store/openclaw"><img src="https://img.shields.io/badge/Install%20OpenClaw%20in%20Hub-Install%20OpenClaw%20in%20Hub-0a6358?style=for-the-badge&logo=docker&logoColor=white" alt="Install OpenClaw in Hub" height="30"></a>
+</p>
 
 ⚠️ WARNING: Running this on systems other than the CI marketplace is likely very insecure. This configuration is only secure when running behind the CI app proxy.
+
+
+## Features
+
+| Feature | What it provides |
+|---|---|
+| **OpenClaw runtime** | Run the agent gateway and workspace inside the Hub app container. |
+| **First-run setup** | Configure providers, keys and the gateway through the Companion install flow. |
+| **Memory plugin** | Add optional Memory capture and retrieval through a bundled plugin. |
+| **Hub integration** | Use Hub MCP through the authenticated app proxy when enabled. |
+
 
 ## What is this?
 
@@ -402,6 +421,20 @@ git add openclaw-context/plugins/ci-hub/hub-plugin.mjs openclaw-context/plugins/
 Verify against a checkout without changing anything: `npm run check:ci-hub-plugin-drift -- --ci-hub /path/to/CI-Hub`. Only `hub-plugin.mjs` is byte-checked; the `index.js` shim, `openclaw.plugin.json`, and `package.json` siblings are hand-authored (a `node --test` smoke test covers that the shim still loads the bundle synchronously).
 
 <!-- companion-hub-readme-deep-review -->
+
+
+## How it fits together
+
+The Hub proxy protects the OpenClaw gateway; the setup service writes app configuration, while optional plugins connect the agent to Memory and Hub MCP.
+
+```mermaid
+flowchart LR
+  Hub[Hub authenticated app proxy] --> Setup[First-run setup service]
+  Setup --> Gateway[OpenClaw gateway and agent loop]
+  Gateway --> Workspace[Persistent app workspace]
+  Gateway -. optional .-> Memory[Companion Memory plugin]
+  Gateway -. optional .-> MCP[Hub MCP]
+```
 
 ## Deployment boundary
 
