@@ -450,6 +450,15 @@ function mcpAuthHeaders(env) {
   return key ? { Authorization: `Bearer ${key}` } : {};
 }
 
+/**
+ * Headers for the wrapper's memory-connect `/state` and `/skip` calls: this app's key
+ * plus the person's signed Hub identity. Without the identity the Hub files the
+ * choice for the whole install (see memoryGate.forwardAuthHeaders).
+ */
+function memoryConnectHeaders(env, req) {
+  return { ...mcpAuthHeaders(env), ...memoryGate.forwardAuthHeaders(req) };
+}
+
 /** Whether the request carries the short-lived "deferred" cookie (grace window). */
 function hasMemoryDeferCookie(req) {
   const cookie = req.headers.cookie || "";
@@ -598,7 +607,7 @@ async function maybeServeMemoryGate(req, res) {
     const stateUrl = memoryGate.buildStateUrl(hubBase, appUrn, req.headers.host);
 
     const resp = await fetch(stateUrl, {
-      headers: { ...mcpAuthHeaders(env), ...memoryGate.forwardAuthHeaders(req) },
+      headers: memoryConnectHeaders(env, req),
       signal: AbortSignal.timeout(4000),
     });
     if (!resp.ok) return false;
@@ -668,13 +677,19 @@ async function handleMemoryAction(req, res) {
   const hubBase = hubInternalBase(env);
   if (appUrn && hubBase) {
     try {
-      await fetch(`${hubBase}/api/memory-connect/apps/${encodeURIComponent(appUrn)}/skip`, {
+      // Whose choice this is. `/state` reads the person's own row once it can name
+      // them, so a skip filed without the identity landed on the install-wide row
+      // and the prompt came back on every visit.
+      const resp = await fetch(`${hubBase}/api/memory-connect/apps/${encodeURIComponent(appUrn)}/skip`, {
         method: "POST",
-        headers: mcpAuthHeaders(env),
+        headers: memoryConnectHeaders(env, req),
         signal: AbortSignal.timeout(4000),
       });
-    } catch {
-      // best-effort; the gate simply reappears if this didn't land
+      // A skip the Hub refused puts the person straight back on the gate. This
+      // line is the only trace of why.
+      if (!resp.ok) console.warn(`[ci-memory] Hub did not record "Don't ask again" (HTTP ${resp.status})`);
+    } catch (err) {
+      console.warn(`[ci-memory] could not reach the Hub to record "Don't ask again": ${err && err.message ? err.message : err}`);
     }
   }
   res.writeHead(302, { Location: returnPath });
