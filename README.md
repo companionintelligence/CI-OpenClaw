@@ -2,7 +2,7 @@
 
 <p align="center"><strong>A Docker image for running OpenClaw on the Companion Intelligence (CI) marketplace.</strong></p>
 
-<p align="center"><a href="https://hub.ci.computer/store/openclaw">Website</a> · <a href="LICENSE">License</a></p>
+<p align="center"><a href="https://hub.ci.computer/store/openclaw">Website</a> · <a href="LICENSE">License</a> · <a href="https://docs.ci.computer/docs/reference/open-source-systems">Systems map</a></p>
 
 
 ⚠️ WARNING: Running this on systems other than the CI marketplace is likely very insecure. This configuration is only secure when running behind the CI app proxy.
