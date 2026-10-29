@@ -1,0 +1,88 @@
+{
+  "_": "Written by `ci-video narrate`. Records which line each mp3 is a read of, in which voice, on which engine, at what prosody — so a later edit to any of those can be detected instead of silently keeping the old recording. Commit this with the mp3s.",
+  "engine": "edge",
+  "voice": "en-GB-SoniaNeural",
+  "scenes": {
+    "safe-place": {
+      "text": "An agent that runs commands needs somewhere safe to do it. OpenClaw runs in its own container, and the Hub's authenticated proxy sits in front of its gateway.",
+      "seconds": 10.366,
+      "prosody": {
+        "rate": "-5%",
+        "pitch": "-1Hz",
+        "volume": "+0%"
+      }
+    },
+    "open": {
+      "text": "This is OpenClaw, set up for Companion Hub.",
+      "seconds": 3.604,
+      "prosody": {
+        "rate": "-6%",
+        "pitch": "-2Hz",
+        "volume": "+0%"
+      }
+    },
+    "first-run": {
+      "text": "First run is a setup page. Add your provider keys there. There is no interactive onboarding command, and the gateway token is managed for you.",
+      "seconds": 9.833,
+      "prosody": {
+        "rate": "-5%",
+        "pitch": "-1Hz",
+        "volume": "+0%"
+      }
+    },
+    "chat": {
+      "text": "Then it opens on a chat, ready to go, with a few starter prompts to try.",
+      "seconds": 5.021,
+      "prosody": {
+        "rate": "-3%",
+        "pitch": "+0Hz",
+        "volume": "+0%"
+      }
+    },
+    "toolbox": {
+      "text": "Inside the sandbox it has Python, Node, Homebrew and a headless browser. What it installs under its data folder persists across app updates.",
+      "seconds": 9.938,
+      "prosody": {
+        "rate": "-5%",
+        "pitch": "-1Hz",
+        "volume": "+0%"
+      }
+    },
+    "memory": {
+      "text": "Give it a Companion Memory address and key, and its memory moves there. Each finished turn is saved. The Hub's own wake-up messages are left out, so memory never files them as you.",
+      "seconds": 11.692,
+      "prosody": {
+        "rate": "-5%",
+        "pitch": "-1Hz",
+        "volume": "+0%"
+      }
+    },
+    "approval": {
+      "text": "It can list Companion's intents and run them by name. Destructive or external ones are queued as an approval card for the owner.",
+      "seconds": 8.582,
+      "prosody": {
+        "rate": "-5%",
+        "pitch": "-1Hz",
+        "volume": "+0%"
+      }
+    },
+    "boundary": {
+      "text": "One rule. Keep the gateway on a private network or behind the Hub's proxy. A container alone does not make an agent safe to expose.",
+      "seconds": 9.425,
+      "prosody": {
+        "rate": "-5%",
+        "pitch": "-1Hz",
+        "volume": "+0%"
+      }
+    },
+    "close": {
+      "text": "OpenClaw, from Companion Intelligence. UnCloud your life.",
+      "seconds": 5.319,
+      "prosody": {
+        "rate": "-8%",
+        "pitch": "-2Hz",
+        "volume": "+0%"
+      }
+    }
+  }
+}

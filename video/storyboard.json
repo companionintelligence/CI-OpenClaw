@@ -1,0 +1,239 @@
+{
+  "$schema": "https://raw.githubusercontent.com/companionintelligence/CI-Common/main/packages/video-kit/schema/storyboard.schema.json",
+  "app": {
+    "id": "ci-openclaw",
+    "name": "OpenClaw",
+    "repo": "companionintelligence/CI-OpenClaw",
+    "marketplaceId": "ci-openclaw",
+    "website": "ci.computer"
+  },
+  "meta": {
+    "fps": 30,
+    "transitionSeconds": 0.5,
+    "pacing": "fit",
+    "pacingTail": 0.15
+  },
+  "formats": [
+    "landscape"
+  ],
+  "chapters": {
+    "setup": "Setup",
+    "agent": "The agent"
+  },
+  "media": {
+    "music": "assets/media/ci-campaign-bed-110.mp3",
+    "musicLufs": -22
+  },
+  "scenes": [
+    {
+      "id": "safe-place",
+      "kind": "feature",
+      "seconds": 8.0,
+      "title": "An agent that runs commands needs somewhere to run them",
+      "caption": "Its own container, behind the Hub's login.",
+      "narration": "An agent that runs commands needs somewhere safe to do it. OpenClaw runs in its own container, and the Hub's authenticated proxy sits in front of its gateway.",
+      "items": [
+        {
+          "label": "Runs in",
+          "value": "its own container"
+        },
+        {
+          "label": "Other Hub apps",
+          "value": "out of reach"
+        },
+        {
+          "label": "Gateway",
+          "value": "behind the Hub proxy"
+        }
+      ],
+      "reveal": "paced"
+    },
+    {
+      "id": "open",
+      "kind": "intro",
+      "seconds": 4.5,
+      "title": "OpenClaw",
+      "caption": "OpenClaw, installed from the Hub market.",
+      "narration": "This is OpenClaw, set up for Companion Hub.",
+      "mark": "./assets/app-icon.png",
+      "reveal": "paced",
+      "transition": "hold"
+    },
+    {
+      "id": "first-run",
+      "kind": "feature",
+      "seconds": 8.0,
+      "title": "First run is a form",
+      "caption": "No onboarding command to run.",
+      "narration": "First run is a setup page. Add your provider keys there. There is no interactive onboarding command, and the gateway token is managed for you.",
+      "items": [
+        {
+          "label": "Provider keys",
+          "value": "one setup page"
+        },
+        {
+          "label": "Onboarding CLI",
+          "value": "not needed"
+        },
+        {
+          "label": "Gateway token",
+          "value": "managed for you"
+        }
+      ],
+      "reveal": "paced",
+      "chapter": "setup"
+    },
+    {
+      "id": "chat",
+      "kind": "screen",
+      "chapter": "setup",
+      "seconds": 7,
+      "caption": "It opens ready to chat, with starter prompts.",
+      "narration": "Then it opens on a chat, ready to go, with a few starter prompts to try.",
+      "shots": [
+        {
+          "id": "openclaw-chat",
+          "url": "OpenClaw, installed from the Hub market",
+          "alt": "The OpenClaw chat view: an Assistant marked Ready to chat, four suggested prompts, and a composer with a model picker.",
+          "motion": "push-in",
+          "focus": {
+            "landscape": {
+              "x": 0.2,
+              "y": 0.02,
+              "w": 0.6,
+              "h": 0.55
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "toolbox",
+      "kind": "feature",
+      "seconds": 9.0,
+      "title": "A toolbox that survives updates",
+      "caption": "What it installs under /data stays.",
+      "narration": "Inside the sandbox it has Python, Node, Homebrew and a headless browser. What it installs under its data folder persists across app updates.",
+      "items": [
+        {
+          "label": "Python",
+          "value": "3, with pip, venv and uv"
+        },
+        {
+          "label": "Node",
+          "value": "22"
+        },
+        {
+          "label": "System tools",
+          "value": "Homebrew"
+        },
+        {
+          "label": "Browser",
+          "value": "headless Chromium"
+        }
+      ],
+      "reveal": "paced",
+      "chapter": "agent"
+    },
+    {
+      "id": "memory",
+      "kind": "feature",
+      "seconds": 10.0,
+      "title": "Memory, if you connect it",
+      "caption": "Wake-up messages are left out.",
+      "narration": "Give it a Companion Memory address and key, and its memory moves there. Each finished turn is saved. The Hub's own wake-up messages are left out, so memory never files them as you.",
+      "items": [
+        {
+          "label": "Backend",
+          "value": "Companion Memory"
+        },
+        {
+          "label": "Saved",
+          "value": "each finished turn"
+        },
+        {
+          "label": "Hub wake-ups",
+          "value": "left out"
+        }
+      ],
+      "reveal": "paced",
+      "chapter": "agent"
+    },
+    {
+      "id": "approval",
+      "kind": "feature",
+      "seconds": 9.0,
+      "title": "Destructive actions ask first",
+      "caption": "Queued as an approval card for the owner.",
+      "narration": "It can list Companion's intents and run them by name. Destructive or external ones are queued as an approval card for the owner.",
+      "items": [
+        {
+          "label": "Discover",
+          "value": "the intent catalog"
+        },
+        {
+          "label": "Run",
+          "value": "only what the catalog lists"
+        },
+        {
+          "label": "Destructive or external",
+          "value": "approval card"
+        }
+      ],
+      "reveal": "paced",
+      "chapter": "agent"
+    },
+    {
+      "id": "boundary",
+      "kind": "feature",
+      "seconds": 9.0,
+      "title": "Keep it behind the proxy",
+      "caption": "A container alone does not make a gateway safe.",
+      "narration": "One rule. Keep the gateway on a private network or behind the Hub's proxy. A container alone does not make an agent safe to expose.",
+      "items": [
+        {
+          "label": "Public internet",
+          "value": "not directly"
+        },
+        {
+          "label": "Gateway",
+          "value": "private, or behind the Hub proxy"
+        },
+        {
+          "label": "Memory key",
+          "value": "scoped, in the secret store"
+        }
+      ],
+      "reveal": "paced"
+    },
+    {
+      "id": "close",
+      "kind": "outro",
+      "seconds": 5,
+      "cta": "Install OpenClaw from the Hub market.",
+      "url": "hub.ci.computer/store/openclaw",
+      "narration": "OpenClaw, from Companion Intelligence. UnCloud your life.",
+      "mark": "brand:logo.full"
+    }
+  ],
+  "deliverables": [
+    {
+      "id": "mobile",
+      "kind": "short",
+      "name": "OpenClaw, vertical",
+      "formats": [
+        "portrait"
+      ],
+      "scenes": [
+        "safe-place",
+        "open",
+        "first-run",
+        "approval",
+        "close"
+      ],
+      "meta": {
+        "pacingTail": 0.1
+      }
+    }
+  ]
+}
