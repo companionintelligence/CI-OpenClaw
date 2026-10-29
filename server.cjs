@@ -24,6 +24,12 @@ const {
 } = require("./config-reconcile.cjs");
 const { buildGatewayHeaders, gatewayRootRedirect } = require("./proxy-headers.cjs");
 const { createGatewayHealthTracker, handleGatewayHealthRequest } = require("./gateway-health.cjs");
+const {
+  createHubHandoutRetry,
+  hubHandoutPendingFile,
+  retryIntervalMs,
+  runBootstrapScript,
+} = require("./hub-handout-retry.cjs");
 
 const CONFIG_DIR = process.env.OPENCLAW_DATA_DIR || "/data/.openclaw";
 const PORT = parseInt(process.env.SETUP_PORT || "18789");
@@ -79,6 +85,8 @@ const gatewayHealth = createGatewayHealthTracker();
 // reads this instead of cfg.isConfigured(), which parses openclaw.json on every call and copies
 // the .bak over it when the read fails, so polling it could overwrite a config doctor is writing.
 let gatewayWanted = false;
+// When the last gateway start began (and read .env).
+let gatewayStartedAt = 0;
 
 
 function ensureShellCompletionBypass() {
@@ -188,6 +196,8 @@ function startOpenclaw({ repair = true } = {}) {
   }
 
   openclawStarting = true;
+  // Reconcile reads .env from here on (see applyLateHubHandout).
+  gatewayStartedAt = Date.now();
   const spawnGateway = () => {
     openclawStarting = false;
     console.log("Starting OpenClaw gateway...");
@@ -250,6 +260,63 @@ function startOpenclaw({ repair = true } = {}) {
   console.log("Running openclaw doctor before gateway start...");
   startAfterReconcile()
     .finally(() => runDoctor().finally(spawnGateway));
+}
+
+// The Hub answered after this container started without it (see hub-handout-retry.cjs).
+// Its settings are in .env now, which reaches openclaw.json (reconcile) and the
+// gateway's env only when the gateway starts, so start it again: without doctor when
+// it ran at boot, with it when the gateway never started (a fresh install whose first
+// start found no Hub). A setup terminal or a start already under way is waited out.
+let shuttingDown = false;
+const ENV_PATH = path.join(CONFIG_DIR, ".env");
+
+function readEnvText() {
+  try {
+    return fs.readFileSync(ENV_PATH, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function waitForGatewayIdle() {
+  return new Promise((resolve) => {
+    const check = () => {
+      if (shuttingDown || (!openclawStarting && !ptyProcess)) resolve();
+      else setTimeout(check, 2000).unref();
+    };
+    check();
+  });
+}
+
+let envBeforeHubTry = "";
+
+async function askHubAgain() {
+  // Not while reconcile or the setup terminal may be writing .env too.
+  await waitForGatewayIdle();
+  if (shuttingDown) return;
+  envBeforeHubTry = readEnvText();
+  await runBootstrapScript(path.join(__dirname, "bootstrap-from-hub.sh"));
+}
+
+async function applyLateHubHandout() {
+  if (readEnvText() === envBeforeHubTry) {
+    console.log("[hub-bootstrap] the Hub's handout matches the one the gateway started with");
+    return;
+  }
+  const answeredAt = Date.now();
+  await waitForGatewayIdle();
+  if (shuttingDown) return;
+  // A start since the answer (the setup terminal finishing, say) already read it.
+  if (gatewayStartedAt >= answeredAt) return;
+  if (openclawProcess) {
+    console.log("[hub-bootstrap] restarting the gateway on the Hub's handout");
+    openclawProcess.once("exit", () => {
+      if (!shuttingDown) startOpenclaw({ repair: false });
+    });
+    openclawProcess.kill("SIGTERM");
+    return;
+  }
+  if (gatewayWanted || cfg.isConfigured()) startOpenclaw({ repair: !gatewayWanted });
 }
 
 // Read static files at startup
@@ -984,6 +1051,14 @@ if (cfg.isConfigured()) {
   console.log("OpenClaw not configured, showing setup UI...");
 }
 
+const hubHandoutRetry = createHubHandoutRetry({
+  pendingFile: hubHandoutPendingFile(CONFIG_DIR),
+  runBootstrap: askHubAgain,
+  onAnswered: applyLateHubHandout,
+  intervalMs: retryIntervalMs(process.env.HUB_BOOTSTRAP_RETRY_INTERVAL),
+});
+hubHandoutRetry.start();
+
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Setup server listening on port ${PORT}`);
 });
@@ -1012,6 +1087,9 @@ process.on("unhandledRejection", (reason) => {
 // mid-write and corrupt config or state files.
 process.on("SIGTERM", () => {
   console.log("Received SIGTERM, shutting down...");
+  // Nothing may start the gateway again from here on.
+  shuttingDown = true;
+  hubHandoutRetry.stop();
   if (ptyProcess) {
     try {
       ptyProcess.kill();

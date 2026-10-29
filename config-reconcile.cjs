@@ -1322,8 +1322,9 @@ function createConfigReconciler({
   // Hardware-aware context window injected by the Hub (CI_LLM_NUM_CTX). Caps both
   // the agent's token budget and the native Ollama num_ctx so OpenClaw doesn't pack
   // to Ollama's oversized memory-based default (e.g. 262144 on unified-memory APUs).
-  // Memoized: the value only changes on container restart, and buildOllamaModelEntry
-  // is called once per discovered model.
+  // Memoized for one reconcile, since buildOllamaModelEntry is called once per discovered
+  // model. reconcileConfig drops it: a Hub that answers after start (hub-handout-retry.cjs)
+  // can change it while this process runs.
   let hubNumCtx;
   function resolveHubNumCtx() {
     if (hubNumCtx !== undefined) return hubNumCtx;
@@ -1601,6 +1602,7 @@ function createConfigReconciler({
    * nothing.
    */
   async function reconcileConfig() {
+    hubNumCtx = undefined;
     // A quarantine is not confined to the doctor call — the gateway also rejects the
     // config it reads at spawn, and the fresh-onboarding path skips doctor entirely.
     // Report anything that appeared since our last write before reconciling again.

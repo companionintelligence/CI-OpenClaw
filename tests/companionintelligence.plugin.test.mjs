@@ -148,6 +148,225 @@ await test("unpaired assistant (no preceding user) posts nothing", () =>
     assert.equal(cap.length, 0);
   }));
 
+// A Hub wake runs as a heartbeat turn whose user message is OpenClaw's: the wake as a
+// `System: [<ts>] <text>` line, then the heartbeat instruction. Memory files a turn's
+// user side as the owner's own words, so a wake exchange must never reach it.
+// As the Hub words an event for POST /hooks/wake (wake-text.ts).
+const WAKE_ALERT =
+  "System: [2026-10-29 09:14:02 PDT] CI-Hub [high] app.crashed \u2014 app \"stirling-pdf\" (stirling-pdf:umbrel) stopped unexpectedly. It was previously running.";
+const WAKE_DISPATCH = "System: [2026-10-29 09:15:40 PDT] Memory dispatch job 01a061f8-755e-731f-9d11-a60906902ffa. Fetch the packet from Memory.";
+// openclaw@2026.9.1's default heartbeat instruction.
+const HEARTBEAT =
+  "Follow the heartbeat monitor scratch context when provided. Recurring tasks are automations; create or change their schedules with the automations tool, not heartbeat scratch. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply NO_REPLY.";
+
+await test("agent_end skips a heartbeat turn by its trigger", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw1" });
+    plugin.register(api);
+    await hooks.agent_end({ success: true, messages: [
+      { role: "user", content: "what is on my calendar today?" },
+      { role: "assistant", content: "Dentist at 3." },
+      { role: "user", content: "an unmarked message" },
+      { role: "assistant", content: "the reply to it" },
+    ] }, { sessionId: "s1", trigger: "heartbeat" });
+    assert.equal(cap.filter((c) => c.url === "/api/memory/turn").length, 0);
+  }));
+
+await test("agent_end skips the whole wake exchange, not just the wake (no pairing with the turn before)", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw2" });
+    plugin.register(api);
+    // No trigger in ctx: the text is all there is to go on.
+    await hooks.agent_end({ success: true, messages: [
+      { role: "user", content: "what is on my calendar today?" },
+      { role: "assistant", content: "Dentist at 3." },
+      { role: "user", content: `${WAKE_ALERT}\n\n${HEARTBEAT}` },
+      { role: "assistant", content: "stirling-pdf crashed; I restarted it." },
+    ] }, { sessionId: "s1" });
+    // Dropping only the wake would have posted [calendar question, "stirling-pdf crashed"].
+    assert.equal(cap.filter((c) => c.url === "/api/memory/turn").length, 0);
+  }));
+
+await test("agent_end skips a dispatch wake and one the ci-hub plugin sent as its own message", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw3" });
+    plugin.register(api);
+    await hooks.agent_end({ success: true, messages: [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi" },
+      { role: "user", content: "CI-Hub alert (medium): App fetch-mcp: restart failed." },
+      { role: "assistant", content: "Looking into fetch-mcp." },
+    ] }, { sessionId: "s1" });
+    await hooks.agent_end({ success: true, messages: [
+      { role: "user", content: `${WAKE_DISPATCH}\n\n${HEARTBEAT}` },
+      { role: "assistant", content: "Fetching the packet." },
+    ] }, { sessionId: "s1" });
+    await hooks.agent_end({ success: true, messages: [
+      { role: "user", content: "[OpenClaw heartbeat poll]" },
+      { role: "assistant", content: "HEARTBEAT_OK" },
+    ] }, { sessionId: "s1" });
+    assert.equal(cap.filter((c) => c.url === "/api/memory/turn").length, 0);
+  }));
+
+await test("agent_end keeps the owner's words when queued wake lines ride in front of them", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw4" });
+    plugin.register(api);
+    await hooks.agent_end({ success: true, messages: [
+      { role: "user", content: `${WAKE_ALERT}\n\nremind me to call the plumber` },
+      { role: "assistant", content: "Reminder set." },
+    ] }, { sessionId: "s1", trigger: "user" });
+    const t = cap.find((c) => c.url === "/api/memory/turn");
+    assert.deepEqual(t.body.messages, [
+      { role: "user", content: "remind me to call the plumber" },
+      { role: "assistant", content: "Reminder set." },
+    ]);
+  }));
+
+await test("agent_end keeps a message the owner typed starting with System:", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw5" });
+    plugin.register(api);
+    // OpenClaw rewrites a typed leading "System:" to "System (untrusted):".
+    await hooks.agent_end({ success: true, messages: [
+      { role: "user", content: "System (untrusted): what does this log line mean?" },
+      { role: "assistant", content: "It means the disk is full." },
+    ] }, { sessionId: "s1" });
+    const t = cap.find((c) => c.url === "/api/memory/turn");
+    assert.deepEqual(t.body.messages, [
+      { role: "user", content: "System (untrusted): what does this log line mean?" },
+      { role: "assistant", content: "It means the disk is full." },
+    ]);
+  }));
+
+await test("before_compaction leaves wake exchanges out and keeps the owner's around them", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw6" });
+    plugin.register(api);
+    await hooks.before_compaction({ messages: [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: `${WAKE_ALERT}\n\n${HEARTBEAT}` },
+      { role: "assistant", content: "checking stirling-pdf" },
+      { role: "tool", content: "restart ok" },
+      { role: "assistant", content: "stirling-pdf is back" },
+      { role: "user", content: `${WAKE_DISPATCH}\n\n${HEARTBEAT}` },
+      { role: "assistant", content: "Fetching the packet." },
+      { role: "user", content: "u2" },
+      { role: "assistant", content: "a2" },
+    ] }, { sessionKey: "s2" });
+    const t = cap.find((c) => c.url === "/api/memory/turn");
+    assert.deepEqual(t.body.messages, [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: "u2" },
+      { role: "assistant", content: "a2" },
+    ]);
+  }));
+
+await test("an owner message that drained a queued wake keeps the owner's words, with no trigger to go on", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw12" });
+    plugin.register(api);
+    const messages = [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: `${WAKE_ALERT}\n${WAKE_DISPATCH}\n\nremind me to call the plumber` },
+      { role: "assistant", content: "Reminder set." },
+    ];
+    await hooks.before_compaction({ messages }, { sessionKey: "s2" });
+    await hooks.agent_end({ success: true, messages }, { sessionId: "s2" });
+    const [compacted, ended] = cap.filter((c) => c.url === "/api/memory/turn").map((c) => c.body.messages);
+    assert.deepEqual(compacted, [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: "remind me to call the plumber" },
+      { role: "assistant", content: "Reminder set." },
+    ]);
+    assert.deepEqual(ended, [
+      { role: "user", content: "remind me to call the plumber" },
+      { role: "assistant", content: "Reminder set." },
+    ]);
+  }));
+
+await test("before_compaction of nothing but wake exchanges posts nothing", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw7" });
+    plugin.register(api);
+    await hooks.before_compaction({ messages: [
+      { role: "user", content: `${WAKE_ALERT}\n\n${HEARTBEAT}` },
+      { role: "assistant", content: "checking stirling-pdf" },
+    ] }, { sessionKey: "s2" });
+    assert.equal(cap.filter((c) => c.url === "/api/memory/turn").length, 0);
+  }));
+
+await test("before_compaction leaves out heartbeat turns with no wake in them", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw9" });
+    plugin.register(api);
+    await hooks.before_compaction({ messages: [
+      { role: "user", content: HEARTBEAT },
+      { role: "assistant", content: "NO_REPLY" },
+      { role: "user", content: "Run the following periodic tasks (only those due based on their intervals):\n- inbox: check mail" },
+      { role: "assistant", content: "Nothing due." },
+      { role: "user", content: "Delivery: queued\n\n[OpenClaw heartbeat poll]" },
+      { role: "assistant", content: "NO_REPLY" },
+      { role: "user", content: "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly." },
+      { role: "assistant", content: "HEARTBEAT_OK" },
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+    ] }, { sessionKey: "s2" });
+    const t = cap.find((c) => c.url === "/api/memory/turn");
+    assert.deepEqual(t.body.messages, [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+    ]);
+  }));
+
+await test("before_compaction keeps owner messages that only mention heartbeats or a dispatch job", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw10" });
+    plugin.register(api);
+    const messages = [
+      { role: "user", content: "read HEARTBEAT.md and tell me what's scheduled" },
+      { role: "assistant", content: "Two checks are scheduled." },
+      { role: "user", content: "Memory dispatch job 01a061f8-755e-731f-9d11-a60906902ffa failed, why?" },
+      { role: "assistant", content: "The packet had expired." },
+    ];
+    await hooks.before_compaction({ messages }, { sessionKey: "s2" });
+    const t = cap.find((c) => c.url === "/api/memory/turn");
+    assert.deepEqual(t.body.messages, messages);
+  }));
+
+await test("a caption-less photo after a wake ends the wake, so the reply to it is kept", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw11" });
+    plugin.register(api);
+    await hooks.before_compaction({ messages: [
+      { role: "user", content: `${WAKE_ALERT}\n\n${HEARTBEAT}` },
+      { role: "assistant", content: "checking stirling-pdf" },
+      { role: "user", content: [{ type: "image", source: { type: "base64", data: "AAAA" } }] },
+      { role: "assistant", content: "That's a broken hinge." },
+    ] }, { sessionKey: "s2" });
+    const t = cap.find((c) => c.url === "/api/memory/turn");
+    assert.deepEqual(t.body.messages, [{ role: "assistant", content: "That's a broken hinge." }]);
+  }));
+
+await test("a dispatch wake still checkpoints its job while the exchange stays out of memory", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw8" });
+    plugin.register(api);
+    await hooks.agent_end({ success: true, messages: [
+      { role: "user", content: `${WAKE_DISPATCH}\n\n${HEARTBEAT}` },
+      { role: "assistant", content: "I'll fetch the packet" },
+    ] }, { sessionId: "s1", trigger: "heartbeat" });
+    assert.equal(cap.filter((c) => c.url === "/api/memory/turn").length, 0);
+    assert.ok(cap.some((c) => c.url === "/api/v1/agent/jobs/01a061f8-755e-731f-9d11-a60906902ffa/packet"));
+    const checkpoint = cap.find((c) => c.url === "/api/v1/agent/jobs/01a061f8-755e-731f-9d11-a60906902ffa/checkpoint");
+    assert.ok(checkpoint, "checkpoint POST missing");
+    assert.deepEqual(checkpoint.body.turns, [{ role: "assistant", content: "I'll fetch the packet" }]);
+  }));
+
 const INTENT_MANIFEST = {
   version: "1.0.0",
   domains: [

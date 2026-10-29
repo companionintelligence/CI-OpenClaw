@@ -6,6 +6,13 @@
 # Idempotent and failure-tolerant: if the Hub is unreachable the script
 # logs and exits 0. OpenClaw falls back to its setup wizard.
 #
+# When the Hub can't be reached it also leaves $OPENCLAW_DATA_DIR/.hub-handout-pending
+# behind. Any answer removes the file: a handout once it is written, also an HTTP
+# error, an empty answer or one with no managed keys, since asking again won't change
+# those. While the file is there the setup server runs this script again every
+# HUB_BOOTSTRAP_RETRY_INTERVAL seconds (30 by default; see hub-handout-retry.cjs), so a
+# Hub still starting after a reboot reaches OpenClaw without another restart.
+#
 # The list of Hub-managed keys (which keys to overwrite vs preserve) is
 # read from the X-Hub-Managed-Keys response header. Falls back to a
 # hardcoded list if the header is missing (older Hub).
@@ -22,13 +29,15 @@
 #   BOOTSTRAP_FIXTURE_MANAGED_KEYS  For tests: comma-sep list overriding header parse
 #
 # Outputs:
-#   $OPENCLAW_DATA_DIR/.env   merged in place
+#   $OPENCLAW_DATA_DIR/.env                  merged in place
+#   $OPENCLAW_DATA_DIR/.hub-handout-pending  present while the Hub can't be reached
 set -eu
 
 CI_HUB_URL="${CI_HUB_URL:-${HUB_URL:-http://ci-os-hub:5002}}"
 HUB_APP_SLUG="${HUB_APP_SLUG:-openclaw}"
 DATA_DIR="${OPENCLAW_DATA_DIR:-/data/.openclaw}"
 ENV_FILE="${DATA_DIR}/.env"
+PENDING_FILE="${DATA_DIR}/.hub-handout-pending"
 
 # Fallback list used when the Hub doesn't send X-Hub-Managed-Keys
 # (older Hub releases). Kept in sync with AppBootstrapService's
@@ -44,7 +53,8 @@ log() {
 fetch_bootstrap() {
   MANAGED_KEYS=""
   if [ -n "${BOOTSTRAP_FIXTURE_FILE:-}" ]; then
-    body="$(cat "${BOOTSTRAP_FIXTURE_FILE}")"
+    # A missing fixture is a Hub that can't be reached.
+    body="$(cat "${BOOTSTRAP_FIXTURE_FILE}")" || return 1
     MANAGED_KEYS="${BOOTSTRAP_FIXTURE_MANAGED_KEYS:-}"
     return 0
   fi
@@ -56,9 +66,12 @@ fetch_bootstrap() {
   # so a Hub that never accepts costs about 12 s and one that accepts and then
   # stalls about 42 s.
   max_time="$(handout_timeout)"
-  if ! body="$(curl --silent --show-error --fail --connect-timeout 5 --max-time "${max_time}" --retry 1 --retry-delay 2 -D "${headers_tmp}" "${url}")"; then
+  # Returns curl's own status: 22 is an HTTP error (--fail), so the Hub is up.
+  rc=0
+  body="$(curl --silent --show-error --fail --connect-timeout 5 --max-time "${max_time}" --retry 1 --retry-delay 2 -D "${headers_tmp}" "${url}")" || rc=$?
+  if [ "${rc}" -ne 0 ]; then
     rm -f "${headers_tmp}"
-    return 1
+    return "${rc}"
   fi
   MANAGED_KEYS="$(awk -F': ' 'tolower($1) == "x-hub-managed-keys" { sub(/\r$/, "", $2); print $2; exit }' "${headers_tmp}")"
   rm -f "${headers_tmp}"
@@ -109,17 +122,39 @@ keep_hub_keys() {
   fi
 }
 
+# The Hub can't be reached: the setup server asks again while this file is there.
+# touch, not `: >`: dash exits the whole script when a special builtin's redirection
+# fails.
+mark_pending() {
+  if ! { mkdir -p "${DATA_DIR}" && touch "${PENDING_FILE}"; } 2>/dev/null; then
+    log "WARN: could not write ${PENDING_FILE}; OpenClaw will not ask the Hub again until it restarts"
+  fi
+}
+
+answered() {
+  rm -f "${PENDING_FILE}"
+}
+
 main() {
   log "fetching ${CI_HUB_URL} -> slug=${HUB_APP_SLUG}"
   body=""
   MANAGED_KEYS=""
-  if ! fetch_bootstrap; then
-    log "WARN: Hub unreachable or returned error; leaving .env alone"
+  rc=0
+  fetch_bootstrap || rc=$?
+  if [ "${rc}" -eq 22 ]; then
+    log "WARN: Hub returned an error; leaving .env alone"
+    answered
+    exit 0
+  fi
+  if [ "${rc}" -ne 0 ]; then
+    log "WARN: Hub unreachable; leaving .env alone"
+    mark_pending
     exit 0
   fi
 
   if [ -z "${body}" ]; then
     log "WARN: empty response from Hub; nothing to apply"
+    answered
     exit 0
   fi
 
@@ -135,6 +170,7 @@ main() {
   hub_only="$(printf '%s\n' "${body}" | keep_hub_keys)"
   if [ -z "${hub_only}" ]; then
     log "WARN: Hub response did not contain any managed keys; .env left alone"
+    answered
     exit 0
   fi
 
@@ -143,7 +179,11 @@ main() {
     existing="$(strip_hub_keys < "${ENV_FILE}")"
   fi
 
-  tmp="$(mktemp)"
+  # Beside .env, so the mv below is a rename on the same filesystem.
+  if ! tmp="$(mktemp "${ENV_FILE}.XXXXXX")"; then
+    log "ERROR: cannot write beside ${ENV_FILE}; .env left alone"
+    exit 0
+  fi
   if ! {
     if [ -n "${existing}" ]; then
       printf '%s\n' "${existing}"
@@ -157,8 +197,13 @@ main() {
     exit 0
   fi
 
-  mv "${tmp}" "${ENV_FILE}"
-  chmod 600 "${ENV_FILE}" 2>/dev/null || true
+  chmod 600 "${tmp}" 2>/dev/null || true
+  if ! mv "${tmp}" "${ENV_FILE}"; then
+    rm -f "${tmp}"
+    log "ERROR: could not replace ${ENV_FILE}; .env left alone"
+    exit 0
+  fi
+  answered
   log "wrote ${ENV_FILE} ($(wc -l < "${ENV_FILE}" | tr -d ' ') lines)"
 }
 

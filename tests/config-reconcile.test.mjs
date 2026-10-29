@@ -1077,6 +1077,17 @@ describe("resolvers", () => {
     assert.strictEqual(makeReconciler(dataDir).cfg.resolveHubNumCtx(), 4096);
   });
 
+  test("each reconcile reads CI_LLM_NUM_CTX again (a Hub that answered after start)", async () => {
+    rmDir(dataDir);
+    dataDir = makeDataDir({ config: null, env: { CI_LLM_NUM_CTX: "8192" } });
+    const { cfg } = makeReconciler(dataDir);
+    assert.strictEqual(cfg.resolveHubNumCtx(), 8192);
+    fs.writeFileSync(envPath(dataDir), "CI_LLM_NUM_CTX=32768\n");
+    assert.strictEqual(cfg.resolveHubNumCtx(), 8192, "memoized within a reconcile");
+    await cfg.reconcileConfig();
+    assert.strictEqual(cfg.resolveHubNumCtx(), 32768);
+  });
+
   test("resolveHubNumCtx rejects zero, negative and non-numeric values", () => {
     rmDir(dataDir); // release the beforeEach dir before the loop reassigns dataDir
     for (const raw of ["0", "-1", "abc", ""]) {
