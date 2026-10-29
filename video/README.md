@@ -11,10 +11,9 @@ OpenClaw runs inside the Hub as a container behind the Hub's authenticated proxy
 this repo can boot headlessly: the app only works as a Hub install. So **nothing here is captured**.
 There is no `make.sh`, no `stage.sh` and no `capture` blocks.
 
-- **One screen, committed.** `assets/shots/t` is the OpenClaw listing screenshot from
-  `CI-Marketplace` (`h`), footer reads v2026.6.11. It is a **stale picture of a real install**
-  (footer reads v2026.6.11), not a fresh capture. Re-shoot it from a live Hub install and replace the file when the UI
-  you want to show has moved. No other footage appears; every other beat is a typographic card.
+- **One screen, committed.** `assets/shots/openclaw-chat.png` is the OpenClaw listing screenshot from
+  `CI-Marketplace` (`apps/ci-openclaw/metadata/screenshots/02-chat.png`) and shows the chat view; its footer reads v2026.6.11, so it is stale. It was padded from 16:10 to 16:9 with a blurred copy of itself. It is a **picture of a real install, not a fresh capture**.
+  Re-shoot it from a live Hub install and replace the file when the UI it shows has moved. No other footage appears; every other beat is a typographic card.
 - **Every claim is from this repo's README**, checked against the card it sits on. Nothing is shown
   that the README does not say the app does.
 - **Landscape film plus a vertical short.** `formats` is `["landscape"]` for the film: the only
@@ -40,5 +39,5 @@ Renders are build output: `out/` and `build/` are not committed.
 ## What is committed
 
 `assets/audio/*.mp3` and `narration.json` (narration costs an edge-tts round trip per scene),
-`assets/shots/t` (durable input, see above), `assets/app-icon.png` (the Hub listing logo) and
+`assets/shots/openclaw-chat.png` (durable input, see above), `assets/app-icon.png` (the Hub listing logo) and
 the campaign music bed `assets/media/ci-campaign-bed-110.mp3`, as in Planning and Spellbook.
