@@ -93,6 +93,7 @@ COPY --chown=node:node config-reconcile.cjs /app/config-reconcile.cjs
 COPY --chown=node:node proxy-headers.cjs /app/proxy-headers.cjs
 COPY --chown=node:node memory-gate.cjs /app/memory-gate.cjs
 COPY --chown=node:node gateway-health.cjs /app/gateway-health.cjs
+COPY --chown=node:node hub-handout-retry.cjs /app/hub-handout-retry.cjs
 # Error reporting is opt-out. The DSN is read from the container env at runtime —
 # there is no web bundle here, so nothing is compiled in the way the fleet's Vite
 # apps are. But nothing supplies it at runtime either: the marketplace runs this

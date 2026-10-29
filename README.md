@@ -376,6 +376,8 @@ On CI marketplace installs, the Hub injects MCP credentials automatically (`HUB_
 2. `/app/bootstrap-ci-memory.sh` — optional CI-Server memory plugin
 3. `/app/bootstrap-ci-hub-mcp.sh` — registers the Hub as a native MCP server (`mcp.servers.ci-hub`, Streamable HTTP) and enables the `ci-hub` companion plugin
 
+If the Hub can't be reached at start (it is still starting after a reboot, say), OpenClaw keeps the previous handout and the setup server asks again every 30 s (`HUB_BOOTSTRAP_RETRY_INTERVAL`) until it answers. When the answer changes `.env`, the gateway restarts on it (`hub-handout-retry.cjs`). An HTTP error or an empty answer ends the asking too.
+
 Hub MCP **tools** load through OpenClaw's built-in MCP client via the `mcp.servers.ci-hub` entry — `url: …/api/mcp`, `transport: "streamable-http"`, and `Authorization: "Bearer ${HUB_MCP_API_KEY}"` (an env-template ref, so the key is never written to `openclaw.json`). The `ci-hub` plugin provides the wake endpoint (it also implements app-event SSE, disabled by default). The setup server also reconciles both the native entry and the plugin into `openclaw.json` when credentials are present. Hub-authoritative env keys always win over stale values in `/data/.openclaw/.env`.
 
 Two plugin behaviours are **not** what they used to be:
