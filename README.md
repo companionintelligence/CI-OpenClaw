@@ -218,6 +218,16 @@ does. It registers two OpenClaw hooks:
   context window before they are compacted away (mirrors the Hermes
   `on_pre_compress`).
 
+Neither sends a Hub wake. The Hub wakes OpenClaw through `POST /hooks/wake`, which
+runs a heartbeat turn whose user message is OpenClaw's, not yours: the wake as a
+`System: [<ts>] …` line, then the heartbeat instruction. Memory files a turn's user
+side as your own words. So a heartbeat turn (`ctx.trigger: "heartbeat"`) and any
+exchange whose user message is a wake (a `CI-Hub [<urgency>] …`, `CI-Hub alert (…)`
+or `Memory dispatch job …` line) are left out whole, the agent's reply included. A
+message you send while a wake is still queued keeps your words and loses only the
+wake lines in front of them. What a bystander says to a Home Assistant speaker still
+reads as yours: nothing in the turn tells the two apart.
+
 Both calls carry `platform: "openclaw"` and the session id, are fire-and-forget
 (a failed or unconfigured CI-Server never breaks the turn), and rely on
 CI-Server's server-side dedupe so re-sends are cheap. OpenClaw's bundled

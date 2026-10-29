@@ -602,10 +602,71 @@ function extractMessageText(content) {
   return extractTextBlock(content);
 }
 
-// Normalize OpenClaw transcript messages into CI-Server /api/memory/turn turns.
-// Keeps only user/assistant text (the roles CI-Server accepts) and clamps each
-// message the same way Hermes does.
-function normalizeTurnMessages(messages, limit = MAX_TURN_CONTENT_CHARS) {
+// A Hub wake is not the owner talking. The Hub posts it to OpenClaw's POST /hooks/wake,
+// which queues the text as a system event and runs a heartbeat turn on it. That turn's
+// user message is OpenClaw's: the queued events as `System: [<ts>] <text>` lines, then
+// the heartbeat instruction. Memory stores a turn's user side as the owner's own words,
+// so these turns stay out of the sync.
+//
+// agent_end says which run it was (ctx.trigger). A heartbeat run is skipped whole. In a
+// run the owner started, queued events can still ride in front of their message, so
+// only those lines are dropped. Without a trigger (before_compaction always) the text
+// is all there is: a heartbeat instruction, a message that is only events, events that
+// carry a Hub wake or a wake the ci-hub plugin sent as a message of its own each count
+// as a wake. The last of those also drops an owner message that happened to arrive
+// while a Hub wake was queued, rather than file OpenClaw's text as the owner's.
+//
+// The Hub's wake texts: a dispatch ("Memory dispatch job <id>. Fetch the packet from
+// Memory.") and an event ("CI-Hub [<urgency>] <event> ..."). The ci-hub plugin's own
+// wake route words an event as "CI-Hub alert (<urgency>): ...". A leading `System:` in
+// what a person typed is rewritten to `System (untrusted):` on the way in, so it never
+// reads as an event here.
+const SYSTEM_EVENT_LINE = "System: ";
+const HUB_EVENT_WAKE_RE = /^(?:\[[^\]\n]*\]\s*)?(?:CI-Hub \[[a-z]+\] |CI-Hub alert \()/;
+const HUB_DISPATCH_WAKE_RE =
+  /^(?:\[[^\]\n]*\]\s*)?Memory dispatch job [0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\. Fetch the packet from Memory\.$/;
+// OpenClaw's own heartbeat instructions (2026.9.1 and the older default) and the
+// marker it stores in place of one.
+const HEARTBEAT_PROMPTS = [
+  "Follow the heartbeat monitor scratch context when provided.",
+  "Run the following periodic tasks (only those due based on their intervals):",
+  "Read HEARTBEAT.md if it exists (workspace context).",
+];
+const HEARTBEAT_TRANSCRIPT_MARKER = "[OpenClaw heartbeat poll]";
+
+function isHubWakeText(text) {
+  return HUB_EVENT_WAKE_RE.test(text) || HUB_DISPATCH_WAKE_RE.test(text);
+}
+
+function isHeartbeatInstruction(text) {
+  return (
+    HEARTBEAT_PROMPTS.some((prompt) => text.startsWith(prompt)) ||
+    text.split("\n").some((line) => line.trim() === HEARTBEAT_TRANSCRIPT_MARKER)
+  );
+}
+
+// A transcript user message: the owner's words, or a wake. `content` is the message
+// without the system event lines in front of it. `ownerRun`: the owner started this run.
+function readUserText(text, ownerRun) {
+  const lines = text.split("\n");
+  let eventLines = 0;
+  while (eventLines < lines.length && lines[eventLines].startsWith(SYSTEM_EVENT_LINE)) eventLines++;
+  const content = lines.slice(eventLines).join("\n").trim();
+  if (ownerRun) return { wake: false, content };
+  const events = lines.slice(0, eventLines).map((line) => line.slice(SYSTEM_EVENT_LINE.length));
+  const wake =
+    (eventLines > 0 && !content) ||
+    events.some(isHubWakeText) ||
+    isHubWakeText(content) ||
+    isHeartbeatInstruction(content);
+  return { wake, content };
+}
+
+// OpenClaw transcript messages as user/assistant text (the roles CI-Server accepts),
+// each clamped the same way Hermes does. A user turn that is a wake is kept, marked
+// `wake`, so its replies can be told from the owner's. A user turn with no text (a photo
+// with no caption) is kept empty: it still ends the wake before it.
+function readTurns(messages, { limit = MAX_TURN_CONTENT_CHARS, ownerRun = false } = {}) {
   if (!Array.isArray(messages)) return [];
   const turns = [];
   for (const message of messages) {
@@ -613,16 +674,34 @@ function normalizeTurnMessages(messages, limit = MAX_TURN_CONTENT_CHARS) {
     const role = message.role;
     if (role !== "user" && role !== "assistant") continue;
     const text = extractMessageText(message.content).trim();
-    if (text) turns.push({ role, content: text.slice(0, limit) });
+    if (role === "assistant") {
+      if (text) turns.push({ role, content: text.slice(0, limit) });
+      continue;
+    }
+    const user = text ? readUserText(text, ownerRun) : { wake: false, content: "" };
+    turns.push({ role, content: user.content.slice(0, limit), ...(user.wake ? { wake: true } : {}) });
   }
   return turns;
 }
 
-// The just-completed exchange: the last assistant message and the last user
-// message preceding it. Mirrors Hermes sync_turn(user, assistant); CI-Server
-// dedupes on the server side so re-sends are cheap. Requires BOTH a user and an
-// assistant message — an unpaired assistant (e.g. a proactive/heartbeat turn)
-// is not a conversation exchange and is skipped.
+// The owner's exchanges as CI-Server /api/memory/turn turns. A wake and every reply
+// to it, up to the owner's next message, are left out together: dropping only the wake
+// would file the agent's answer to it under the owner's message before.
+function normalizeTurnMessages(messages, limit = MAX_TURN_CONTENT_CHARS) {
+  const turns = [];
+  let inWake = false;
+  for (const turn of readTurns(messages, { limit })) {
+    if (turn.role === "user") inWake = Boolean(turn.wake);
+    if (!inWake && turn.content) turns.push({ role: turn.role, content: turn.content });
+  }
+  return turns;
+}
+
+// The just-completed exchange, from readTurns: the last assistant message and the
+// last user message with text before it. Mirrors Hermes sync_turn(user, assistant);
+// CI-Server dedupes on the server side so re-sends are cheap. Requires BOTH a user and
+// an assistant message: an unpaired assistant (e.g. a proactive turn) is not a
+// conversation exchange and is skipped. So is a reply to a wake.
 function latestExchange(turns) {
   let assistantIdx = -1;
   for (let i = turns.length - 1; i >= 0; i--) {
@@ -631,10 +710,13 @@ function latestExchange(turns) {
   if (assistantIdx === -1) return [];
   let userIdx = -1;
   for (let i = assistantIdx - 1; i >= 0; i--) {
-    if (turns[i].role === "user") { userIdx = i; break; }
+    if (turns[i].role === "user" && (turns[i].content || turns[i].wake)) { userIdx = i; break; }
   }
-  if (userIdx === -1) return [];
-  return [turns[userIdx], turns[assistantIdx]];
+  if (userIdx === -1 || turns[userIdx].wake) return [];
+  return [
+    { role: "user", content: turns[userIdx].content },
+    { role: "assistant", content: turns[assistantIdx].content },
+  ];
 }
 
 // Fire-and-forget transcript sync. Never throws into the agent run: a failed or
@@ -1309,8 +1391,9 @@ export default {
     // `hooks.allowConversationAccess: true` (the CI bootstrap does this).
     api.on?.("agent_end", async (event, ctx) => {
       const messages = event?.messages;
-      if (event?.success !== false && featureEnabled("CI_MEMORY_TURN_ENABLED")) {
-        const exchange = latestExchange(normalizeTurnMessages(messages));
+      // A heartbeat turn answers OpenClaw's own prompt. A Hub wake runs as one.
+      if (event?.success !== false && ctx?.trigger !== "heartbeat" && featureEnabled("CI_MEMORY_TURN_ENABLED")) {
+        const exchange = latestExchange(readTurns(messages, { ownerRun: ctx?.trigger === "user" }));
         await syncTurn(api, exchange, normalizeString(ctx?.sessionId || ctx?.sessionKey));
       }
       if (!featureEnabled("CI_DISPATCH_ENABLED")) return;
@@ -1334,7 +1417,8 @@ export default {
         }
         return;
       }
-      const turns = normalizeTurnMessages(messages);
+      // Every turn, wakes included: a dispatch job arrives as one.
+      const turns = readTurns(messages);
       const assistant = [...turns].reverse().find((turn) => turn.role === "assistant");
       if (!assistant) return;
       const status = inferDispatchStatus(assistant.content);
