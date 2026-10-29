@@ -608,13 +608,13 @@ function extractMessageText(content) {
 // the heartbeat instruction. Memory stores a turn's user side as the owner's own words,
 // so these turns stay out of the sync.
 //
-// agent_end says which run it was (ctx.trigger). A heartbeat run is skipped whole. In a
-// run the owner started, queued events can still ride in front of their message, so
-// only those lines are dropped. Without a trigger (before_compaction always) the text
-// is all there is: a heartbeat instruction, a message that is only events, events that
-// carry a Hub wake or a wake the ci-hub plugin sent as a message of its own each count
-// as a wake. The last of those also drops an owner message that happened to arrive
-// while a Hub wake was queued, rather than file OpenClaw's text as the owner's.
+// agent_end says which run it was (ctx.trigger). A heartbeat run is skipped whole.
+// Otherwise the event lines in front of a message are dropped: OpenClaw wrote them,
+// the queued Hub wake among them, even when an owner message arrived while a wake was
+// still queued and carries them. What is left is the owner's, unless nothing is left
+// or it is a heartbeat instruction or a wake the ci-hub plugin sent as a message of
+// its own. Only then is the exchange a wake. Without a trigger (before_compaction
+// always) that text is all there is to go on.
 //
 // The Hub's wake texts: a dispatch ("Memory dispatch job <id>. Fetch the packet from
 // Memory.") and an event ("CI-Hub [<urgency>] <event> ..."). The ci-hub plugin's own
@@ -653,12 +653,7 @@ function readUserText(text, ownerRun) {
   while (eventLines < lines.length && lines[eventLines].startsWith(SYSTEM_EVENT_LINE)) eventLines++;
   const content = lines.slice(eventLines).join("\n").trim();
   if (ownerRun) return { wake: false, content };
-  const events = lines.slice(0, eventLines).map((line) => line.slice(SYSTEM_EVENT_LINE.length));
-  const wake =
-    (eventLines > 0 && !content) ||
-    events.some(isHubWakeText) ||
-    isHubWakeText(content) ||
-    isHeartbeatInstruction(content);
+  const wake = !content || isHubWakeText(content) || isHeartbeatInstruction(content);
   return { wake, content };
 }
 

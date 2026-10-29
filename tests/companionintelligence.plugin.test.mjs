@@ -264,6 +264,31 @@ await test("before_compaction leaves wake exchanges out and keeps the owner's ar
     ]);
   }));
 
+await test("an owner message that drained a queued wake keeps the owner's words, with no trigger to go on", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw12" });
+    plugin.register(api);
+    const messages = [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: `${WAKE_ALERT}\n${WAKE_DISPATCH}\n\nremind me to call the plumber` },
+      { role: "assistant", content: "Reminder set." },
+    ];
+    await hooks.before_compaction({ messages }, { sessionKey: "s2" });
+    await hooks.agent_end({ success: true, messages }, { sessionId: "s2" });
+    const [compacted, ended] = cap.filter((c) => c.url === "/api/memory/turn").map((c) => c.body.messages);
+    assert.deepEqual(compacted, [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: "remind me to call the plumber" },
+      { role: "assistant", content: "Reminder set." },
+    ]);
+    assert.deepEqual(ended, [
+      { role: "user", content: "remind me to call the plumber" },
+      { role: "assistant", content: "Reminder set." },
+    ]);
+  }));
+
 await test("before_compaction of nothing but wake exchanges posts nothing", () =>
   withCiServer(created, async (port, cap) => {
     const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw7" });
