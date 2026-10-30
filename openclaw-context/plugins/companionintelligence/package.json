@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "Companion Intelligence memory provider for OpenClaw — passive capture and recall against a self-hosted Companion Memory server.",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "repository": {
     "type": "git",
