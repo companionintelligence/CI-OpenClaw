@@ -223,7 +223,9 @@ runs a heartbeat turn whose user message is OpenClaw's, not yours: the wake as a
 `System: [<ts>] …` line, then the heartbeat instruction. Memory files a turn's user
 side as your own words. So a heartbeat turn (`ctx.trigger: "heartbeat"`) and any
 exchange whose user message is a wake (a `CI-Hub [<urgency>] …`, `CI-Hub alert (…)`
-or `Memory dispatch job …` line) are left out whole, the agent's reply included. A
+or `Memory dispatch job …` line) are left out whole, the agent's reply included.
+Cron jobs and the memory flush (`"cron"`, `"memory"`) answer OpenClaw's prompt too,
+so they stay out as well. A
 message you send while a wake is still queued keeps your words and loses only the
 wake lines in front of them. What a bystander says to a Home Assistant speaker still
 reads as yours: nothing in the turn tells the two apart.
@@ -386,7 +388,7 @@ On CI marketplace installs, the Hub injects MCP credentials automatically (`HUB_
 2. `/app/bootstrap-ci-memory.sh` — optional CI-Server memory plugin
 3. `/app/bootstrap-ci-hub-mcp.sh` — registers the Hub as a native MCP server (`mcp.servers.ci-hub`, Streamable HTTP) and enables the `ci-hub` companion plugin
 
-If the Hub can't be reached at start (it is still starting after a reboot, say), OpenClaw keeps the previous handout and the setup server asks again every 30 s (`HUB_BOOTSTRAP_RETRY_INTERVAL`) until it answers. When the answer changes `.env`, the gateway restarts on it (`hub-handout-retry.cjs`). An HTTP error or an empty answer ends the asking too.
+If the Hub can't be reached at start (it is still starting after a reboot, say), OpenClaw keeps the previous handout and the setup server asks again every 30 s (`HUB_BOOTSTRAP_RETRY_INTERVAL`) until it answers. When the answer changes `.env`, the gateway restarts on it (`hub-handout-retry.cjs`). A 5xx, 408 or 429 keeps it asking. Another HTTP error or an empty answer ends the asking too.
 
 Hub MCP **tools** load through OpenClaw's built-in MCP client via the `mcp.servers.ci-hub` entry — `url: …/api/mcp`, `transport: "streamable-http"`, and `Authorization: "Bearer ${HUB_MCP_API_KEY}"` (an env-template ref, so the key is never written to `openclaw.json`). The `ci-hub` plugin provides the wake endpoint (it also implements app-event SSE, disabled by default). The setup server also reconciles both the native entry and the plugin into `openclaw.json` when credentials are present. Hub-authoritative env keys always win over stale values in `/data/.openclaw/.env`.
 

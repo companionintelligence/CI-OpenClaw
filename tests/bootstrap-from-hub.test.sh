@@ -301,26 +301,36 @@ for answer in "" $'GARBAGE=value\n'; do
 done
 
 if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
-  echo "test: a Hub that answers with an HTTP error counts as an answer"
-  data_dir="$(setup_data)"
-  touch "${data_dir}/.hub-handout-pending"
-  port_file="$(mktemp)"
-  python3 -c '
+  echo "test: a 404 counts as an answer; a 503 from a Hub still starting does not"
+  # 503bare: a status line with no reason phrase ("HTTP/1.1 503" then CRLF).
+  for pair in "404 absent" "503 present" "503bare present"; do
+    code="${pair% *}"
+    want="${pair#* }"
+    data_dir="$(setup_data)"
+    touch "${data_dir}/.hub-handout-pending"
+    port_file="$(mktemp)"
+    python3 -c '
 import http.server, sys
+bare = sys.argv[2].endswith("bare")
+code = int(sys.argv[2].replace("bare", ""))
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
+        if bare:
+            self.wfile.write(("HTTP/1.1 %d\r\nContent-Length: 0\r\n\r\n" % code).encode()); self.close_connection = True
+            return
+        self.send_response(code); self.send_header("Content-Length", "0"); self.end_headers()
     def log_message(self, *a): pass
 s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
 open(sys.argv[1], "w").write(str(s.server_address[1]))
 s.serve_forever()
-' "${port_file}" &
-  hub_pid=$!
-  for _ in $(seq 50); do [[ -s "${port_file}" ]] && break; sleep 0.1; done
-  OPENCLAW_DATA_DIR="${data_dir}" CI_HUB_URL="http://127.0.0.1:$(cat "${port_file}")" "${SCRIPT}" >/dev/null 2>&1 || true
-  assert_file "cleared by a 404" absent "${data_dir}/.hub-handout-pending"
-  kill "${hub_pid}" 2>/dev/null || true
-  rm -rf "${data_dir}" "${port_file}"
+' "${port_file}" "${code}" &
+    hub_pid=$!
+    for _ in $(seq 50); do [[ -s "${port_file}" ]] && break; sleep 0.1; done
+    OPENCLAW_DATA_DIR="${data_dir}" CI_HUB_URL="http://127.0.0.1:$(cat "${port_file}")" "${SCRIPT}" >/dev/null 2>&1 || true
+    assert_file "pending ${want} after a ${code}" "${want}" "${data_dir}/.hub-handout-pending"
+    kill "${hub_pid}" 2>/dev/null || true
+    rm -rf "${data_dir}" "${port_file}"
+  done
 fi
 
 echo "test: a write that fails leaves the pending file so the next try can apply it"

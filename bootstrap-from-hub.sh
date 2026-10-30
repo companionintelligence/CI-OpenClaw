@@ -6,12 +6,13 @@
 # Idempotent and failure-tolerant: if the Hub is unreachable the script
 # logs and exits 0. OpenClaw falls back to its setup wizard.
 #
-# When the Hub can't be reached it also leaves $OPENCLAW_DATA_DIR/.hub-handout-pending
-# behind. Any answer removes the file: a handout once it is written, also an HTTP
-# error, an empty answer or one with no managed keys, since asking again won't change
-# those. While the file is there the setup server runs this script again every
-# HUB_BOOTSTRAP_RETRY_INTERVAL seconds (30 by default; see hub-handout-retry.cjs), so a
-# Hub still starting after a reboot reaches OpenClaw without another restart.
+# When the Hub can't be reached, or answers 5xx, 408 or 429 while it starts, it also
+# leaves $OPENCLAW_DATA_DIR/.hub-handout-pending behind. Any other answer removes the
+# file: a handout once it is written, also another HTTP error, an empty answer or one
+# with no managed keys, since asking again won't change those. While the file is there
+# the setup server runs this script again every HUB_BOOTSTRAP_RETRY_INTERVAL seconds
+# (30 by default; see hub-handout-retry.cjs), so a Hub still starting after a reboot
+# reaches OpenClaw without another restart.
 #
 # The list of Hub-managed keys (which keys to overwrite vs preserve) is
 # read from the X-Hub-Managed-Keys response header. Falls back to a
@@ -66,10 +67,19 @@ fetch_bootstrap() {
   # so a Hub that never accepts costs about 12 s and one that accepts and then
   # stalls about 42 s.
   max_time="$(handout_timeout)"
-  # Returns curl's own status: 22 is an HTTP error (--fail), so the Hub is up.
+  # Returns curl's own status: 22 is an HTTP error (--fail), so the Hub is up. But a Hub
+  # that is still starting, or the proxy in front of it, answers 502, 503 or 504. Asking
+  # again will change that, so a 5xx, 408 or 429 returns 75 (try again) instead. A status
+  # line with no reason phrase ends in the code and a CR, which is stripped.
   rc=0
   body="$(curl --silent --show-error --fail --connect-timeout 5 --max-time "${max_time}" --retry 1 --retry-delay 2 -D "${headers_tmp}" "${url}")" || rc=$?
   if [ "${rc}" -ne 0 ]; then
+    if [ "${rc}" -eq 22 ]; then
+      status="$(awk '/^HTTP\// { code = $2; sub(/\r$/, "", code) } END { print code }' "${headers_tmp}")"
+      case "${status}" in
+        5??|408|429) rc=75 ;;
+      esac
+    fi
     rm -f "${headers_tmp}"
     return "${rc}"
   fi
@@ -147,7 +157,7 @@ main() {
     exit 0
   fi
   if [ "${rc}" -ne 0 ]; then
-    log "WARN: Hub unreachable; leaving .env alone"
+    log "WARN: Hub unreachable or not ready yet; leaving .env alone"
     mark_pending
     exit 0
   fi

@@ -1,6 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { getEventListeners } from "node:events";
 import { mkdtempSync, writeFileSync, rmSync, existsSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -245,6 +246,27 @@ describe("the bootstrap script and the retry together", () => {
     }
   });
 
+  test("runBootstrapScript stops the script when its signal aborts", async () => {
+    const dir = dataDir();
+    const script = join(dir, "slow.sh");
+    // exec: the kill reaches sleep itself. A sleep left behind by a killed sh holds the
+    // test runner's stdout open. The whole file then waits out its 30 s.
+    writeFileSync(script, "#!/bin/sh\nexec sleep 30\n");
+    chmodSync(script, 0o700);
+    try {
+      const errors = [];
+      const controller = new AbortController();
+      const started = Date.now();
+      const done = runBootstrapScript(script, { ...quiet, error: (m) => errors.push(m) }, process.env, controller.signal);
+      setTimeout(() => controller.abort(), 100);
+      await done;
+      assert.ok(Date.now() - started < 10_000, "the script was stopped, not waited out");
+      assert.deepEqual(errors, [], "an abort is not reported as a failure");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("runBootstrapScript resolves when the script can't run", async () => {
     const dir = dataDir();
     const script = join(dir, "not-executable.sh");
@@ -252,8 +274,10 @@ describe("the bootstrap script and the retry together", () => {
     chmodSync(script, 0o600);
     try {
       const errors = [];
-      await runBootstrapScript(script, { ...quiet, error: (m) => errors.push(m) });
+      const controller = new AbortController();
+      await runBootstrapScript(script, { ...quiet, error: (m) => errors.push(m) }, process.env, controller.signal);
       assert.match(errors[0], /could not run/);
+      assert.equal(getEventListeners(controller.signal, "abort").length, 0, "a failed try leaves no listener on the signal");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

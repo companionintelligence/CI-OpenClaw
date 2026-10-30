@@ -19,8 +19,9 @@
  *
  * State (the last-write timestamp, the reported-quarantine set, the num_ctx memo) lives
  * in the closure returned by createConfigReconciler, not at module scope. Production
- * constructs exactly ONE reconciler, so those lifetimes are identical to the original
- * module-level globals; tests construct one per case and get isolation for free.
+ * constructs exactly ONE reconciler, so the first two live as long as the process; the
+ * num_ctx memo is dropped at the start of every reconcile. Tests construct one per case
+ * and get isolation for free.
  */
 
 const fs = require("fs");
@@ -398,8 +399,8 @@ function resolveAgentPrimary({
  * Construct a reconciler bound to one data directory.
  *
  * Production creates exactly one of these at module scope in server.cjs; the closure
- * state below (last-write timestamp, reported quarantines, num_ctx memo) therefore has
- * the same lifetime it had as module globals. Tests create one per case.
+ * state below (last-write timestamp, reported quarantines) therefore lives as long as
+ * the process. The num_ctx memo lasts one reconcile. Tests create one per case.
  *
  * Two env sources are threaded separately and MUST NOT be merged into one record:
  *   - `containerEnv` — the live container environment (process.env in production).

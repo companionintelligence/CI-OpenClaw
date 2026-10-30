@@ -40,9 +40,17 @@ function retryIntervalMs(value, log = console) {
   return DEFAULT_INTERVAL_SECONDS * 1000;
 }
 
-/** Run bootstrap-from-hub.sh with this process's env, its output in the container log. Never rejects. */
-function runBootstrapScript(scriptPath, log = console, env = process.env) {
+/**
+ * Run bootstrap-from-hub.sh with this process's env, its output in the container log. Never
+ * rejects. Aborting `signal` stops the script. A try can wait on curl for about 42 s. Until
+ * then the running child would hold a shutdown open past Docker's stop timeout.
+ */
+function runBootstrapScript(scriptPath, log = console, env = process.env, signal) {
   return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
     let child;
     try {
       child = spawn(scriptPath, [], { stdio: "inherit", env });
@@ -51,11 +59,22 @@ function runBootstrapScript(scriptPath, log = console, env = process.env) {
       resolve();
       return;
     }
-    child.on("error", (error) => {
-      log.error(`[hub-bootstrap] could not run ${scriptPath}: ${error.message}`);
+    // Not spawn's own `signal` option: it drops its listener only on 'exit', which a script
+    // that can't run never emits, so each failed try every 30 s left one on the shared signal.
+    const stop = () => child.kill("SIGTERM");
+    signal?.addEventListener("abort", stop, { once: true });
+    const done = () => {
+      signal?.removeEventListener("abort", stop);
       resolve();
+    };
+    child.on("error", (error) => {
+      // Only a child with no pid failed to start. 'error' also reports a failed kill(). That
+      // child still ends with 'exit'.
+      if (child.pid !== undefined) return;
+      log.error(`[hub-bootstrap] could not run ${scriptPath}: ${error.message}`);
+      done();
     });
-    child.on("exit", () => resolve());
+    child.on("exit", done);
   });
 }
 
