@@ -169,4 +169,6 @@ This removes the plugin, its config entry, and resets the memory slot to
 
 ## License
 
-MIT
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0). The full text is in the repository's [LICENSE](https://github.com/companionintelligence/CI-OpenClaw/blob/master/LICENSE).
+
+Required Notice: Copyright LifeScope INC, DBA Companion Intelligence (https://ci.computer)

@@ -58,7 +58,7 @@ Required inputs: `tag` (Existing release tag to (re)publish (for example 2026.6.
 **Publish memory plugin to npm** — `npm-publish.yml`
 
 ```bash
-gh workflow run npm-publish.yml --repo companionintelligence/CI-OpenClaw --ref master -f tag=<string> -f dry_run=false
+gh workflow run npm-publish.yml --repo companionintelligence/CI-OpenClaw --ref <release-tag> -f tag=<string> -f dry_run=false
 ```
 
 Required inputs: `tag` (Existing release tag to publish (for example 2026.8.1))
