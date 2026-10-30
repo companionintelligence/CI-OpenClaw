@@ -10,35 +10,30 @@ name: Publish memory plugin to npm
 # plugin against what is already published and skips when nothing changed. A skip is
 # always logged; it is never silent.
 #
-# ── ONE-TIME SETUP: the NPM_TOKEN secret ─────────────────────────────────────────
+# ── ONE-TIME SETUP: the npm trusted publisher ────────────────────────────────────
 #
-# This workflow cannot publish until `NPM_TOKEN` exists under
-# Settings → Secrets and variables → Actions.
+# There is no NPM_TOKEN. The `publish` job publishes with npm trusted publishing
+# (OIDC): it asks GitHub for an OIDC token (`id-token: write`) and npm exchanges that
+# for a short-lived publish credential, but only for a package whose Trusted Publisher
+# setting names this repository and this workflow file. A stored token is the wrong
+# tool: CI-Hermes's identical NPM_TOKEN publish failed with E404 because its package
+# disallows bypass-2FA tokens, which npm recommends for every package.
 #
-# npm tokens are owned by a USER, not by an organisation. Create it from an account
-# that is a member of the `companionintelligence` org with publish rights to the
-# scope. On npmjs.com: avatar → Access Tokens → Generate New Token → Granular Access
-# Token, then:
+# The Publish step fails until that setting exists, so add it before dispatching. On
+# npmjs.com: @companionintelligence/openclaw-memory → Settings → Trusted Publisher →
+# GitHub Actions, and enter exactly this (every field is case-sensitive):
 #
-#   * Packages and scopes → "Only select packages and scopes" → @companionintelligence
-#     → **Read and write**.  ← this is the permission that allows publishing
-#   * Organizations → leave at No access. npm's own docs: a token given access to an
-#     organisation "can only be used for managing organization settings and teams or
-#     users" — NOT for publishing that org's packages. Granting only this is the
-#     obvious-looking mistake, and it fails at publish time with a 403.
-#   * Tick the 2FA bypass option, or an interactive 2FA prompt will hang the job.
-#   * Expiration is mandatory on granular tokens, so this needs a calendar reminder
-#     to rotate. A classic "Automation" token is the no-expiry alternative — it also
-#     bypasses 2FA, but it cannot be scope-limited, so it is the weaker choice.
+#   * Organization or user:  companionintelligence
+#   * Repository:            CI-OpenClaw
+#   * Workflow filename:     npm-publish.yml   (the filename only, with the extension)
+#   * Environment name:      leave empty (the publish job declares no `environment:`)
+#   * Allowed actions:       tick `npm publish` (`npm stage publish` is always allowed)
 #
-# Alternative worth evaluating once: npm trusted publishing (OIDC, GA since
-# 2025-07-31) removes the stored token entirely, using `id-token: write` and npm CLI
-# >= 11.5.1 (newer than the npm that ships with Node 22, so it needs an explicit
-# upgrade step). Its interaction with a PRIVATE source repo is the open question:
-# provenance attestations are definitely unavailable from private repos, and since
-# trusted publishing generates provenance automatically, it would at minimum need
-# NPM_CONFIG_PROVENANCE=false. Not adopted here because it is unverified for this
-# repo's shape; the token path above is known to work.
+# A new setting expires unless a publish succeeds within 2 days of creating it, so
+# create it right before the dispatch (delete and recreate it if it lapses). It needs
+# npm CLI >= 11.5.1 — newer than the npm that ships with Node 22, hence the explicit
+# upgrade step — and a GitHub-hosted runner. Provenance is generated automatically,
+# because both this repository and the package are public.
 # >>> ci-local:gated original triggers below, restore with `ci-local restore`
 # on:
 #   push:
@@ -104,6 +99,12 @@ jobs:
     name: Publish to npm
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Trusted publishing (npm OIDC): the package's trusted-publisher setting names this
+    # repo + workflow, and npm mints a short-lived publish credential from the job's
+    # OIDC token. There is no NPM_TOKEN.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout the tag being published
         uses: actions/checkout@v4
@@ -118,32 +119,16 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Require the NPM_TOKEN secret
-        # Skipped for an explicit dry run: dry_run packs and compares without
-        # publishing, so demanding a publish credential would block the one check
-        # worth running BEFORE the token exists. Both forms are matched because a
-        # boolean input arrives as a string over the API.
-        if: >-
-          github.event_name != 'workflow_dispatch'
-          || !(inputs.dry_run == true || inputs.dry_run == 'true')
-        # Fail here with an actionable message rather than 15 minutes later with a raw
-        # npm E401, after the whole CI gate and the pack have run. Mirrors ci.yml's
-        # CI_HUB_READ_TOKEN preflight.
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${NPM_TOKEN}" ]]; then
-            echo "::error::NPM_TOKEN is not set. See the header of this workflow for how to create it (Packages and scopes -> @companionintelligence -> Read and write; NOT the Organizations permission)."
-            exit 1
-          fi
+      - name: Use an npm CLI that supports trusted publishing
+        # Trusted publishing needs npm >= 11.5.1; Node 22 ships an older one.
+        run: npm install -g npm@^11.5.1 && npm --version
 
       - name: Resolve the release tag and npm version
         id: version
         # INPUT_TAG and INPUT_DRY_RUN come through env rather than a ${{ }}
         # interpolation: the dispatch inputs are user-supplied, and interpolating them
         # into the script body would let a crafted value break out of the quoting and
-        # run arbitrary commands in a job that holds the npm token. docker-publish.yml
+        # run arbitrary commands in a job that can publish to npm. docker-publish.yml
         # documents the same rule.
         env:
           INPUT_TAG: ${{ inputs.tag }}
@@ -326,7 +311,6 @@ jobs:
       - name: Publish
         if: steps.decide.outputs.publish == 'true' && steps.version.outputs.dry_run == 'false'
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
