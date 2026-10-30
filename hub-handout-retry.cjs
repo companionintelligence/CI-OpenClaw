@@ -47,21 +47,34 @@ function retryIntervalMs(value, log = console) {
  */
 function runBootstrapScript(scriptPath, log = console, env = process.env, signal) {
   return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
     let child;
     try {
-      child = spawn(scriptPath, [], { stdio: "inherit", env, ...(signal ? { signal } : {}) });
+      child = spawn(scriptPath, [], { stdio: "inherit", env });
     } catch (error) {
       log.error(`[hub-bootstrap] could not run ${scriptPath}: ${error.message}`);
       resolve();
       return;
     }
-    child.on("error", (error) => {
-      if (error?.name !== "AbortError") {
-        log.error(`[hub-bootstrap] could not run ${scriptPath}: ${error.message}`);
-      }
+    // Not spawn's own `signal` option: it drops its listener only on 'exit', which a script
+    // that can't run never emits, so each failed try every 30 s left one on the shared signal.
+    const stop = () => child.kill("SIGTERM");
+    signal?.addEventListener("abort", stop, { once: true });
+    const done = () => {
+      signal?.removeEventListener("abort", stop);
       resolve();
+    };
+    child.on("error", (error) => {
+      // Only a child with no pid failed to start. 'error' also reports a failed kill(). That
+      // child still ends with 'exit'.
+      if (child.pid !== undefined) return;
+      log.error(`[hub-bootstrap] could not run ${scriptPath}: ${error.message}`);
+      done();
     });
-    child.on("exit", () => resolve());
+    child.on("exit", done);
   });
 }
 

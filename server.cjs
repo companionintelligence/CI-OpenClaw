@@ -276,7 +276,8 @@ function startOpenclaw({ repair = true } = {}) {
 // The .env keys and values the gateway gets (cfg.buildChildEnv reads the same record), in key
 // order. The script moves Hub keys to the end. A rewrite that only reorders them is no change.
 function envSnapshot() {
-  return JSON.stringify(Object.entries(cfg.readEnv()).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  const env = cfg.readEnv();
+  return JSON.stringify(Object.keys(env).sort().map((key) => [key, env[key]]));
 }
 
 function waitForGatewayIdle() {

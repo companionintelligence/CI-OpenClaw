@@ -302,7 +302,8 @@ done
 
 if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
   echo "test: a 404 counts as an answer; a 503 from a Hub still starting does not"
-  for pair in "404 absent" "503 present"; do
+  # 503bare: a status line with no reason phrase ("HTTP/1.1 503" then CRLF).
+  for pair in "404 absent" "503 present" "503bare present"; do
     code="${pair% *}"
     want="${pair#* }"
     data_dir="$(setup_data)"
@@ -310,9 +311,13 @@ if command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
     port_file="$(mktemp)"
     python3 -c '
 import http.server, sys
-code = int(sys.argv[2])
+bare = sys.argv[2].endswith("bare")
+code = int(sys.argv[2].replace("bare", ""))
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if bare:
+            self.wfile.write(("HTTP/1.1 %d\r\nContent-Length: 0\r\n\r\n" % code).encode()); self.close_connection = True
+            return
         self.send_response(code); self.send_header("Content-Length", "0"); self.end_headers()
     def log_message(self, *a): pass
 s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)

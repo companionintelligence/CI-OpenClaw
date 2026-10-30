@@ -68,13 +68,14 @@ fetch_bootstrap() {
   # stalls about 42 s.
   max_time="$(handout_timeout)"
   # Returns curl's own status: 22 is an HTTP error (--fail), so the Hub is up. But a Hub
-  # that is still starting, or the proxy in front of it, answers 502, 503 or 504, and
-  # asking again will change that, so a 5xx, 408 or 429 returns 75 (try again) instead.
+  # that is still starting, or the proxy in front of it, answers 502, 503 or 504. Asking
+  # again will change that, so a 5xx, 408 or 429 returns 75 (try again) instead. A status
+  # line with no reason phrase ends in the code and a CR, which is stripped.
   rc=0
   body="$(curl --silent --show-error --fail --connect-timeout 5 --max-time "${max_time}" --retry 1 --retry-delay 2 -D "${headers_tmp}" "${url}")" || rc=$?
   if [ "${rc}" -ne 0 ]; then
     if [ "${rc}" -eq 22 ]; then
-      status="$(awk '/^HTTP\// { code = $2 } END { print code }' "${headers_tmp}")"
+      status="$(awk '/^HTTP\// { code = $2; sub(/\r$/, "", code) } END { print code }' "${headers_tmp}")"
       case "${status}" in
         5??|408|429) rc=75 ;;
       esac

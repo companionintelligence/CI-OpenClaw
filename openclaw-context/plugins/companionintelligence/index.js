@@ -376,18 +376,23 @@ function extractDispatchJobId(text) {
   return source.match(DISPATCH_JOB_LABEL_RE)?.[1] || source.match(DISPATCH_JOB_UUID7_RE)?.[1] || "";
 }
 
-// The newest job named in the transcript. A session can carry several dispatch wakes,
-// and the first one found used to take every later job's checkpoints.
+// The job this run works on: the one its prompt, the newest user message, names. The
+// transcript is the whole session. An older wake belongs to an earlier run, so a later
+// heartbeat or chat must not checkpoint its job. A uuid7 in a tool result or a reply
+// (a memory id, say) is not a job either.
+function lastUserMessageIndex(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "user") return i;
+  }
+  return -1;
+}
+
 function extractDispatchJobIdFromMessages(messages) {
   if (!Array.isArray(messages)) return "";
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    const text =
-      typeof message?.content === "string" ? message.content : extractMessageText(message?.content);
-    const id = extractDispatchJobId(text);
-    if (id) return id;
-  }
-  return "";
+  const i = lastUserMessageIndex(messages);
+  if (i === -1) return "";
+  const content = messages[i].content;
+  return extractDispatchJobId(typeof content === "string" ? content : extractMessageText(content));
 }
 
 function extractDispatchJobIdFromEvent(event) {
@@ -671,7 +676,9 @@ function hasNonTextBlock(content) {
 // OpenClaw transcript messages as user/assistant text (the roles CI-Server accepts),
 // each clamped the same way Hermes does. A user turn that is a wake is kept, marked
 // `wake`, so its replies can be told from the owner's. A user turn with no text (a photo
-// with no caption) is kept empty: it still ends the wake before it.
+// with no caption) is kept empty: it still ends the wake before it. One with neither text
+// nor media (a memory flush's empty prompt) is OpenClaw's, so outside an owner run it
+// reads as a wake.
 function readTurns(messages, { limit = MAX_TURN_CONTENT_CHARS, ownerRun = false } = {}) {
   if (!Array.isArray(messages)) return [];
   const turns = [];
@@ -684,7 +691,7 @@ function readTurns(messages, { limit = MAX_TURN_CONTENT_CHARS, ownerRun = false 
       if (text) turns.push({ role, content: text.slice(0, limit) });
       continue;
     }
-    const user = text ? readUserText(text, ownerRun, hasNonTextBlock(message.content)) : { wake: false, content: "" };
+    const user = readUserText(text, ownerRun, hasNonTextBlock(message.content));
     turns.push({ role, content: user.content.slice(0, limit), ...(user.wake ? { wake: true } : {}) });
   }
   return turns;
@@ -703,25 +710,26 @@ function normalizeTurnMessages(messages, limit = MAX_TURN_CONTENT_CHARS) {
   return turns;
 }
 
-// The just-completed exchange, from readTurns: the last assistant message and the
-// user message right before it. Mirrors Hermes sync_turn(user, assistant); CI-Server
+// The just-completed exchange, from readTurns: the newest user message and the last
+// assistant message after it. Mirrors Hermes sync_turn(user, assistant); CI-Server
 // dedupes on the server side so re-sends are cheap. Requires BOTH a user and an
 // assistant message: an unpaired assistant (e.g. a proactive turn) is not a
 // conversation exchange and is skipped. So is a reply to a wake or to a user message
 // with no text (a caption-less photo, or a memory flush's empty prompt).
 // Looking further back for one with text paired the reply with an older message, a
-// heartbeat instruction among them.
+// heartbeat instruction among them. So did a run that ends with no text (only tool
+// calls), which leaves an earlier run's reply last.
 function latestExchange(turns) {
-  let assistantIdx = -1;
-  for (let i = turns.length - 1; i >= 0; i--) {
-    if (turns[i].role === "assistant") { assistantIdx = i; break; }
-  }
-  if (assistantIdx === -1) return [];
   let userIdx = -1;
-  for (let i = assistantIdx - 1; i >= 0; i--) {
+  for (let i = turns.length - 1; i >= 0; i--) {
     if (turns[i].role === "user") { userIdx = i; break; }
   }
   if (userIdx === -1 || turns[userIdx].wake || !turns[userIdx].content) return [];
+  let assistantIdx = -1;
+  for (let i = turns.length - 1; i > userIdx; i--) {
+    if (turns[i].role === "assistant") { assistantIdx = i; break; }
+  }
+  if (assistantIdx === -1) return [];
   return [
     { role: "user", content: turns[userIdx].content },
     { role: "assistant", content: turns[assistantIdx].content },
@@ -1407,7 +1415,7 @@ export default {
         await syncTurn(api, exchange, normalizeString(ctx?.sessionId || ctx?.sessionKey));
       }
       if (!featureEnabled("CI_DISPATCH_ENABLED")) return;
-      const jobId = extractDispatchJobIdFromMessages(messages) || extractDispatchJobIdFromEvent(event);
+      const jobId = extractDispatchJobIdFromEvent(event);
       if (!jobId) return;
       const client = createClient(api);
       if (!client.config.url || !client.config.token) return;
@@ -1427,8 +1435,10 @@ export default {
         }
         return;
       }
-      // Every turn, wakes included: a dispatch job arrives as one.
-      const turns = readTurns(messages);
+      // Every turn of this run, wakes included: a dispatch job arrives as one. The run starts
+      // at its prompt, so a reply from before it is not this job's.
+      const runMessages = Array.isArray(messages) ? messages.slice(lastUserMessageIndex(messages) + 1) : [];
+      const turns = readTurns(runMessages);
       const assistant = [...turns].reverse().find((turn) => turn.role === "assistant");
       if (!assistant) return;
       const status = inferDispatchStatus(assistant.content);
