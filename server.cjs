@@ -39,9 +39,9 @@ const SKELETON_DIR = "/home-skeleton";
 // Everything that reads or writes openclaw.json / .env lives in config-reconcile.cjs,
 // which has no side effects on require and so can be unit-tested — this file cannot
 // (it binds a port and requires node-pty by absolute container path at import time).
-// Exactly ONE reconciler per process: it carries the last-write timestamp, the
-// reported-quarantine set, and the num_ctx memo, all of which must persist across the
-// repeated reconciles that startOpenclaw triggers on every gateway exit.
+// Exactly ONE reconciler per process: it carries the last-write timestamp and the
+// reported-quarantine set, which must persist across the repeated reconciles that
+// startOpenclaw triggers on every gateway exit. (Its num_ctx memo lasts one reconcile.)
 const cfg = createConfigReconciler({
   configDir: CONFIG_DIR,
   gatewayPort: OPENCLAW_PORT,
@@ -85,8 +85,11 @@ const gatewayHealth = createGatewayHealthTracker();
 // reads this instead of cfg.isConfigured(), which parses openclaw.json on every call and copies
 // the .bak over it when the read fails, so polling it could overwrite a config doctor is writing.
 let gatewayWanted = false;
-// When the last gateway start began (and read .env).
-let gatewayStartedAt = 0;
+// When the last gateway start began (and read .env). Monotonic, like gateway-health.cjs: the
+// wall clock can jump back when NTP first sets a device with no RTC, right after a reboot.
+let gatewayStartedAt = -Infinity;
+// Set on SIGTERM. Nothing may start the gateway again from then on.
+let shuttingDown = false;
 
 
 function ensureShellCompletionBypass() {
@@ -188,6 +191,8 @@ async function runDoctor() {
 }
 
 function startOpenclaw({ repair = true } = {}) {
+  // Every caller (a request, the setup terminal, a late Hub handout) goes through here.
+  if (shuttingDown) return;
   gatewayWanted = true;
   // Guard against re-entry: runDoctor() is async, so without this flag every
   // incoming request would see openclawProcess === null and spawn another doctor run.
@@ -197,7 +202,7 @@ function startOpenclaw({ repair = true } = {}) {
 
   openclawStarting = true;
   // Reconcile reads .env from here on (see applyLateHubHandout).
-  gatewayStartedAt = Date.now();
+  gatewayStartedAt = performance.now();
   const spawnGateway = () => {
     openclawStarting = false;
     console.log("Starting OpenClaw gateway...");
@@ -267,15 +272,11 @@ function startOpenclaw({ repair = true } = {}) {
 // gateway's env only when the gateway starts, so start it again: without doctor when
 // it ran at boot, with it when the gateway never started (a fresh install whose first
 // start found no Hub). A setup terminal or a start already under way is waited out.
-let shuttingDown = false;
-const ENV_PATH = path.join(CONFIG_DIR, ".env");
 
-function readEnvText() {
-  try {
-    return fs.readFileSync(ENV_PATH, "utf8");
-  } catch {
-    return "";
-  }
+// The .env keys and values the gateway gets (cfg.buildChildEnv reads the same record), in key
+// order. The script moves Hub keys to the end. A rewrite that only reorders them is no change.
+function envSnapshot() {
+  return JSON.stringify(Object.entries(cfg.readEnv()).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
 function waitForGatewayIdle() {
@@ -289,21 +290,23 @@ function waitForGatewayIdle() {
 }
 
 let envBeforeHubTry = "";
+// Aborted on SIGTERM, which stops a try that is still waiting on the Hub.
+const hubTryAbort = new AbortController();
 
 async function askHubAgain() {
   // Not while reconcile or the setup terminal may be writing .env too.
   await waitForGatewayIdle();
   if (shuttingDown) return;
-  envBeforeHubTry = readEnvText();
-  await runBootstrapScript(path.join(__dirname, "bootstrap-from-hub.sh"));
+  envBeforeHubTry = envSnapshot();
+  await runBootstrapScript(path.join(__dirname, "bootstrap-from-hub.sh"), console, process.env, hubTryAbort.signal);
 }
 
 async function applyLateHubHandout() {
-  if (readEnvText() === envBeforeHubTry) {
-    console.log("[hub-bootstrap] the Hub's handout matches the one the gateway started with");
+  if (envSnapshot() === envBeforeHubTry) {
+    console.log("[hub-bootstrap] the Hub's answer left .env as it was; the gateway keeps running on it");
     return;
   }
-  const answeredAt = Date.now();
+  const answeredAt = performance.now();
   await waitForGatewayIdle();
   if (shuttingDown) return;
   // A start since the answer (the setup terminal finishing, say) already read it.
@@ -311,7 +314,9 @@ async function applyLateHubHandout() {
   if (openclawProcess) {
     console.log("[hub-bootstrap] restarting the gateway on the Hub's handout");
     openclawProcess.once("exit", () => {
-      if (!shuttingDown) startOpenclaw({ repair: false });
+      // A setup terminal opened while the gateway stopped: onboarding starts it when it
+      // finishes, or the next request does, as it would without this restart.
+      if (!ptyProcess) startOpenclaw({ repair: false });
     });
     openclawProcess.kill("SIGTERM");
     return;
@@ -1087,9 +1092,10 @@ process.on("unhandledRejection", (reason) => {
 // mid-write and corrupt config or state files.
 process.on("SIGTERM", () => {
   console.log("Received SIGTERM, shutting down...");
-  // Nothing may start the gateway again from here on.
+  // Nothing may start the gateway again from here on (startOpenclaw checks it).
   shuttingDown = true;
   hubHandoutRetry.stop();
+  hubTryAbort.abort();
   if (ptyProcess) {
     try {
       ptyProcess.kill();

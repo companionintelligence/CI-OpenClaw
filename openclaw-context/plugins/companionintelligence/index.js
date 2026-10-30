@@ -376,9 +376,12 @@ function extractDispatchJobId(text) {
   return source.match(DISPATCH_JOB_LABEL_RE)?.[1] || source.match(DISPATCH_JOB_UUID7_RE)?.[1] || "";
 }
 
+// The newest job named in the transcript. A session can carry several dispatch wakes,
+// and the first one found used to take every later job's checkpoints.
 function extractDispatchJobIdFromMessages(messages) {
   if (!Array.isArray(messages)) return "";
-  for (const message of messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
     const text =
       typeof message?.content === "string" ? message.content : extractMessageText(message?.content);
     const id = extractDispatchJobId(text);
@@ -633,6 +636,8 @@ const HEARTBEAT_PROMPTS = [
   "Read HEARTBEAT.md if it exists (workspace context).",
 ];
 const HEARTBEAT_TRANSCRIPT_MARKER = "[OpenClaw heartbeat poll]";
+// agent_end ctx.trigger values whose run OpenClaw started on its own prompt.
+const NON_OWNER_TRIGGERS = new Set(["heartbeat", "cron", "memory"]);
 
 function isHubWakeText(text) {
   return HUB_EVENT_WAKE_RE.test(text) || HUB_DISPATCH_WAKE_RE.test(text);
@@ -647,14 +652,20 @@ function isHeartbeatInstruction(text) {
 
 // A transcript user message: the owner's words, or a wake. `content` is the message
 // without the system event lines in front of it. `ownerRun`: the owner started this run.
-function readUserText(text, ownerRun) {
+// `media`: the message also carries something other than text (a photo), so event lines
+// with nothing after them are the owner sending it while a wake was queued.
+function readUserText(text, ownerRun, media = false) {
   const lines = text.split("\n");
   let eventLines = 0;
   while (eventLines < lines.length && lines[eventLines].startsWith(SYSTEM_EVENT_LINE)) eventLines++;
   const content = lines.slice(eventLines).join("\n").trim();
   if (ownerRun) return { wake: false, content };
-  const wake = !content || isHubWakeText(content) || isHeartbeatInstruction(content);
+  const wake = (!content && !media) || isHubWakeText(content) || isHeartbeatInstruction(content);
   return { wake, content };
+}
+
+function hasNonTextBlock(content) {
+  return Array.isArray(content) && content.some((block) => block && typeof block === "object" && !TEXT_BLOCK_TYPES.has(block.type));
 }
 
 // OpenClaw transcript messages as user/assistant text (the roles CI-Server accepts),
@@ -673,7 +684,7 @@ function readTurns(messages, { limit = MAX_TURN_CONTENT_CHARS, ownerRun = false 
       if (text) turns.push({ role, content: text.slice(0, limit) });
       continue;
     }
-    const user = text ? readUserText(text, ownerRun) : { wake: false, content: "" };
+    const user = text ? readUserText(text, ownerRun, hasNonTextBlock(message.content)) : { wake: false, content: "" };
     turns.push({ role, content: user.content.slice(0, limit), ...(user.wake ? { wake: true } : {}) });
   }
   return turns;
@@ -693,10 +704,13 @@ function normalizeTurnMessages(messages, limit = MAX_TURN_CONTENT_CHARS) {
 }
 
 // The just-completed exchange, from readTurns: the last assistant message and the
-// last user message with text before it. Mirrors Hermes sync_turn(user, assistant);
-// CI-Server dedupes on the server side so re-sends are cheap. Requires BOTH a user and
-// an assistant message: an unpaired assistant (e.g. a proactive turn) is not a
-// conversation exchange and is skipped. So is a reply to a wake.
+// user message right before it. Mirrors Hermes sync_turn(user, assistant); CI-Server
+// dedupes on the server side so re-sends are cheap. Requires BOTH a user and an
+// assistant message: an unpaired assistant (e.g. a proactive turn) is not a
+// conversation exchange and is skipped. So is a reply to a wake or to a user message
+// with no text (a caption-less photo, or a memory flush's empty prompt).
+// Looking further back for one with text paired the reply with an older message, a
+// heartbeat instruction among them.
 function latestExchange(turns) {
   let assistantIdx = -1;
   for (let i = turns.length - 1; i >= 0; i--) {
@@ -705,9 +719,9 @@ function latestExchange(turns) {
   if (assistantIdx === -1) return [];
   let userIdx = -1;
   for (let i = assistantIdx - 1; i >= 0; i--) {
-    if (turns[i].role === "user" && (turns[i].content || turns[i].wake)) { userIdx = i; break; }
+    if (turns[i].role === "user") { userIdx = i; break; }
   }
-  if (userIdx === -1 || turns[userIdx].wake) return [];
+  if (userIdx === -1 || turns[userIdx].wake || !turns[userIdx].content) return [];
   return [
     { role: "user", content: turns[userIdx].content },
     { role: "assistant", content: turns[assistantIdx].content },
@@ -1386,8 +1400,9 @@ export default {
     // `hooks.allowConversationAccess: true` (the CI bootstrap does this).
     api.on?.("agent_end", async (event, ctx) => {
       const messages = event?.messages;
-      // A heartbeat turn answers OpenClaw's own prompt. A Hub wake runs as one.
-      if (event?.success !== false && ctx?.trigger !== "heartbeat" && featureEnabled("CI_MEMORY_TURN_ENABLED")) {
+      // These runs answer a prompt OpenClaw wrote, not the owner: a heartbeat (a Hub wake
+      // runs as one), a cron job and the memory flush before a compaction.
+      if (event?.success !== false && !NON_OWNER_TRIGGERS.has(ctx?.trigger) && featureEnabled("CI_MEMORY_TURN_ENABLED")) {
         const exchange = latestExchange(readTurns(messages, { ownerRun: ctx?.trigger === "user" }));
         await syncTurn(api, exchange, normalizeString(ctx?.sessionId || ctx?.sessionKey));
       }

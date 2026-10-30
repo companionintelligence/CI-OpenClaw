@@ -367,6 +367,65 @@ await test("a dispatch wake still checkpoints its job while the exchange stays o
     assert.deepEqual(checkpoint.body.turns, [{ role: "assistant", content: "I'll fetch the packet" }]);
   }));
 
+await test("an owner run's reply to a caption-less photo is not paired with the heartbeat before it", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw13" });
+    plugin.register(api);
+    await hooks.agent_end({ success: true, messages: [
+      { role: "user", content: `${WAKE_ALERT}\n\n${HEARTBEAT}` },
+      { role: "assistant", content: "stirling-pdf crashed; I restarted it." },
+      { role: "user", content: [{ type: "image", source: { type: "base64", data: "AAAA" } }] },
+      { role: "assistant", content: "That's a broken hinge." },
+    ] }, { sessionId: "s1", trigger: "user" });
+    assert.equal(cap.filter((c) => c.url === "/api/memory/turn").length, 0);
+  }));
+
+await test("agent_end skips cron and memory-flush runs by their trigger", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw14" });
+    plugin.register(api);
+    for (const trigger of ["cron", "memory"]) {
+      await hooks.agent_end({ success: true, messages: [
+        { role: "user", content: "Check the inbox and summarize new mail." },
+        { role: "assistant", content: "No new mail." },
+      ] }, { sessionId: "s1", trigger });
+    }
+    assert.equal(cap.filter((c) => c.url === "/api/memory/turn").length, 0);
+  }));
+
+await test("a photo sent while system events are queued is the owner's, not a wake", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw15" });
+    plugin.register(api);
+    await hooks.before_compaction({ messages: [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: [{ type: "text", text: WAKE_ALERT }, { type: "image", source: { type: "base64", data: "AAAA" } }] },
+      { role: "assistant", content: "That's a broken hinge." },
+    ] }, { sessionKey: "s2" });
+    const t = cap.find((c) => c.url === "/api/memory/turn");
+    assert.deepEqual(t.body.messages, [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+      { role: "assistant", content: "That's a broken hinge." },
+    ]);
+  }));
+
+await test("a second dispatch in the session checkpoints its own job, not the first", () =>
+  withCiServer(created, async (port, cap) => {
+    const { api, hooks } = makeApi({ CI_SERVER_URL: `http://127.0.0.1:${port}`, CI_SERVER_TOKEN: "kw16" });
+    plugin.register(api);
+    const second = WAKE_DISPATCH.replace("a60906902ffa", "bbbbbbbbbbbb");
+    await hooks.agent_end({ success: true, messages: [
+      { role: "user", content: `${WAKE_DISPATCH}\n\n${HEARTBEAT}` },
+      { role: "assistant", content: "Fetching the first packet." },
+      { role: "user", content: `${second}\n\n${HEARTBEAT}` },
+      { role: "assistant", content: "Fetching the second packet." },
+    ] }, { sessionId: "s1", trigger: "heartbeat" });
+    const checkpoints = cap.filter((c) => c.url.endsWith("/checkpoint")).map((c) => c.url);
+    assert.deepEqual(checkpoints, ["/api/v1/agent/jobs/01a061f8-755e-731f-9d11-bbbbbbbbbbbb/checkpoint"]);
+  }));
+
 const INTENT_MANIFEST = {
   version: "1.0.0",
   domains: [

@@ -40,19 +40,25 @@ function retryIntervalMs(value, log = console) {
   return DEFAULT_INTERVAL_SECONDS * 1000;
 }
 
-/** Run bootstrap-from-hub.sh with this process's env, its output in the container log. Never rejects. */
-function runBootstrapScript(scriptPath, log = console, env = process.env) {
+/**
+ * Run bootstrap-from-hub.sh with this process's env, its output in the container log. Never
+ * rejects. Aborting `signal` stops the script. A try can wait on curl for about 42 s. Until
+ * then the running child would hold a shutdown open past Docker's stop timeout.
+ */
+function runBootstrapScript(scriptPath, log = console, env = process.env, signal) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(scriptPath, [], { stdio: "inherit", env });
+      child = spawn(scriptPath, [], { stdio: "inherit", env, ...(signal ? { signal } : {}) });
     } catch (error) {
       log.error(`[hub-bootstrap] could not run ${scriptPath}: ${error.message}`);
       resolve();
       return;
     }
     child.on("error", (error) => {
-      log.error(`[hub-bootstrap] could not run ${scriptPath}: ${error.message}`);
+      if (error?.name !== "AbortError") {
+        log.error(`[hub-bootstrap] could not run ${scriptPath}: ${error.message}`);
+      }
       resolve();
     });
     child.on("exit", () => resolve());

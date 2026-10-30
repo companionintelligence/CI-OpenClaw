@@ -245,6 +245,25 @@ describe("the bootstrap script and the retry together", () => {
     }
   });
 
+  test("runBootstrapScript stops the script when its signal aborts", async () => {
+    const dir = dataDir();
+    const script = join(dir, "slow.sh");
+    writeFileSync(script, "#!/bin/sh\nsleep 30\n");
+    chmodSync(script, 0o700);
+    try {
+      const errors = [];
+      const controller = new AbortController();
+      const started = Date.now();
+      const done = runBootstrapScript(script, { ...quiet, error: (m) => errors.push(m) }, process.env, controller.signal);
+      setTimeout(() => controller.abort(), 100);
+      await done;
+      assert.ok(Date.now() - started < 10_000, "the script was stopped, not waited out");
+      assert.deepEqual(errors, [], "an abort is not reported as a failure");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("runBootstrapScript resolves when the script can't run", async () => {
     const dir = dataDir();
     const script = join(dir, "not-executable.sh");
