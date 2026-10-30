@@ -1,0 +1,31 @@
+# rendered videos — regenerate with `./video/make.sh`
+out/
+
+# generated compositions — regenerate with `ci-video build`. Not in the kit's
+# template, but build/ holds a symlink (assets -> ../../assets) and a 19 KB
+# generated index.html per format that is rewritten on every kit upgrade.
+# The local runner rebuilds it before every check/render, so nothing needs it
+# committed.
+build/
+
+# playwright auth state
+.auth/
+
+node_modules/
+
+# npm install writes this when the toolchain is installed; the project has never
+# had one and both make.sh and the workflow use `npm install`, so committing it
+# now would quietly change how the video toolchain resolves.
+package-lock.json
+
+# Captured screenshots ARE committed — fleet-wide policy, decided 2026-08-05.
+#
+# The argument for treating them as build output is that a stale screenshot goes
+# on looking current after the UI has moved. True, but it assumes everyone can
+# re-shoot, and only three of the twelve product videos have a working stage. A
+# gitignored shot set means nobody but the stage's author can render the cut at
+# all, and eleven of twelve cuts were rendering as "capture pending" slates.
+#
+# Committed shots make the render reproducible from a clean clone, and a UI
+# change lands as a reviewable image diff instead of a silent slate. Re-shoot
+# with ./video/make.sh when you move a screen the video covers.
