@@ -16,8 +16,9 @@ name: Publish memory plugin to npm
 # (OIDC): it asks GitHub for an OIDC token (`id-token: write`) and npm exchanges that
 # for a short-lived publish credential, but only for a package whose Trusted Publisher
 # setting names this repository and this workflow file. A stored token is the wrong
-# tool: CI-Hermes's identical NPM_TOKEN publish failed with E404 because its package
-# disallows bypass-2FA tokens, which npm recommends for every package.
+# tool: CI-Hermes's identical NPM_TOKEN publish failed with E404 (its author attributes
+# that to the package disallowing bypass-2FA tokens, which npm recommends for every
+# package; the log itself shows only the E404).
 #
 # The Publish step fails until that setting exists, so add it before dispatching. On
 # npmjs.com: @companionintelligence/openclaw-memory → Settings → Trusted Publisher →
@@ -369,8 +370,11 @@ jobs:
           done
 
           # Deliberately not a silent pass. But the message has to stop the obvious
-          # next move, because the publish DID succeed and npm versions are immutable:
-          # re-running this job republishes an existing version and dies on E403.
+          # next move, because the publish DID succeed and npm versions are immutable.
+          # A re-run BEFORE the version shows on the registry gets past the
+          # already-published guard in the decide step (its `npm view` still 404s), tries
+          # to publish the version again and dies on E403. A re-run AFTER it shows finds
+          # it published and ends green, which is why the message says to wait for it.
           echo "::error::${PACKAGE}@${VERSION} did not resolve within 5 minutes. The publish step itself succeeded, so the version is almost certainly on the registry already. Check https://www.npmjs.com/package/${PACKAGE} or run: npm view ${PACKAGE} versions. Do not re-run this job until the version shows there: before that a re-run tries to publish it again and fails with E403 cannot publish over an existing version. Once it shows, this release is fine, and a re-run finds it already published and ends green."
           if [[ "${saw_tarball}" == "true" ]]; then
             echo "::error::The tarball at ${tarball_url} WAS fetchable, so the artifact exists and only the packument is lagging."
