@@ -371,7 +371,7 @@ jobs:
           # Deliberately not a silent pass. But the message has to stop the obvious
           # next move, because the publish DID succeed and npm versions are immutable:
           # re-running this job republishes an existing version and dies on E403.
-          echo "::error::${PACKAGE}@${VERSION} did not resolve within 5 minutes. The publish step itself succeeded, so the version is almost certainly on the registry already — DO NOT re-run this job, it will fail with E403 cannot publish over an existing version. Check https://www.npmjs.com/package/${PACKAGE} and, if the version is there, this release is fine."
+          echo "::error::${PACKAGE}@${VERSION} did not resolve within 5 minutes. The publish step itself succeeded, so the version is almost certainly on the registry already. Check https://www.npmjs.com/package/${PACKAGE} or run: npm view ${PACKAGE} versions. Do not re-run this job until the version shows there: before that a re-run tries to publish it again and fails with E403 cannot publish over an existing version. Once it shows, this release is fine, and a re-run finds it already published and ends green."
           if [[ "${saw_tarball}" == "true" ]]; then
             echo "::error::The tarball at ${tarball_url} WAS fetchable, so the artifact exists and only the packument is lagging."
           fi
