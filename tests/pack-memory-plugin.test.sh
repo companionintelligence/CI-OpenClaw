@@ -103,6 +103,17 @@ assert_eq "the working tree keeps private: true" "true" \
 assert_eq "the published tarball drops private" "undefined" \
   "$(tar -xzOf "${TGZ_A}" package/package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(String(JSON.parse(s).private)))')"
 
+# The licence drifted once: LICENSE became PolyForm Noncommercial on 2026-09-10 and the
+# plugin went to npm as MIT four days later, with nothing to notice. The tarball carries
+# no LICENSE file, so the package.json field and the README notice are all that travel
+# with it. The notice is read from LICENSE so this follows a change of licensor.
+assert_eq "the published tarball declares the repository's licence" "PolyForm-Noncommercial-1.0.0" \
+  "$(tar -xzOf "${TGZ_A}" package/package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).license))')"
+REQUIRED_NOTICE="$(sed -n 's/^> *\(Required Notice:.*\)$/\1/p' "${HERE}/../LICENSE" | head -n1)"
+assert_contains "LICENSE has a Required Notice line to compare against" "Required Notice:" "${REQUIRED_NOTICE}"
+assert_contains "the packed README carries the Required Notice from LICENSE" "${REQUIRED_NOTICE}" \
+  "$(tar -xzOf "${TGZ_A}" package/README.md)"
+
 echo "the files allowlist covers the plugin directory"
 # The guard that stops the worst failure this script can produce. `files` is a
 # hand-maintained allowlist while the appliance image copies the whole directory, so

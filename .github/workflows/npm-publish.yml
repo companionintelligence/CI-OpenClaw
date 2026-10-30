@@ -34,6 +34,10 @@ name: Publish memory plugin to npm
 # npm CLI >= 11.5.1 — newer than the npm that ships with Node 22, hence the explicit
 # upgrade step — and a GitHub-hosted runner. Provenance is generated automatically,
 # because both this repository and the package are public.
+#
+# Dispatch with `--ref <the release tag>` (a tag cut after this workflow was merged
+# contains it): the provenance names the ref the run started from, so `--ref master`
+# would record master's tip on the day rather than the tag whose tree was published.
 # >>> ci-local:gated original triggers below, restore with `ci-local restore`
 # on:
 #   push:
