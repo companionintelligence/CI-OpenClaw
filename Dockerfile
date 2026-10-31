@@ -81,7 +81,7 @@ RUN printf '#!/bin/bash\necho "Error: apt is not available in this sandbox. Use:
     && sudo ln -s /usr/local/bin/use-brew /usr/local/bin/apt \
     && sudo ln -s /usr/local/bin/use-brew /usr/local/bin/apt-get
 
-# Copy setup UI server, static files, and managed Umbrel context.
+# Copy setup UI server, static files, and managed platform context.
 # OpenClaw has passwordless sudo in this image, so root ownership is not a hard
 # read-only boundary. These files intentionally live outside /data so container
 # runtime edits are disposable and image updates overwrite the managed context.
