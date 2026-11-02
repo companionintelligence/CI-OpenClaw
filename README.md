@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/companionintelligence/.github/main/profile/assets/icons/companion-openclaw.png" width="96" height="96" alt="Companion OpenClaw icon">
+</p>
+
 <h1 align="center">CI-OpenClaw</h1>
 
 <p align="center"><strong>A Docker image for running OpenClaw on the Companion Intelligence (CI) marketplace.</strong></p>
