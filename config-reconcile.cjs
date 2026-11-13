@@ -1219,6 +1219,82 @@ function createConfigReconciler({
   }
 
   /**
+   * Keep the main chat session inside the model's window.
+   *
+   * On 2026-11-13 the main session overflowed a 64k window (`request (68394 tokens)
+   * exceeds the available context size (65536 tokens)`) and stayed stuck there. Three
+   * things fed it, and each has a switch in OpenClaw's own config (all four keys are in
+   * OpenClaw's strict schema, dist/zod-schema-*.js):
+   *
+   * - `agents.defaults.heartbeat.isolatedSession: true`. Heartbeats default to running
+   *   IN the main session, so every poll — and the tool output from whatever it chose
+   *   to check — piled up in the user's chat history for days. Isolated, each heartbeat
+   *   runs in a fresh `<main key>:heartbeat` session (heartbeat-runner: the
+   *   `useIsolatedSession` branch). Delivery still routes through the main session, and
+   *   Hub wake events stay queued on the main session, so they reach the user's next turn.
+   *
+   * - `agents.defaults.compaction.midTurnPrecheck.enabled: true`. The overflow came
+   *   mid-turn: a ~4k-token search result was appended and the next model call went out
+   *   over the window. With this off, OpenClaw sends it anyway and only learns from the
+   *   provider's 400 — and the llama.cpp error was not recovered by compaction. With it
+   *   on, OpenClaw checks pressure after tool results and before the next call, then
+   *   truncates tool results or compacts and retries.
+   *
+   * - `agents.defaults.compaction.mode: "safeguard"`. Chunked summarization, so the
+   *   compaction request itself fits a small window instead of sending the whole history
+   *   in one call. OpenClaw already writes this for new configs; older installs lack it.
+   *
+   * - `agents.defaults.contextPruning: { mode: "cache-ttl", ttl: "5m" }`. Soft-trims, then
+   *   clears, OLD tool results in the request (never on disk; the last three assistant
+   *   turns are never pruned). Off by default for every non-Anthropic provider. The 5m
+   *   TTL leaves back-to-back turns alone, so llama.cpp's prompt cache keeps hitting.
+   *
+   * Each is written only when unset: an operator's explicit choice wins.
+   */
+  function ensureContextBudgetDefaults(config) {
+    let changed = false;
+
+    const heartbeat = ensureRecordPathTracked(config, ["agents", "defaults", "heartbeat"]);
+    changed = heartbeat.replaced || changed;
+    if (heartbeat.node.isolatedSession === undefined) {
+      heartbeat.node.isolatedSession = true;
+      changed = true;
+      log.log("Patched config: heartbeats run in an isolated session");
+    }
+
+    const compaction = ensureRecordPathTracked(config, ["agents", "defaults", "compaction"]);
+    changed = compaction.replaced || changed;
+    if (compaction.node.mode === undefined) {
+      compaction.node.mode = "safeguard";
+      changed = true;
+      log.log("Patched config: compaction.mode=safeguard");
+    }
+    const precheck = ensureRecordPathTracked(config, [
+      "agents",
+      "defaults",
+      "compaction",
+      "midTurnPrecheck",
+    ]);
+    changed = precheck.replaced || changed;
+    if (precheck.node.enabled === undefined) {
+      precheck.node.enabled = true;
+      changed = true;
+      log.log("Patched config: enabled compaction.midTurnPrecheck");
+    }
+
+    const pruning = ensureRecordPathTracked(config, ["agents", "defaults", "contextPruning"]);
+    changed = pruning.replaced || changed;
+    if (pruning.node.mode === undefined) {
+      pruning.node.mode = "cache-ttl";
+      if (pruning.node.ttl === undefined) pruning.node.ttl = "5m";
+      changed = true;
+      log.log("Patched config: contextPruning mode=cache-ttl ttl=5m");
+    }
+
+    return changed;
+  }
+
+  /**
    * Register a vendored plugin by path and set its entry state.
    *
    * `options.enableEntry` distinguishes "installed and available" from "installed and
@@ -1893,6 +1969,10 @@ function createConfigReconciler({
     // Free web search + Chromium browser for appliance FUX (replaces --skip-search).
     changed = ensureWebAccessDefaults(config) || changed;
 
+    // Heartbeats out of the main session; precheck + pruning + chunked compaction so a
+    // long chat compacts instead of overflowing the window.
+    changed = ensureContextBudgetDefaults(config) || changed;
+
     // Enable the CI-Hub companion plugin (wake endpoint, app-event SSE) when Hub
     // injects MCP credentials. Tool access itself comes from the native
     // mcp.servers.ci-hub entry above, not this plugin.
@@ -2290,6 +2370,7 @@ function createConfigReconciler({
     ensureMemoryStoreToolAllowed,
     ensureMemorySearchEmbeddings,
     ensureWebAccessDefaults,
+    ensureContextBudgetDefaults,
     ensureOpenClawPlugin,
     // resolvers + discovery
     resolveOllamaBaseUrl,

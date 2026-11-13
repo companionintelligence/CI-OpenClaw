@@ -832,6 +832,45 @@ describe("memory wiring", () => {
     assert.strictEqual(ctx.cfg.ensureWebAccessDefaults(config), false);
   });
 
+  test("ensureContextBudgetDefaults isolates heartbeats and turns on precheck, pruning, safeguard", () => {
+    const config = { agents: { defaults: { model: { primary: "ci-hub/auto" } } } };
+    assert.strictEqual(ctx.cfg.ensureContextBudgetDefaults(config), true);
+    assert.strictEqual(config.agents.defaults.heartbeat.isolatedSession, true);
+    assert.strictEqual(config.agents.defaults.compaction.mode, "safeguard");
+    assert.strictEqual(config.agents.defaults.compaction.midTurnPrecheck.enabled, true);
+    assert.deepStrictEqual(config.agents.defaults.contextPruning, {
+      mode: "cache-ttl",
+      ttl: "5m",
+    });
+    assert.strictEqual(config.agents.defaults.model.primary, "ci-hub/auto");
+    // Idempotent: a second pass changes nothing, so the file does not churn.
+    assert.strictEqual(ctx.cfg.ensureContextBudgetDefaults(config), false);
+  });
+
+  test("ensureContextBudgetDefaults keeps an operator's explicit choices", () => {
+    const config = {
+      agents: {
+        defaults: {
+          heartbeat: { isolatedSession: false, every: "1h" },
+          compaction: { mode: "default", midTurnPrecheck: { enabled: false } },
+          contextPruning: { mode: "off" },
+        },
+      },
+    };
+    const before = structuredClone(config);
+    assert.strictEqual(ctx.cfg.ensureContextBudgetDefaults(config), false);
+    assert.deepStrictEqual(config, before);
+  });
+
+  test("ensureContextBudgetDefaults keeps an operator's ttl when it sets the mode", () => {
+    const config = { agents: { defaults: { contextPruning: { ttl: "1h" } } } };
+    ctx.cfg.ensureContextBudgetDefaults(config);
+    assert.deepStrictEqual(config.agents.defaults.contextPruning, {
+      ttl: "1h",
+      mode: "cache-ttl",
+    });
+  });
+
   test("ensureWebAccessDefaults does not clobber an operator-chosen search provider", () => {
     const config = { tools: { web: { search: { enabled: true, provider: "brave" } } } };
     ctx.cfg.ensureWebAccessDefaults(config);
@@ -2443,17 +2482,20 @@ describe("malformed nodes on an inactive feature path", () => {
     });
   }
 
-  test("a minimal config gains no empty agents/hooks/mcp nodes", async () => {
+  test("a minimal config gains no empty hooks/mcp nodes", async () => {
     dataDir = makeDataDir({ config: {}, env: { OLLAMA_HOST: OLLAMA_DOWN } });
     const { cfg } = makeReconciler(dataDir);
     await cfg.reconcileConfig();
     const config = readCfg(dataDir);
-    // tools is intentionally written by ensureWebAccessDefaults (DDG + browser).
-    for (const key of ["agents", "hooks", "mcp"]) {
+    // tools is intentionally written by ensureWebAccessDefaults (DDG + browser), and
+    // agents.defaults by ensureContextBudgetDefaults — both with real values, never empty.
+    for (const key of ["hooks", "mcp"]) {
       assert.ok(!(key in config), `${key} must not be conjured onto a config that never had it`);
     }
     assert.strictEqual(config.tools.web.search.provider, "duckduckgo");
     assert.ok(config.tools.alsoAllow.includes("browser"));
+    assert.strictEqual(config.agents.defaults.heartbeat.isolatedSession, true);
+    assert.strictEqual(config.agents.defaults.compaction.midTurnPrecheck.enabled, true);
   });
 
   test("bails cleanly on a non-record top-level config", async () => {
