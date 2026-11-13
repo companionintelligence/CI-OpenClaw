@@ -1250,8 +1250,16 @@ function createConfigReconciler({
    *   TTL leaves back-to-back turns alone, so llama.cpp's prompt cache keeps hitting.
    *
    * Each is written only when unset: an operator's explicit choice wins.
+   *
+   * One exception: `agents.defaults.compaction.enabled: false` is removed. It was a hand
+   * edit from the 32k-window days (2026-11-09) to keep the request inside the window,
+   * and it outlived that: once a conversation outgrows the window, nothing compacts it,
+   * so every later turn overflows. A restart on 2026-11-13 brought it back from the
+   * Nov 9 `.bak` files after it had been gone. Reconcile runs on every boot, so removing
+   * it here keeps compaction on whatever restored the file. `CI_OPENCLAW_COMPACTION=off`
+   * is the deliberate way to keep it off.
    */
-  function ensureContextBudgetDefaults(config) {
+  function ensureContextBudgetDefaults(config, env = {}) {
     let changed = false;
 
     const heartbeat = ensureRecordPathTracked(config, ["agents", "defaults", "heartbeat"]);
@@ -1264,6 +1272,11 @@ function createConfigReconciler({
 
     const compaction = ensureRecordPathTracked(config, ["agents", "defaults", "compaction"]);
     changed = compaction.replaced || changed;
+    if (compaction.node.enabled === false && env.CI_OPENCLAW_COMPACTION !== "off") {
+      delete compaction.node.enabled;
+      changed = true;
+      log.log("Patched config: removed compaction.enabled=false (set CI_OPENCLAW_COMPACTION=off to keep it off)");
+    }
     if (compaction.node.mode === undefined) {
       compaction.node.mode = "safeguard";
       changed = true;
@@ -1971,7 +1984,7 @@ function createConfigReconciler({
 
     // Heartbeats out of the main session; precheck + pruning + chunked compaction so a
     // long chat compacts instead of overflowing the window.
-    changed = ensureContextBudgetDefaults(config) || changed;
+    changed = ensureContextBudgetDefaults(config, env) || changed;
 
     // Enable the CI-Hub companion plugin (wake endpoint, app-event SSE) when Hub
     // injects MCP credentials. Tool access itself comes from the native

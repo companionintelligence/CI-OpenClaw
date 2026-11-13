@@ -862,6 +862,21 @@ describe("memory wiring", () => {
     assert.deepStrictEqual(config, before);
   });
 
+  test("ensureContextBudgetDefaults turns compaction back on unless CI_OPENCLAW_COMPACTION=off", () => {
+    const config = { agents: { defaults: { compaction: { enabled: false, mode: "safeguard" } } } };
+    assert.strictEqual(ctx.cfg.ensureContextBudgetDefaults(config, {}), true);
+    assert.strictEqual("enabled" in config.agents.defaults.compaction, false);
+    assert.strictEqual(config.agents.defaults.compaction.mode, "safeguard");
+
+    const kept = { agents: { defaults: { compaction: { enabled: false } } } };
+    ctx.cfg.ensureContextBudgetDefaults(kept, { CI_OPENCLAW_COMPACTION: "off" });
+    assert.strictEqual(kept.agents.defaults.compaction.enabled, false);
+
+    const on = { agents: { defaults: { compaction: { enabled: true } } } };
+    ctx.cfg.ensureContextBudgetDefaults(on, {});
+    assert.strictEqual(on.agents.defaults.compaction.enabled, true);
+  });
+
   test("ensureContextBudgetDefaults keeps an operator's ttl when it sets the mode", () => {
     const config = { agents: { defaults: { contextPruning: { ttl: "1h" } } } };
     ctx.cfg.ensureContextBudgetDefaults(config);
