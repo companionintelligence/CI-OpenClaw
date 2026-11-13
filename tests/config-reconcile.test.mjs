@@ -840,7 +840,7 @@ describe("memory wiring", () => {
     assert.strictEqual(config.agents.defaults.compaction.midTurnPrecheck.enabled, true);
     assert.deepStrictEqual(config.agents.defaults.contextPruning, {
       mode: "cache-ttl",
-      ttl: "5m",
+      ttl: "1m",
     });
     assert.strictEqual(config.agents.defaults.model.primary, "ci-hub/auto");
     // Idempotent: a second pass changes nothing, so the file does not churn.

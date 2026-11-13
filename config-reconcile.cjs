@@ -1244,10 +1244,13 @@ function createConfigReconciler({
    *   compaction request itself fits a small window instead of sending the whole history
    *   in one call. OpenClaw already writes this for new configs; older installs lack it.
    *
-   * - `agents.defaults.contextPruning: { mode: "cache-ttl", ttl: "5m" }`. Soft-trims, then
+   * - `agents.defaults.contextPruning: { mode: "cache-ttl", ttl: "1m" }`. Soft-trims, then
    *   clears, OLD tool results in the request (never on disk; the last three assistant
-   *   turns are never pruned). Off by default for every non-Anthropic provider. The 5m
-   *   TTL leaves back-to-back turns alone, so llama.cpp's prompt cache keeps hitting.
+   *   turns are never pruned). Off by default for every non-Anthropic provider. Pruning
+   *   waits for the TTL, and 5m was too long: a follow-up 2.5 minutes after an answer
+   *   (2026-11-13) still carried the first question's ~38k characters of search results,
+   *   and overflowed. At 1m a quick back-and-forth keeps llama.cpp's prompt cache; a
+   *   pause long enough to read an answer trims what the answer already used.
    *
    * Each is written only when unset: an operator's explicit choice wins.
    *
@@ -1299,9 +1302,9 @@ function createConfigReconciler({
     changed = pruning.replaced || changed;
     if (pruning.node.mode === undefined) {
       pruning.node.mode = "cache-ttl";
-      if (pruning.node.ttl === undefined) pruning.node.ttl = "5m";
+      if (pruning.node.ttl === undefined) pruning.node.ttl = "1m";
       changed = true;
-      log.log("Patched config: contextPruning mode=cache-ttl ttl=5m");
+      log.log("Patched config: contextPruning mode=cache-ttl ttl=1m");
     }
 
     return changed;
