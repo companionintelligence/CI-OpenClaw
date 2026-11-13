@@ -18,8 +18,24 @@ const PROFILE_PATH = "ci-server://profile";
 const CI_MEMORY_FORGET_GUIDANCE =
   "To forget or delete something in Companion Memory, find its id with `ci_run_intent` (`places_find`, `people_find` or `knowledge_search`), then call `ci_run_intent` with `memory_forget` and that id. The owner approves the forget on their own device.";
 
+// When the packaged app serves Memory's intents as native MCP tools (mcp.servers.ci-memory,
+// written by config-reconcile), it names that server here and turns ci_run_intent off.
+// OpenClaw prefixes each MCP tool with its server, so the forget line names them that way.
+function memoryMcpForgetGuidance(server) {
+  const tool = (name) => `\`${server}__${name}\``;
+  return `To forget or delete something in Companion Memory, find its id with ${tool("places_find")}, ${tool("people_find")} or ${tool("knowledge_search")}, then call ${tool("memory_forget")} with that id. The owner approves the forget on their own device: when the result says it is awaiting approval, tell the user you have asked and do not call it again for the same request.`;
+}
+
+// The MCP server carrying Memory's intents, from CI_MEMORY_MCP_SERVER; "" when there is none.
+// Only a plain server name is accepted, since it is spliced into the bootstrap guidance.
+function memoryMcpServer() {
+  const name = normalizeString(process.env.CI_MEMORY_MCP_SERVER);
+  return /^[A-Za-z0-9_-]+$/.test(name) ? name : "";
+}
+
 function bootstrapGuidance() {
   const runIntent = featureEnabled("CI_INTENTS_ENABLED") && featureEnabled("CI_INTENT_TOOLS_ENABLED");
+  const mcpServer = runIntent ? "" : memoryMcpServer();
   return [
     "",
     "## Companion Intelligence Memory",
@@ -29,7 +45,7 @@ function bootstrapGuidance() {
     "Do not create or edit `USER.md`, `MEMORY.md`, or `memory/*.md` for memory storage while this backend is active.",
     "Do not inspect, query, edit, or write OpenClaw's local memory SQLite files — the `.openclaw/memory` directory wherever OpenClaw's state directory lives (`/data/.openclaw/memory` in the packaged app, `~/.openclaw/memory` or `%USERPROFILE%\\.openclaw\\memory` on your own install); they are internal cache/index storage, not the Companion Intelligence memory system.",
     "Use `memory_search` for topical recall and `memory_get` with `ci-server://profile` for the CI-Server profile block.",
-    ...(runIntent ? [CI_MEMORY_FORGET_GUIDANCE] : []),
+    ...(runIntent ? [CI_MEMORY_FORGET_GUIDANCE] : mcpServer ? [memoryMcpForgetGuidance(mcpServer)] : []),
     "When a wake or message says `Memory dispatch job <id>`, call `ci_dispatch_packet` with that id, do the briefing, then `ci_dispatch_checkpoint` (status completed, or blocked if you need the user). Push every meaningful step. Do not wait for Memory to pull your session.",
   ].join("\n");
 }

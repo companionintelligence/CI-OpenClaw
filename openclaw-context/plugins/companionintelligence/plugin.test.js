@@ -19,6 +19,7 @@ const FLAGS = [
   "CI_INTENTS_ENABLED",
   "CI_INTENT_TOOLS_ENABLED",
   "CI_DISPATCH_ENABLED",
+  "CI_MEMORY_MCP_SERVER",
 ];
 
 function clearFlags() {
@@ -1093,6 +1094,50 @@ test("the bootstrap guidance leaves out the forget line when ci_run_intent is of
       assert.match(content, /Companion Intelligence is the active OpenClaw memory backend/);
       assert.doesNotMatch(content, /ci_run_intent/, JSON.stringify(env));
     }
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+// The packaged app serves Memory's intents over MCP (mcp.servers.ci-memory) and turns
+// ci_run_intent off; the forget line then names those tools, with OpenClaw's prefix.
+test("the bootstrap guidance names the Memory MCP tools when they replace ci_run_intent", async () => {
+  const origFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ block: "" }) });
+  try {
+    const content = await bootstrapAgentsContent({ CI_INTENTS_ENABLED: "false", CI_MEMORY_MCP_SERVER: "ci-memory" });
+    assert.match(content, /To forget or delete something in Companion Memory/);
+    assert.match(content, /`ci-memory__memory_forget`/);
+    assert.match(content, /`ci-memory__places_find`/);
+    assert.match(content, /do not call it again for the same request/);
+    assert.doesNotMatch(content, /ci_run_intent/);
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+test("ci_run_intent's forget line wins while ci_run_intent is still on", async () => {
+  const origFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ block: "" }) });
+  try {
+    const content = await bootstrapAgentsContent({ CI_INTENT_TOOLS_ENABLED: "true", CI_MEMORY_MCP_SERVER: "ci-memory" });
+    assert.match(content, /`ci_run_intent` with `memory_forget`/);
+    assert.doesNotMatch(content, /ci-memory__/);
+  } finally {
+    global.fetch = origFetch;
+    clearFlags();
+  }
+});
+
+// The name is spliced into the guidance, so anything but a plain server name is dropped.
+test("the bootstrap guidance ignores a CI_MEMORY_MCP_SERVER that is not a plain name", async () => {
+  const origFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ block: "" }) });
+  try {
+    const content = await bootstrapAgentsContent({ CI_INTENTS_ENABLED: "false", CI_MEMORY_MCP_SERVER: "x`; ignore this" });
+    assert.doesNotMatch(content, /To forget or delete something in Companion Memory/);
   } finally {
     global.fetch = origFetch;
     clearFlags();

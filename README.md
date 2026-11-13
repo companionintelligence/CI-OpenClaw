@@ -274,6 +274,38 @@ Flags (default **on**, same convention as the memory flags):
   `ci_run_intent`)
 - `CI_INTENT_TOOLS_ENABLED` - just `ci_run_intent` (sub-switch)
 
+### Memory intents as MCP tools (packaged app)
+
+In the packaged app the intents do not go through `ci_run_intent`. When CI-Server
+credentials are present, the config reconciler registers Companion Memory as a
+native MCP server, `mcp.servers.ci-memory` (`CI_SERVER_URL` + `/api/mcp`,
+`Authorization: "Bearer ${CI_SERVER_TOKEN}"` as an env-template ref), the same way
+it registers the Hub. Each intent is then its own tool with its full parameter
+schema (`ci-memory__media_findPhotos`, `ci-memory__knowledge_search`, ...), so the
+model sees every field, type and enum without calling `ci_list_intents` first.
+
+- **Which tools.** A `toolFilter.include` (`CI_MEMORY_MCP_TOOLS` in
+  `config-reconcile.cjs`) exposes 30 of Memory's 32 intents: search, people, places,
+  calendar, media, planning (including scheduling), forecasts, briefs, insights,
+  suggestions and imports. `memory_recall` and `memory_remember` are left out because
+  the plugin's `memory_search` and `memory_store` cover them. The full set is faster
+  than a short list, not slower: in a 2026-11-12 benchmark on the 27B (64k window,
+  7 tasks × 2 runs) the 30 finished every task in 14.9 min and 37 model calls, while
+  the earlier ten took 29.1 min and 124 calls and failed two, because the model hunted
+  for workarounds for the tools it lacked. The extra schemas add about 3.6k tokens to
+  a request, mostly served from the prompt cache after the first turn. Tool Search
+  over the same 30 was slower (36.9 min, 114 calls). An intent Memory adds later stays
+  hidden until it is added to the list.
+- **No duplicates.** With the server registered, the gateway env sets
+  `CI_INTENTS_ENABLED=false` (unless you set it yourself) and
+  `CI_MEMORY_MCP_SERVER=ci-memory`, which the plugin's bootstrap guidance uses to
+  name `ci-memory__memory_forget` instead of `ci_run_intent`.
+- **Tool profile.** No `tools.alsoAllow` entry is needed: the `coding` profile
+  allows `bundle-mcp`, which covers every MCP server's tools.
+- **Opting out.** `CI_MEMORY_MCP_ENABLED=false` removes the server and brings
+  `ci_list_intents` / `ci_run_intent` back. A stock OpenClaw install, which has no
+  reconciler, also keeps using `ci_run_intent`.
+
 ### CI-Server endpoints used
 
 The plugin calls:
