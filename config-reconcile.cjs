@@ -106,6 +106,10 @@ const HUB_AUTHORITATIVE_ENV_KEYS = [
   "HUB_MCP_API_KEY",
   "HUB_WAKE_SECRET",
   "HUB_MCP_ENABLED",
+  // Not Hub-sent, but read by both reconcile (the ci-memory MCP entry) and the
+  // gateway env (the plugin's intent tools): a compose-level value must reach both,
+  // or one half switches without the other.
+  "CI_MEMORY_MCP_ENABLED",
 ];
 
 // ---------------------------------------------------------------------------
@@ -193,6 +197,95 @@ function hasCiServerCredentials(env) {
     env.CI_SERVER_TOKEN &&
     env.CI_SERVER_ENABLED !== "false"
   );
+}
+
+/**
+ * Companion Memory's intents as native MCP tools, under `mcp.servers.ci-memory`.
+ *
+ * The plugin cannot register one tool per intent (OpenClaw only accepts tools named in
+ * openclaw.plugin.json, and only during register()), so it offers one generic
+ * `ci_run_intent` whose `params` is a free-form object. That shape cost the model every
+ * field list, enum and type: it had to call ci_list_intents first, and nothing guided
+ * the arguments it wrote. Memory serves the same intents over MCP with their full
+ * schemas, so they load through OpenClaw's own MCP client instead, as the Hub's do.
+ *
+ * Every intent Memory serves except memory_recall and memory_remember, which overlap the
+ * plugin's memory_search / memory_store. A short list costs more than it saves: measured
+ * 2026-11-12 on the 27B at a 64k window (7 tasks x 2 runs), these 30 finished every task
+ * in 14.9 min and 37 model calls, where the earlier ten took 29.1 min and 124 calls and
+ * failed two. Without a tool for a request (the import inbox, the forecast) the model
+ * hunts for a workaround, and without planning_scheduleTask it set a date and told the
+ * user the task was on the calendar. The 20 extra schemas add ~3.6k tokens to a request
+ * (47.4k vs 43.8k on a cold first turn), paid once and then served from the prompt cache.
+ * Tool Search over the same 30 was slower still (36.9 min, 114 calls). Names are Memory's
+ * own (the filter matches before OpenClaw adds the `ci-memory__` prefix); an intent Memory
+ * adds later stays hidden until it is listed here.
+ */
+const CI_MEMORY_MCP_SERVER = "ci-memory";
+const CI_MEMORY_MCP_TOOLS = [
+  // Search and recall
+  "knowledge_search",
+  "knowledge_preferences",
+  "memory_forget",
+  // People, places, calendar, media
+  "people_find",
+  "people_relationships",
+  "places_find",
+  "places_next",
+  "calendar_findEvents",
+  "media_findPhotos",
+  "media_entertainmentPreferences",
+  "media_streamingAvailability",
+  // Planning
+  "planning_findTasks",
+  "planning_createTask",
+  "planning_updateTask",
+  "planning_completeTask",
+  "planning_scheduleTask",
+  "planning_plannedBlocks",
+  // Forecasts, briefs, insights, suggestions
+  "forecast_read",
+  "forecast_calibration",
+  "brief_list",
+  "insights_explain",
+  "anomalies_recent",
+  "suggestions_list",
+  "suggestions_feedback",
+  // Imports
+  "import_list_sources",
+  "import_scan_inbox",
+  "import_recognize_path",
+  "import_import_path",
+  "import_import_inbox",
+  "import_run_status",
+];
+
+/** Is Memory reachable over MCP? CI-Server credentials, unless CI_MEMORY_MCP_ENABLED=false. */
+function hasMemoryMcp(env) {
+  return hasCiServerCredentials(env) && env.CI_MEMORY_MCP_ENABLED !== "false";
+}
+
+/**
+ * Memory's MCP endpoint: CI_SERVER_URL + `/api/mcp`. The plugin accepts a base that
+ * already ends in `/api/mcp` (normalizeBaseUrl), so that suffix is not doubled here.
+ */
+function canonicalMemoryMcpUrl(env) {
+  const base = String(env.CI_SERVER_URL || "").trim().replace(/\/+$/, "");
+  if (!base) return "";
+  return base.endsWith("/api/mcp") ? base : `${base}/api/mcp`;
+}
+
+/**
+ * The gateway env with Memory-over-MCP's plugin defaults applied: tell the plugin which
+ * server carries the intents (CI_MEMORY_MCP_SERVER, for its forget guidance) and turn
+ * off ci_list_intents / ci_run_intent, which would offer every intent a second time.
+ * An operator's own CI_INTENTS_ENABLED wins. Pure: returns a new object.
+ */
+function applyMemoryMcpEnv(env) {
+  if (!hasMemoryMcp(env)) return env;
+  const next = { ...env, CI_MEMORY_MCP_SERVER: CI_MEMORY_MCP_SERVER };
+  if (String(env.CI_INTENTS_ENABLED ?? "").trim() === "") next.CI_INTENTS_ENABLED = "false";
+  return next;
 }
 
 /** Hub MCP counterpart of hasCiServerCredentials. Either base URL will do. */
@@ -498,7 +591,7 @@ function createConfigReconciler({
   // are taken from the live container env so a stale persisted copy can't shadow
   // them.
   function buildChildEnv() {
-    return applyHubAuthoritativeEnv({ ...containerEnv, ...readEnv() });
+    return applyMemoryMcpEnv(applyHubAuthoritativeEnv({ ...containerEnv, ...readEnv() }));
   }
 
   /**
@@ -696,6 +789,41 @@ function createConfigReconciler({
     }
     servers["ci-hub"] = desired;
     log.log(`Patched config: registered ci-hub MCP server (Streamable HTTP, ${url})`);
+    return true;
+  }
+
+  // Register (or remove) Companion Memory as a native MCP server under
+  // `mcp.servers.ci-memory`; see CI_MEMORY_MCP_TOOLS for why and which tools. The
+  // token is the env-template `${CI_SERVER_TOKEN}`, as the Hub's is, so the raw key
+  // never lands in openclaw.json. Returns true if it changed the config.
+  function ensureMemoryMcpServer(config, env) {
+    const url = hasMemoryMcp(env) ? canonicalMemoryMcpUrl(env) : "";
+
+    if (!url) {
+      const existing = config.mcp && config.mcp.servers && config.mcp.servers[CI_MEMORY_MCP_SERVER];
+      if (existing) {
+        delete config.mcp.servers[CI_MEMORY_MCP_SERVER];
+        log.log("Patched config: removed ci-memory MCP server (Memory not connected, or CI_MEMORY_MCP_ENABLED=false)");
+        return true;
+      }
+      return false;
+    }
+
+    const { node: servers, replaced } = ensureRecordPathTracked(config, ["mcp", "servers"]);
+    const desired = {
+      url,
+      transport: "streamable-http",
+      headers: { Authorization: "Bearer ${CI_SERVER_TOKEN}" },
+      connectionTimeoutMs: 60_000,
+      requestTimeoutMs: 180_000,
+      toolFilter: { include: [...CI_MEMORY_MCP_TOOLS] },
+    };
+
+    if (JSON.stringify(servers[CI_MEMORY_MCP_SERVER]) === JSON.stringify(desired)) {
+      return replaced;
+    }
+    servers[CI_MEMORY_MCP_SERVER] = desired;
+    log.log(`Patched config: registered ci-memory MCP server (Streamable HTTP, ${url}, ${CI_MEMORY_MCP_TOOLS.length} tools)`);
     return true;
   }
 
@@ -1752,6 +1880,10 @@ function createConfigReconciler({
     // mcp.servers.ci-hub), gated on Hub MCP credentials.
     changed = ensureHubMcpServer(config, env) || changed;
 
+    // Memory's intents as native MCP tools (mcp.servers.ci-memory), gated on CI-Server
+    // credentials. buildChildEnv turns the plugin's ci_run_intent off to match.
+    changed = ensureMemoryMcpServer(config, env) || changed;
+
     // Let the Hub push events to the agent through OpenClaw's own wake hook
     // (POST /hooks/wake), gated on HUB_WAKE_SECRET. This is the transport the Hub's
     // agent-notify module targets; the ci-hub plugin's hand-rolled wake route never
@@ -2150,6 +2282,7 @@ function createConfigReconciler({
     applyHubAuthoritativeEnv,
     // writers
     ensureHubMcpServer,
+    ensureMemoryMcpServer,
     ensureHooksWake,
     disableBundledSessionMemoryHook,
     ensureMemoryConversationAccess,
@@ -2199,6 +2332,11 @@ module.exports = {
   hasCiServerCredentials,
   hasHubMcpCredentials,
   canonicalHubMcpUrl,
+  hasMemoryMcp,
+  canonicalMemoryMcpUrl,
+  applyMemoryMcpEnv,
+  CI_MEMORY_MCP_SERVER,
+  CI_MEMORY_MCP_TOOLS,
   normalizeEmbeddingsBaseUrl,
   isEmbeddingModel,
   buildOllamaModelEntry,
