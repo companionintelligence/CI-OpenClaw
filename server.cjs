@@ -22,7 +22,7 @@ const {
   createConfigReconciler,
   hasCiServerCredentials,
 } = require("./config-reconcile.cjs");
-const { buildGatewayHeaders, gatewayRootRedirect } = require("./proxy-headers.cjs");
+const { buildGatewayHeaders, gatewayRequestPath, gatewayRootRedirect } = require("./proxy-headers.cjs");
 const { createGatewayHealthTracker, handleGatewayHealthRequest } = require("./gateway-health.cjs");
 const {
   createHubHandoutRetry,
@@ -415,7 +415,9 @@ function proxyToOpenclaw(req, res) {
   const options = {
     hostname: "127.0.0.1",
     port: OPENCLAW_PORT,
-    path: req.url,
+    // The Hub's POST /hooks/wake goes to the hook mapping that reaches the heartbeat turn,
+    // when the config holds it (only with HUB_WAKE_SECRET set). Read per wake, not per request.
+    path: gatewayRequestPath(req.url, cfg.isHubWakeMapped),
     method: req.method,
     headers: headers,
   };

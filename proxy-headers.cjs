@@ -23,6 +23,36 @@ const crypto = require("crypto");
  */
 const HOOKS_PATH_PREFIX = "/hooks";
 
+/**
+ * Where the Hub's wake goes on the gateway: OpenClaw's hook mapping of that name, which
+ * config-reconcile.cjs writes (HUB_WAKE_MAPPING_PATH there; the two must stay equal).
+ *
+ * The Hub posts to `/hooks/wake` (its listing's `wake_endpoint`). OpenClaw's own wake route
+ * queues the text on the main session, while the heartbeat it asks for runs in the
+ * `<main>:heartbeat` session and reads only what waits there, so the agent never saw the
+ * Hub's text (CI-OpenClaw#114). The mapping queues it on the heartbeat's session. A mapping
+ * cannot take the name `wake` (OpenClaw's own route answers first), so the proxy renames the
+ * path. Only that exact path: `/hooks/agent` and any other hook keep their own.
+ */
+const HUB_WAKE_MAPPING_PATH = "ci-hub-wake";
+
+/**
+ * The path to forward a request to on the gateway: the Hub's wake moves to its mapping.
+ *
+ * `isHubWakeMapped` says whether the gateway's config holds that mapping. It only does while
+ * HUB_WAKE_SECRET is set; without it an operator may keep hooks on with a token of their own,
+ * and their `POST /hooks/wake` must reach OpenClaw's own route rather than a 404. Called only
+ * for the wake path.
+ */
+function gatewayRequestPath(rawUrl, isHubWakeMapped = () => true) {
+  const target = String(rawUrl || "");
+  const queryStart = target.indexOf("?");
+  const pathname = queryStart === -1 ? target : target.slice(0, queryStart);
+  if (pathname !== `${HOOKS_PATH_PREFIX}/wake`) return target;
+  if (!isHubWakeMapped()) return target;
+  return `${HOOKS_PATH_PREFIX}/${HUB_WAKE_MAPPING_PATH}${queryStart === -1 ? "" : target.slice(queryStart)}`;
+}
+
 /** Whether a proxied request is bound for one of OpenClaw's hook routes. */
 function isHookPath(rawUrl) {
   const pathname = String(rawUrl || "").split("?")[0];
@@ -218,6 +248,8 @@ module.exports = {
   isCurrentTokenTag,
   gatewayRootRedirect,
   HOOKS_PATH_PREFIX,
+  HUB_WAKE_MAPPING_PATH,
+  gatewayRequestPath,
   isHookPath,
   isProxyAttributionHeader,
   stripProxyAttributionHeaders,

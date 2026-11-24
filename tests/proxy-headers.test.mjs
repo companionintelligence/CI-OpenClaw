@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 const require = createRequire(import.meta.url);
 const {
   buildGatewayHeaders,
+  gatewayRequestPath,
   isHookPath,
   gatewayRootRedirect,
   gatewayTokenTag,
@@ -75,6 +76,36 @@ describe("buildGatewayHeaders: hook routes must keep their own auth", () => {
     assert.equal(isHookPath("/hooks/wake?mode=now"), true);
     // ...and cannot fake one either: the path, not the query, decides.
     assert.equal(isHookPath("/api/status?next=/hooks/wake"), false);
+  });
+
+  // CI-OpenClaw#114: the Hub's wake goes to the mapping that queues it on the heartbeat's session.
+  test("forwards the Hub's wake to its hook mapping, query and all", () => {
+    assert.equal(gatewayRequestPath("/hooks/wake"), "/hooks/ci-hub-wake");
+    assert.equal(gatewayRequestPath("/hooks/wake?mode=now"), "/hooks/ci-hub-wake?mode=now");
+  });
+
+  test("leaves the wake on OpenClaw's own route when the mapping is not configured", () => {
+    assert.equal(gatewayRequestPath("/hooks/wake", () => false), "/hooks/wake");
+    assert.equal(gatewayRequestPath("/hooks/wake?mode=now", () => false), "/hooks/wake?mode=now");
+  });
+
+  test("asks about the mapping only for the wake path", () => {
+    let asked = 0;
+    const isMapped = () => {
+      asked += 1;
+      return true;
+    };
+    gatewayRequestPath("/hooks/agent", isMapped);
+    gatewayRequestPath("/", isMapped);
+    assert.equal(asked, 0);
+    assert.equal(gatewayRequestPath("/hooks/wake", isMapped), "/hooks/ci-hub-wake");
+    assert.equal(asked, 1);
+  });
+
+  test("leaves every other path as it is", () => {
+    for (const url of ["/hooks/agent", "/hooks/wakeup", "/hooks/wake/", "/hooks", "/", "/api/status?next=/hooks/wake", "/hooks/ci-hub-wake"]) {
+      assert.equal(gatewayRequestPath(url), url);
+    }
   });
 
   test("a lookalike prefix is NOT treated as a hook route", () => {
