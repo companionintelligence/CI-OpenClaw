@@ -12,6 +12,7 @@ import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 
 import {
   buildOllamaModelEntry,
@@ -481,6 +482,103 @@ describe("ensureHooksWake", () => {
     const config = {};
     assert.strictEqual(ctx.cfg.ensureHooksWake(config, WAKE), true);
     assert.strictEqual(ctx.cfg.ensureHooksWake(config, WAKE), false);
+  });
+
+  // CI-OpenClaw#114: OpenClaw's own /hooks/wake queues the text on the main session, and the
+  // heartbeat it asks for runs in `<main>:heartbeat` (isolatedSession) and reads only what waits
+  // there. The Hub's wake goes through this mapping instead (the proxy renames the path), so the
+  // text lands where the heartbeat reads it.
+  test("routes the Hub's wake through a mapping onto the heartbeat's own session", () => {
+    const config = {};
+    ctx.cfg.ensureHooksWake(config, WAKE);
+    assert.deepStrictEqual(config.hooks.mappings, [
+      {
+        id: "ci-hub-wake",
+        match: { path: "ci-hub-wake" },
+        action: "wake",
+        wakeMode: "now",
+        sessionKey: "main:heartbeat",
+        textTemplate: "{{text}}",
+      },
+    ]);
+  });
+
+  test("names the heartbeat session after session.mainKey when one is set", () => {
+    const config = { session: { mainKey: "work" } };
+    ctx.cfg.ensureHooksWake(config, WAKE);
+    assert.strictEqual(config.hooks.mappings[0].sessionKey, "work:heartbeat");
+  });
+
+  // Heartbeats in the main session (an operator's isolatedSession: false) already read
+  // OpenClaw's own wake there, so the mapping must not move the text to a side session.
+  test("leaves the session to OpenClaw when heartbeats are not isolated", () => {
+    const config = { agents: { defaults: { heartbeat: { isolatedSession: false } } } };
+    ctx.cfg.ensureHooksWake(config, WAKE);
+    assert.strictEqual(config.hooks.mappings[0].id, "ci-hub-wake");
+    assert.strictEqual("sessionKey" in config.hooks.mappings[0], false);
+  });
+
+  // The proxy renames /hooks/wake only when this says the mapping is there: without
+  // HUB_WAKE_SECRET an operator's own hook token keeps OpenClaw's own wake route.
+  test("hasHubWakeMapping follows the mapping in and out", () => {
+    const reconcileModule = createRequire(import.meta.url)("../config-reconcile.cjs");
+    const config = {};
+    assert.strictEqual(reconcileModule.hasHubWakeMapping(config), false);
+    ctx.cfg.ensureHooksWake(config, WAKE);
+    assert.strictEqual(reconcileModule.hasHubWakeMapping(config), true);
+    ctx.cfg.ensureHooksWake(config, {});
+    assert.strictEqual(reconcileModule.hasHubWakeMapping(config), false);
+    assert.strictEqual(reconcileModule.hasHubWakeMapping({ hooks: { enabled: true, token: "theirs" } }), false);
+  });
+
+  // A static mapping key needs no caller-chosen sessions, so the pin stays where it was.
+  test("keeps allowRequestSessionKey off with the mapping in place", () => {
+    const config = {};
+    ctx.cfg.ensureHooksWake(config, WAKE);
+    assert.strictEqual(config.hooks.allowRequestSessionKey, false);
+  });
+
+  test("keeps an operator's own mappings, after the Hub's", () => {
+    const theirs = { id: "github", match: { path: "github" }, action: "agent", messageTemplate: "{{action}}" };
+    const config = { hooks: { mappings: [theirs] } };
+    assert.strictEqual(ctx.cfg.ensureHooksWake(config, WAKE), true);
+    assert.deepStrictEqual(
+      config.hooks.mappings.map((m) => m.id),
+      ["ci-hub-wake", "github"],
+    );
+    assert.deepStrictEqual(config.hooks.mappings[1], theirs);
+  });
+
+  test("puts back a Hub mapping someone edited", () => {
+    const config = {};
+    ctx.cfg.ensureHooksWake(config, WAKE);
+    config.hooks.mappings[0].sessionKey = "main";
+    assert.strictEqual(ctx.cfg.ensureHooksWake(config, WAKE), true);
+    assert.strictEqual(config.hooks.mappings[0].sessionKey, "main:heartbeat");
+    assert.strictEqual(config.hooks.mappings.length, 1);
+  });
+
+  test("takes the Hub mapping away with the hook, and only that one", () => {
+    const theirs = { id: "github", match: { path: "github" }, action: "agent", messageTemplate: "{{action}}" };
+    const config = { hooks: { mappings: [theirs] } };
+    ctx.cfg.ensureHooksWake(config, WAKE);
+    assert.strictEqual(ctx.cfg.ensureHooksWake(config, {}), true);
+    assert.deepStrictEqual(config.hooks.mappings, [theirs]);
+
+    const ours = {};
+    ctx.cfg.ensureHooksWake(ours, WAKE);
+    ctx.cfg.ensureHooksWake(ours, {});
+    assert.strictEqual(ours.hooks, undefined);
+  });
+
+  // The two modules cannot share the constant (config-reconcile requires nothing of ours), so
+  // this keeps them from drifting: a rename on one side would send every wake to a 404.
+  test("names the same mapping path the proxy forwards the Hub's wake to", () => {
+    const proxy = createRequire(import.meta.url)("../proxy-headers.cjs");
+    const config = {};
+    ctx.cfg.ensureHooksWake(config, WAKE);
+    assert.strictEqual(config.hooks.mappings[0].match.path, proxy.HUB_WAKE_MAPPING_PATH);
+    assert.strictEqual(proxy.gatewayRequestPath("/hooks/wake"), `/hooks/${config.hooks.mappings[0].match.path}`);
   });
 
   // The bundled session-memory hook lives under the same `hooks` node. Enabling the wake

@@ -55,6 +55,12 @@ const MEMORY_EMBEDDING_PROVIDER = "openai-compatible";
 // openclaw.json. Same pattern as the ci-hub MCP server's `Bearer ${HUB_MCP_API_KEY}`.
 const HOOKS_WAKE_TOKEN_ENV_REF = "${HUB_WAKE_SECRET}";
 
+// The hook mapping the Hub's wake runs through: the setup-server proxy sends the Hub's
+// `POST /hooks/wake` to `POST /hooks/<this path>` (proxy-headers.cjs, HUB_WAKE_MAPPING_PATH;
+// the two must stay equal). See hubWakeMapping below for why.
+const HUB_WAKE_MAPPING_ID = "ci-hub-wake";
+const HUB_WAKE_MAPPING_PATH = "ci-hub-wake";
+
 // Keys the Hub injects into the container environment as the source of truth.
 // These must never be shadowed by a stale value persisted in .env — e.g. a
 // token left behind by a prior install whose data dir survived an incomplete
@@ -122,6 +128,19 @@ const HUB_AUTHORITATIVE_ENV_KEYS = [
 // assigning a property to a scalar silently no-ops in sloppy mode.
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Whether `config` routes the Hub's wake through our hook mapping: hooks on and the mapping
+ * present. The setup-server proxy renames `/hooks/wake` to the mapping's path only then
+ * (proxy-headers.cjs, gatewayRequestPath); otherwise an operator's own wake would 404.
+ */
+function hasHubWakeMapping(config) {
+  const hooks = isPlainObject(config) ? config.hooks : undefined;
+  if (!isPlainObject(hooks) || hooks.enabled !== true || !Array.isArray(hooks.mappings)) return false;
+  return hooks.mappings.some(
+    (m) => isPlainObject(m) && m.id === HUB_WAKE_MAPPING_ID && isPlainObject(m.match) && m.match.path === HUB_WAKE_MAPPING_PATH,
+  );
 }
 
 /**
@@ -855,6 +874,60 @@ function createConfigReconciler({
   }
 
   /**
+   * The mapping the Hub's wake goes through, so its text reaches the heartbeat turn it asks for.
+   *
+   * OpenClaw's own `POST /hooks/wake` queues the text on the agent's MAIN session and asks
+   * for a heartbeat. Heartbeats here run in their own `<main>:heartbeat` session
+   * (`heartbeat.isolatedSession`, ensureContextBudgetDefaults), and in 2026.9.1 the heartbeat
+   * runner reads only the wake events queued on that session (heartbeat-runner preflight,
+   * `shouldInspectWakePendingEvents`). So every Hub wake ran a bare "[OpenClaw heartbeat poll]"
+   * turn, the agent answered NO_REPLY, and the text sat on the main session unread
+   * (CI-OpenClaw#114).
+   *
+   * A mapping's static `sessionKey` puts the text on the heartbeat session instead. Static
+   * keys need no `allowRequestSessionKey`, which stays pinned off below. `<main>` follows
+   * `session.mainKey`, as OpenClaw names the session.
+   *
+   * An operator who sets `isolatedSession: false` (ensureContextBudgetDefaults keeps that
+   * choice) has heartbeats run IN the main session, where OpenClaw's own wake already puts
+   * the text. A `:heartbeat` key there would move Hub wakes into a side session the user
+   * never sees, so the mapping leaves the session to OpenClaw. Unset counts as isolated:
+   * this runs before ensureContextBudgetDefaults writes the default.
+   */
+  function hubWakeMapping(config) {
+    const mapping = {
+      id: HUB_WAKE_MAPPING_ID,
+      match: { path: HUB_WAKE_MAPPING_PATH },
+      action: "wake",
+      wakeMode: "now",
+      textTemplate: "{{text}}",
+    };
+    const heartbeat = config.agents?.defaults?.heartbeat;
+    if (isPlainObject(heartbeat) && heartbeat.isolatedSession === false) return mapping;
+    const mainKey =
+      isPlainObject(config.session) && typeof config.session.mainKey === "string" && config.session.mainKey.trim()
+        ? config.session.mainKey.trim()
+        : "main";
+    return { ...mapping, sessionKey: `${mainKey}:heartbeat` };
+  }
+
+  /** Puts our mapping first in `hooks.mappings`, leaving any other mapping as it is. */
+  function ensureHubWakeMapping(hooks, config) {
+    const desired = hubWakeMapping(config);
+    const mappings = Array.isArray(hooks.mappings) ? hooks.mappings : [];
+    const others = mappings.filter((m) => !(isPlainObject(m) && m.id === HUB_WAKE_MAPPING_ID));
+    const next = [desired, ...others];
+    if (Array.isArray(hooks.mappings) && JSON.stringify(hooks.mappings) === JSON.stringify(next)) {
+      return false;
+    }
+    hooks.mappings = next;
+    log.log(
+      `Patched config: the Hub's wake runs through hook mapping ${HUB_WAKE_MAPPING_ID} (session ${desired.sessionKey || "main"})`,
+    );
+    return true;
+  }
+
+  /**
    * Enable OpenClaw's native wake hook, so the Hub can push events to the agent.
    *
    * The Hub POSTs app crashes, backup results and system alerts to `POST /hooks/wake`
@@ -897,6 +970,14 @@ function createConfigReconciler({
         delete existing.enabled;
         delete existing.token;
         delete existing.allowRequestSessionKey;
+        if (Array.isArray(existing.mappings)) {
+          const others = existing.mappings.filter((m) => !(isPlainObject(m) && m.id === HUB_WAKE_MAPPING_ID));
+          if (others.length > 0) {
+            existing.mappings = others;
+          } else {
+            delete existing.mappings;
+          }
+        }
         // ...and if that emptied the node entirely, take the node with it. Another helper
         // (disableBundledSessionMemoryHook) may have put `internal` here; only drop `hooks`
         // when nothing else is using it.
@@ -943,6 +1024,7 @@ function createConfigReconciler({
       changed = true;
       log.log("Patched config: pinned hooks.allowRequestSessionKey=false (no caller-chosen sessions)");
     }
+    changed = ensureHubWakeMapping(hooks, config) || changed;
     return changed;
   }
 
@@ -1230,8 +1312,9 @@ function createConfigReconciler({
    *   IN the main session, so every poll — and the tool output from whatever it chose
    *   to check — piled up in the user's chat history for days. Isolated, each heartbeat
    *   runs in a fresh `<main key>:heartbeat` session (heartbeat-runner: the
-   *   `useIsolatedSession` branch). Delivery still routes through the main session, and
-   *   Hub wake events stay queued on the main session, so they reach the user's next turn.
+   *   `useIsolatedSession` branch). Delivery still routes through the main session. A
+   *   heartbeat run there reads only the wake events queued on its own session, so the
+   *   Hub's wake goes through a mapping that queues it there (hubWakeMapping).
    *
    * - `agents.defaults.compaction.midTurnPrecheck.enabled: true`. The overflow came
    *   mid-turn: a ~4k-token search result was appended and the next model call went out
@@ -2397,6 +2480,7 @@ function createConfigReconciler({
     discoverOllamaModels,
     // state queries
     getGatewayToken,
+    isHubWakeMapped: () => hasHubWakeMapping(readConfig()),
     isConfigured,
     warnIfConfigClobbered,
     // orchestrator
@@ -2412,6 +2496,8 @@ module.exports = {
   HUB_AUTHORITATIVE_ENV_KEYS,
   HUB_CLOUD_PROVIDER_SPECS,
   CI_PLUGIN_ID,
+  HUB_WAKE_MAPPING_PATH,
+  hasHubWakeMapping,
   CI_MEMORY_PLUGIN_ID,
   CI_HUB_PLUGIN_ID,
   DUCKDUCKGO_PLUGIN_ID,
